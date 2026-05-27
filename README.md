@@ -59,77 +59,10 @@
 | Windows 11 | ✅ WSL2内で利用可能 | WSL2 + Docker Desktop で `/dev/kvm` が使える |
 | macOS | ❌ 非対応 | Docker DesktopのLinux VMがネストKVMをサポートしない |
 
-**QEMU起動パラメータ**（vmコンテナ内）:
-```bash
-qemu-system-x86_64 \
-  -enable-kvm \
-  -cpu host \
-  -m 4096 \
-  -drive file=/vm/desktop.qcow2,if=virtio \
-  -vnc 0.0.0.0:5900 \
-  -netdev user,id=net0 -device virtio-net,netdev=net0
-```
 
 ### Docker によるアプリ配備
 
 アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMは `/dev/kvm` をマウントした専用コンテナ内でQEMU/KVMを起動する。
-
-```yaml
-# docker-compose.yml (予定)
-services:
-  vm:
-    build:
-      context: ./vm
-      dockerfile: Dockerfile
-    devices:
-      - /dev/kvm:/dev/kvm          # KVMアクセラレーション
-    ports:
-      - "5900:5900"                 # VNC (内部通信用)
-    volumes:
-      - vm_data:/vm
-    environment:
-      - VM_IMAGE=/vm/desktop.qcow2
-      - VM_MEMORY=4096
-      - VM_VNC_PORT=5900
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo | ncat localhost 5900"]
-      interval: 10s
-      retries: 5
-
-  backend:
-    build: .
-    ports: ["8080:8080"]
-    environment:
-      - VNC_HOST=vm                 # Docker内部ネットワークでVMに接続
-      - VNC_PORT=5900
-      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
-      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      vm:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    build: ./frontend
-    ports: ["3000:3000"]
-    environment:
-      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
-      - NEXT_PUBLIC_WEBSOCKIFY_URL=http://localhost:6080
-    depends_on: [backend]
-
-  websockify:
-    image: ghcr.io/novnc/websockify:latest
-    command: vm:5900               # Docker内部ネットワーク経由でVMに接続
-    ports: ["6080:5900"]
-
-volumes:
-  vm_data:
-```
 
 **動作環境**:
 
@@ -138,45 +71,18 @@ volumes:
 | Linux | QEMU + KVM + Docker | Docker内KVM | ネイティブ動作、最速 |
 | Windows 11 | WSL2 + KVM有効化 + Docker Desktop | Docker内KVM | BIOSで仮想化有効 |
 
-**WSL2 の KVM 有効化**（Windows 11）:
-```powershell
-# Windows側
-wsl --install -d Ubuntu-24.04
-wsl --set-default-version 2
-# WSL2内でKVM利用可能か確認
-ls -la /dev/kvm  # 存在すればOK
-```
 
 ### LLM / AI モデル
 
 特定のプロバイダに依存せず、**LLMプロバイダ抽象化レイヤー**を設けて複数のAPIに対応する。
 
-```python
-# プロバイダ抽象化のイメージ
-class LLMProvider(Protocol):
-    """LLMプロバイダの共通インターフェース"""
-    async def decide_action(
-        self,
-        instruction: str,
-        screenshot: bytes,
-        action_history: list[Action],
-        current_state: AgentState,
-    ) -> AgentAction: ...
-
-class AnthropicProvider(LLMProvider): ...     # Claude (Computer Use)
-class OpenAIProvider(LLMProvider): ...         # GPT-4o / GPT-4.1
-class GoogleProvider(LLMProvider): ...         # Gemini
-class OllamaProvider(LLMProvider): ...         # ローカルモデル
-class OpenAICompatibleProvider(LLMProvider): ... # vLLM, LiteLLM等
-```
-
-| プロバイダ | モデル例 | 特徴 |
-|-----------|---------|------|
-| Anthropic | Claude Opus/Sonnet | Computer Useネイティブ対応、座標出力精度が高い |
-| OpenAI | GPT-4o / GPT-4.1 | 汎用性能高い、Vision API安定 |
-| Google | Gemini 2.5 Pro | コンテキスト長が長い、マルチモーダル性能高い |
-| ローカル (Ollama) | Llama 4, Qwen 等 | API費用ゼロ、プライバシー重視、精度は劣る |
-| OpenAI互換 (vLLM) | 任意 | 自前GPUで任意モデルをホスティング |
+| プロバイダ | モデル例 |
+|-----------|---------|
+| Anthropic | Claude (Computer Use) |
+| OpenAI | GPT-4o, GPT-4.1 |
+| Google | Gemini |
+| ローカル (Ollama) | Llama, Qwen 等 |
+| OpenAI互換 (vLLM) | 任意 |
 
 ### フロントエンド
 
@@ -279,8 +185,7 @@ class OpenAICompatibleProvider(LLMProvider): ... # vLLM, LiteLLM等
 
 ## ロードマップ
 
-- [ ] QEMU VMの基本管理（起動/停止/スナップショット）
-- [ ] Docker + Xvfb バックエンド（軽量開発用）
+- [ ] QEMU VMの基本管理（Dockerコンテナ内で起動/停止）
 - [ ] VNC経由の画面キャプチャと操作実行
 - [ ] LLMプロバイダ抽象化レイヤー（Anthropic / OpenAI / Gemini / Ollama）
 - [ ] 多段階エージェントパイプライン（計画→実行→検証→回復）
