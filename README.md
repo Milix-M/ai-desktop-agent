@@ -14,72 +14,108 @@
 
 ## アーキテクチャ
 
+アプリ全体を **Docker Compose** で完結させる。VMもDockerコンテナ内で動作する。
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  ブラウザ (Web UI)                                   │
-│  ┌───────────────────┐  ┌────────────────────────┐  │
-│  │  指示入力パネル     │  │  noVNC (VM画面ライブ)   │  │
-│  │  チャット/ログ      │  │  リアルタイム視聴       │  │
-│  └───────────────────┘  └────────────────────────┘  │
-└──────────────┬──────────────────────┬───────────────┘
-               │ WebSocket            │ WebSocket (noVNC)
-               ▼                      ▼
-┌─────────────────────────────────────────────────────┐
-│  バックエンドサーバー (Python / FastAPI)               │
-│  ┌──────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │  Chat API    │  │ Agent Loop  │  │websockify │  │
-│  │  (指示受付)   │  │  (AI制御)   │  │(VNC→WS中継)│  │
-│  └──────────────┘  └──────┬──────┘  └─────┬─────┘  │
-└──────────────────────────┬─────────────────┬────────┘
-                           │ VNCプロトコル    │
-                           ▼                  ▼
-┌─────────────────────────────────────────────────────┐
-│  QEMU VM (Linuxデスクトップ)                         │
-│  VNCサーバー :5900                                   │
-│  (Ubuntu + Xfce などの軽量DE)                        │
-└─────────────────────────────────────────────────────┘
+┌── Docker Compose ────────────────────────────────────────┐
+│                                                           │
+│  ┌──────────────┐  ┌─────────────┐  ┌───────────────┐  │
+│  │  frontend    │  │  backend     │  │  websockify   │  │
+│  │  (Next.js)   │  │  (FastAPI)   │  │  (VNC→WS中継) │  │
+│  │  :3000       │  │  :8080       │  │  :6080→vm:5900│  │
+│  └──────────────┘  └──────┬───────┘  └───────┬───────┘  │
+│                           │                   │          │
+│                           │  ┌────────────────┘          │
+│                           │  │ Docker 内部ネットワーク     │
+│                           ▼  ▼                           │
+│                    ┌──────────────┐                      │
+│                    │  vm          │  ← /dev/kvm マウント  │
+│                    │  QEMU/KVM    │                      │
+│                    │  :5900       │                      │
+│                    └──────────────┘                      │
+└──────────────────────────────────────────────────────────┘
 ```
+
+| レイヤー | 場所 | 役割 |
+|---------|------|------|
+| frontend (Next.js) | Dockerコンテナ | チャットUI + noVNCビューア |
+| backend (FastAPI) | Dockerコンテナ | 指示受付、エージェント制御 |
+| websockify | Dockerコンテナ | VNC→WebSocket中継 |
+| vm (QEMU/KVM) | Dockerコンテナ | AIが操作する隔離環境。`/dev/kvm` をマウント |
+
+ブラウザ → `localhost:3000`（frontend）。frontend→backend (`:8080`)、websockify→vm (`vm:5900`)、backend→vm (`vm:5900`) はすべてDocker内部ネットワークで通信。
 
 ## 技術スタック
 
-| コンポーネント | 技術 | 役割 |
-|-------------|------|------|
-| 仮想マシン | QEMU/KVM | ローカルVM、VNCによる画面出力 |
-| 画面配信 | noVNC + websockify | VNC→WebSocket変換、ブラウザでライブ表示 |
-| バックエンド | FastAPI + WebSocket | 指示受付、エージェント統括 |
-| AI操作 | vncdotool + LLM API | 画面キャプチャ → 判断 → 操作実行 |
-| LLM | Claude / GPT-4o (マルチモーダル) | 画面理解 + 操作計画 |
-| フロントエンド | プレーンJS（またはReact） | チャットUI + noVNCビューア埋め込み |
+### 仮想マシン
 
-## エージェントループ
+**QEMU/KVM** を採用。ホストの `/dev/kvm` を Docker コンテナにマウントし、コンテナ内でVMを起動する。
 
-```python
-async def agent_loop(instruction: str, vnc, llm):
-    while not task_complete:
-        # 1. VMのスクリーンショットを取得
-        screenshot = vnc.capture_screen()
+**要件**: ホストが KVM をサポートし、`/dev/kvm` が利用可能であること。
 
-        # 2. マルチモーダルLLMに指示+画面+操作履歴を送信し判断
-        action = await llm.decide(instruction, screenshot, action_history)
+| OS | KVM対応 | 備考 |
+|----|---------|------|
+| Linux | ✅ ネイティブ | 最速 |
+| Windows 11 | ✅ WSL2内で利用可能 | WSL2 + Docker Desktop で `/dev/kvm` が使える |
+| macOS | ❌ 非対応 | Docker DesktopのLinux VMがネストKVMをサポートしない |
 
-        # 3. VM上でアクション実行（クリック、入力、スクロール等）
-        await vnc.execute_action(action)
 
-        # 4. WebSocketでフロントエンドに進捗通知
-        await websocket.broadcast({"status": action.description, "step": step_count})
+### Docker によるアプリ配備
 
-        # 5. UIの変化を待つ
-        await asyncio.sleep(1)
-```
+アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMは `/dev/kvm` をマウントした専用コンテナ内でQEMU/KVMを起動する。
+
+**動作環境**:
+
+| OS | 要件 | VM動作 | 備考 |
+|----|------|--------|------|
+| Linux | QEMU + KVM + Docker | Docker内KVM | ネイティブ動作、最速 |
+| Windows 11 | WSL2 + KVM有効化 + Docker Desktop | Docker内KVM | BIOSで仮想化有効 |
+
+
+### LLM / AI モデル
+
+特定のプロバイダに依存せず、**LLMプロバイダ抽象化レイヤー**を設けて複数のAPIに対応する。
+
+| プロバイダ | モデル例 |
+|-----------|---------|
+| Anthropic | Claude (Computer Use) |
+| OpenAI | GPT-4o, GPT-4.1 |
+| Google | Gemini |
+| ローカル (Ollama) | Llama, Qwen 等 |
+| OpenAI互換 (vLLM) | 任意 |
+
+### フロントエンド
+
+- **Next.js** (App Router) を採用
+  - チャットUI（指示入力 + 操作ログ表示）
+  - noVNC埋め込みビューア（VM画面のリアルタイム視聴）
+  - WebSocket接続でバックエンドとリアルタイム通信
+  - VM管理パネル（起動/停止/再起動）
+
+### バックエンド
+
+- **FastAPI** + **WebSocket**
+  - 指示受付API
+  - エージェント制御用WebSocket
+  - websockify連携（VNC→WS中継）
+  - タスクキュー管理（バックグラウンドジョブ）
+
+## エージェント設計
+
+単純な「スクショ→LLM→操作→繰り返し」のループでは実際のデスクトップ操作は安定しない。堅牢な動作のために**多段階パイプライン**を採用する。
+
+詳細は [`docs/architecture.md`](docs/architecture.md) を参照。
 
 ## プロジェクト構成
 
-```
-ai-desktop-agent/
+```\nai-desktop-agent/
 ├── pyproject.toml
 ├── README.md
+├── docker-compose.yml       # Docker Compose 構成
+├── Dockerfile               # backend コンテナ定義
+├── .dockerignore
 ├── docs/
-│   └── architecture.md
+│   └── architecture.md     # エージェント詳細設計
 ├── src/
 │   └── ai_desktop_agent/
 │       ├── __init__.py
@@ -92,80 +128,73 @@ ai-desktop-agent/
 │       │   └── static/          # フロントエンド資材
 │       ├── agent/
 │       │   ├── __init__.py
-│       │   ├── loop.py          # メインエージェントループ
-│       │   ├── llm.py           # LLMクライアント (Claude/GPT-4o)
-│       │   └── actions.py       # アクション定義と実行
-│       └── vm/
+│       │   ├── loop.py          # メインエージェントループ（状態機械）
+│       │   ├── planner.py       # タスク分解と計画立案
+│       │   ├── executor.py      # アクション実行エンジン
+│       │   ├── verifier.py      # 実行結果の検証
+│       │   ├── recovery.py      # エラー回復戦略
+│       │   ├── state.py         # エージェント状態管理
+│       │   └── llm/
+│       │       ├── __init__.py
+│       │       ├── base.py      # LLMプロバイダ抽象インターフェース
+│       │       ├── anthropic.py # Anthropic (Claude)
+│       │       ├── openai.py    # OpenAI (GPT-4o)
+│       │       ├── google.py    # Google (Gemini)
+│       │       ├── ollama.py    # Ollama (ローカル)
+│       │       └── openai_compat.py # OpenAI互換 (vLLM等)
+│       ├── vm/
+│       │   ├── __init__.py
+│       │   ├── base.py          # VMバックエンド抽象化
+│       │   ├── vnc_client.py    # VNC接続と制御
+│       │   └── screenshot.py    # 画面キャプチャ + OCR
+│       └── actions/
 │           ├── __init__.py
-│           ├── manager.py       # QEMU VMのライフサイクル管理
-│           ├── vnc_client.py    # VNC接続と制御
-│           └── screenshot.py    # 画面キャプチャユーティリティ
-├── frontend/
-│   ├── index.html
-│   ├── app.js
-│   └── style.css
+│           ├── primitives.py    # 基本アクション定義
+│           └── executor.py      # アクション実行 (vncdotool)
+├── vm/                          # VMコンテナ用ビルドコンテキスト
+│   ├── Dockerfile               # QEMU/KVMコンテナ
+│   └── entrypoint.sh            # QEMU起動スクリプト
+├── frontend/                    # Next.js アプリケーション
+│   ├── package.json
+│   ├── next.config.js
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── layout.tsx
+│   │   │   ├── page.tsx        # メインダッシュボード
+│   │   │   └── globals.css
+│   │   ├── components/
+│   │   │   ├── ChatPanel.tsx    # 指示入力 + ログ
+│   │   │   ├── VMViewer.tsx     # noVNC埋め込み
+│   │   │   └── VMControls.tsx   # VM管理パネル
+│   │   └── lib/
+│   │       └── websocket.ts    # WebSocketクライアント
+│   └── public/
+│       └── novnc/              # noVNC静的ファイル
 └── scripts/
     ├── start_vm.sh
     └── setup_vm_image.sh
 ```
 
-## 設計上の重要な判断
+## 安全性設計
 
-### なぜ QEMU + VNC か？
-- **隔離性**: AIはサンドボックスVM内で動作し、ホストに影響を与えない
-- **VNCプロトコル**: 枯れた技術で画面キャプチャと入力注入の両方をサポート
-- **noVNC**: ブラウザで完結するVNCクライアント。ユーザー側のインストール不要
-- **ローカル完結**: クラウド依存なし、VM環境を完全制御可能
-
-### なぜ noVNC でライブ視聴か？
-- ユーザーはソフトウェアを追加インストールせずにAIの操作をリアルタイム視聴可能
-- noVNC + websockify で VNC ↔ WebSocket 変換を実現
-- 読み取り専用モードによりAI操作中のユーザー干渉を防止可能
-
-### 安全性設計
-- VM隔離によりAIがホストに影響を及ぼせない
-- アクションレート制限（ループ暴走の防止）
-- ユーザーはWeb UIからいつでもエージェントを停止可能
-- 全アクションはログに記録されチャットパネルで確認可能
-
-## クイックスタート
-
-> 🚧 開発中
-
-### 前提条件
-
-- Python 3.12 以上
-- QEMU/KVM
-- VMイメージ（Ubuntu Desktop推奨）
-- Claude または GPT-4o のAPIキー
-
-### インストール
-
-```bash
-git clone https://github.com/Milix-M/ai-desktop-agent.git
-cd ai-desktop-agent
-uv sync
-```
-
-### 起動方法
-
-```bash
-# VMとWebサーバーを起動
-uv run python -m ai_desktop_agent
-
-# ブラウザで http://localhost:8080 にアクセス
-```
+- **VM隔離**: AIはサンドボックスVM内で動作し、ホストに影響を与えない
+- **アクションレート制限**: ループ暴走の防止（1秒あたり最大Nアクション）
+- **ユーザー割り込み**: Web UIからいつでもエージェントを停止可能
+- **操作ログ**: 全アクションを記録、チャットパネルで確認可能
+- **アクションホワイトリスト**: 危険操作（`rm -rf`、`sudo`等）はデフォルトブロック、明示許可制
 
 ## ロードマップ
 
-- [ ] QEMU VMの基本管理（起動/停止）
+- [ ] QEMU VMの基本管理（Dockerコンテナ内で起動/停止）
 - [ ] VNC経由の画面キャプチャと操作実行
-- [ ] マルチモーダルLLMによるエージェントループ
+- [ ] LLMプロバイダ抽象化レイヤー（Anthropic / OpenAI / Gemini / Ollama）
+- [ ] 多段階エージェントパイプライン（計画→実行→検証→回復）
 - [ ] FastAPIバックエンド + WebSocket
 - [ ] noVNC統合（ライブ視聴）
-- [ ] Web UI（指示パネル + ビューア）
+- [ ] Next.jsフロントエンド（チャット + ビューア）
+- [ ] OCRによる画面テキスト抽出
 - [ ] 操作履歴とログ機能
-- [ ] エラーリカバリとリトライ
+- [ ] エラーリカバリとリトライ戦略
 - [ ] 複数VM対応
 - [ ] 定型タスクのテンプレート機能
 
