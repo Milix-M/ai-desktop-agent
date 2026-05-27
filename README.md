@@ -1,78 +1,78 @@
 # AI Desktop Agent
 
-An AI-powered desktop automation system that operates a virtual machine's GUI through natural language instructions. Users interact via a web interface, watching the AI control the VM in real-time.
+自然言語の指示で仮想マシンのGUIをAIが直接操作するデスクトップ作業自動化アプリ。ユーザーはWebブラウザから指示を出し、AIがVMを操作する様子をリアルタイムで視聴できる。
 
-## Overview
+## 概要
 
 ```
-User (Browser) → Web UI → Backend (FastAPI) → AI Agent → VM (QEMU/VNC)
-                              ↑                              |
-                              └── Live screen stream (noVNC) ←┘
+ユーザー (ブラウザ) → Web UI → バックエンド (FastAPI) → AIエージェント → VM (QEMU/VNC)
+                              ↑                                |
+                              └── ライブ画面配信 (noVNC) ←─────┘
 ```
 
-The user gives natural language instructions through a web chat interface. The AI agent captures screenshots from the VM, reasons about what to do using a multimodal LLM, and executes mouse/keyboard actions — all visible in real-time through an embedded noVNC viewer.
+ユーザーがWebのチャット画面から自然言語で指示を出すと、AIエージェントがVMのスクリーンショットを取得し、マルチモーダルLLMで状況を判断、マウス・キーボード操作を実行する。その様子は埋め込みnoVNCビューアを通じてリアルタイムで確認できる。
 
-## Architecture
+## アーキテクチャ
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Browser (Web UI)                                   │
+│  ブラウザ (Web UI)                                   │
 │  ┌───────────────────┐  ┌────────────────────────┐  │
-│  │  Instruction Panel │  │  noVNC (Live VM View)  │  │
-│  │  Chat / Log        │  │  Real-time streaming   │  │
+│  │  指示入力パネル     │  │  noVNC (VM画面ライブ)   │  │
+│  │  チャット/ログ      │  │  リアルタイム視聴       │  │
 │  └───────────────────┘  └────────────────────────┘  │
 └──────────────┬──────────────────────┬───────────────┘
                │ WebSocket            │ WebSocket (noVNC)
                ▼                      ▼
 ┌─────────────────────────────────────────────────────┐
-│  Backend Server (Python / FastAPI)                   │
+│  バックエンドサーバー (Python / FastAPI)               │
 │  ┌──────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │ Chat API     │  │ Agent Loop  │  │ websockify│  │
-│  │ (instructions)│  │ (AI control)│  │ (VNC relay)│  │
+│  │  Chat API    │  │ Agent Loop  │  │websockify │  │
+│  │  (指示受付)   │  │  (AI制御)   │  │(VNC→WS中継)│  │
 │  └──────────────┘  └──────┬──────┘  └─────┬─────┘  │
 └──────────────────────────┬─────────────────┬────────┘
-                           │ VNC Protocol    │
-                           ▼                 ▼
+                           │ VNCプロトコル    │
+                           ▼                  ▼
 ┌─────────────────────────────────────────────────────┐
-│  QEMU VM (Linux Desktop)                            │
-│  VNC Server :5900                                   │
-│  (Ubuntu + Xfce / lightweight DE)                   │
+│  QEMU VM (Linuxデスクトップ)                         │
+│  VNCサーバー :5900                                   │
+│  (Ubuntu + Xfce などの軽量DE)                        │
 └─────────────────────────────────────────────────────┘
 ```
 
-## Tech Stack
+## 技術スタック
 
-| Component | Technology | Role |
-|-----------|-----------|------|
-| Virtual Machine | QEMU/KVM | Local VM with VNC display output |
-| Screen Streaming | noVNC + websockify | VNC → WebSocket, live view in browser |
-| Backend | FastAPI + WebSocket | Instruction handling, agent orchestration |
-| AI Agent | Python (vncdotool + LLM API) | Screenshot → reasoning → action execution |
-| LLM | Claude / GPT-4o (multimodal) | Visual understanding + action planning |
-| Frontend | React (or vanilla JS) | Chat panel + embedded noVNC viewer |
+| コンポーネント | 技術 | 役割 |
+|-------------|------|------|
+| 仮想マシン | QEMU/KVM | ローカルVM、VNCによる画面出力 |
+| 画面配信 | noVNC + websockify | VNC→WebSocket変換、ブラウザでライブ表示 |
+| バックエンド | FastAPI + WebSocket | 指示受付、エージェント統括 |
+| AI操作 | vncdotool + LLM API | 画面キャプチャ → 判断 → 操作実行 |
+| LLM | Claude / GPT-4o (マルチモーダル) | 画面理解 + 操作計画 |
+| フロントエンド | プレーンJS（またはReact） | チャットUI + noVNCビューア埋め込み |
 
-## Agent Loop
+## エージェントループ
 
 ```python
 async def agent_loop(instruction: str, vnc, llm):
     while not task_complete:
-        # 1. Capture screenshot from VM
+        # 1. VMのスクリーンショットを取得
         screenshot = vnc.capture_screen()
 
-        # 2. Send to multimodal LLM with instruction + history
+        # 2. マルチモーダルLLMに指示+画面+操作履歴を送信し判断
         action = await llm.decide(instruction, screenshot, action_history)
 
-        # 3. Execute action on VM (click, type, scroll, etc.)
+        # 3. VM上でアクション実行（クリック、入力、スクロール等）
         await vnc.execute_action(action)
 
-        # 4. Notify frontend of progress
+        # 4. WebSocketでフロントエンドに進捗通知
         await websocket.broadcast({"status": action.description, "step": step_count})
 
-        # 5. Wait for UI to settle
+        # 5. UIの変化を待つ
         await asyncio.sleep(1)
 ```
 
-## Project Structure
+## プロジェクト構成
 
 ```
 ai-desktop-agent/
@@ -83,23 +83,23 @@ ai-desktop-agent/
 ├── src/
 │   └── ai_desktop_agent/
 │       ├── __init__.py
-│       ├── main.py              # Entry point
-│       ├── config.py            # Configuration
+│       ├── main.py              # エントリポイント
+│       ├── config.py            # 設定管理
 │       ├── server/
 │       │   ├── __init__.py
-│       │   ├── app.py           # FastAPI application
-│       │   ├── routes.py        # HTTP/WebSocket routes
-│       │   └── static/          # Frontend assets
+│       │   ├── app.py           # FastAPIアプリケーション
+│       │   ├── routes.py        # HTTP/WebSocketルート
+│       │   └── static/          # フロントエンド資材
 │       ├── agent/
 │       │   ├── __init__.py
-│       │   ├── loop.py          # Main agent loop
-│       │   ├── llm.py           # LLM client (Claude/GPT-4o)
-│       │   └── actions.py       # Action types and execution
+│       │   ├── loop.py          # メインエージェントループ
+│       │   ├── llm.py           # LLMクライアント (Claude/GPT-4o)
+│       │   └── actions.py       # アクション定義と実行
 │       └── vm/
 │           ├── __init__.py
-│           ├── manager.py       # QEMU VM lifecycle
-│           ├── vnc_client.py    # VNC connection and control
-│           └── screenshot.py    # Screen capture utilities
+│           ├── manager.py       # QEMU VMのライフサイクル管理
+│           ├── vnc_client.py    # VNC接続と制御
+│           └── screenshot.py    # 画面キャプチャユーティリティ
 ├── frontend/
 │   ├── index.html
 │   ├── app.js
@@ -109,37 +109,37 @@ ai-desktop-agent/
     └── setup_vm_image.sh
 ```
 
-## Key Design Decisions
+## 設計上の重要な判断
 
-### Why QEMU + VNC?
-- **Isolation**: AI operates in a sandboxed VM, cannot affect host system
-- **VNC protocol**: Well-established, supports both screen capture and input injection
-- **noVNC**: Mature browser-based VNC client, zero-install for users
-- **Local**: No cloud dependency, full control over the VM environment
+### なぜ QEMU + VNC か？
+- **隔離性**: AIはサンドボックスVM内で動作し、ホストに影響を与えない
+- **VNCプロトコル**: 枯れた技術で画面キャプチャと入力注入の両方をサポート
+- **noVNC**: ブラウザで完結するVNCクライアント。ユーザー側のインストール不要
+- **ローカル完結**: クラウド依存なし、VM環境を完全制御可能
 
-### Why noVNC for Live Viewing?
-- User watches AI work in real-time without installing any software
-- noVNC handles WebSocket ↔ VNC translation via websockify
-- Read-only mode available (prevent user interference during AI operation)
+### なぜ noVNC でライブ視聴か？
+- ユーザーはソフトウェアを追加インストールせずにAIの操作をリアルタイム視聴可能
+- noVNC + websockify で VNC ↔ WebSocket 変換を実現
+- 読み取り専用モードによりAI操作中のユーザー干渉を防止可能
 
-### Agent Safety
-- VM isolation prevents AI from affecting the host
-- Action rate limiting (prevent runaway loops)
-- User can stop the agent at any time via the web UI
-- All actions are logged and visible in the chat panel
+### 安全性設計
+- VM隔離によりAIがホストに影響を及ぼせない
+- アクションレート制限（ループ暴走の防止）
+- ユーザーはWeb UIからいつでもエージェントを停止可能
+- 全アクションはログに記録されチャットパネルで確認可能
 
-## Getting Started
+## クイックスタート
 
-> 🚧 Under construction
+> 🚧 開発中
 
-### Prerequisites
+### 前提条件
 
-- Python 3.12+
+- Python 3.12 以上
 - QEMU/KVM
-- A VM image (Ubuntu Desktop recommended)
-- API key for Claude or GPT-4o
+- VMイメージ（Ubuntu Desktop推奨）
+- Claude または GPT-4o のAPIキー
 
-### Installation
+### インストール
 
 ```bash
 git clone https://github.com/Milix-M/ai-desktop-agent.git
@@ -147,28 +147,28 @@ cd ai-desktop-agent
 uv sync
 ```
 
-### Usage
+### 起動方法
 
 ```bash
-# Start the VM and web server
+# VMとWebサーバーを起動
 uv run python -m ai_desktop_agent
 
-# Open browser to http://localhost:8080
+# ブラウザで http://localhost:8080 にアクセス
 ```
 
-## Roadmap
+## ロードマップ
 
-- [ ] Basic QEMU VM management (start/stop)
-- [ ] VNC screenshot capture + action execution
-- [ ] Agent loop with multimodal LLM
-- [ ] FastAPI backend with WebSocket
-- [ ] noVNC integration for live viewing
-- [ ] Web UI (instruction panel + viewer)
-- [ ] Action history and logging
-- [ ] Error recovery and retry logic
-- [ ] Multiple VM support
-- [ ] Task templates (common workflows)
+- [ ] QEMU VMの基本管理（起動/停止）
+- [ ] VNC経由の画面キャプチャと操作実行
+- [ ] マルチモーダルLLMによるエージェントループ
+- [ ] FastAPIバックエンド + WebSocket
+- [ ] noVNC統合（ライブ視聴）
+- [ ] Web UI（指示パネル + ビューア）
+- [ ] 操作履歴とログ機能
+- [ ] エラーリカバリとリトライ
+- [ ] 複数VM対応
+- [ ] 定型タスクのテンプレート機能
 
-## License
+## ライセンス
 
 MIT
