@@ -14,44 +14,98 @@
 
 ## アーキテクチャ
 
+アプリ本体は **Docker Compose** で動作。VMはホスト側で起動し、DockerコンテナからVNC接続する。VMとアプリを分離することで、Windows (WSL2) / Linux / macOS のどの環境でも同じ構成で動作する。
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  ブラウザ (Web UI - Next.js)                         │
-│  ┌───────────────────┐  ┌────────────────────────┐  │
-│  │  指示入力パネル     │  │  noVNC (VM画面ライブ)   │  │
-│  │  チャット/ログ      │  │  リアルタイム視聴       │  │
-│  └───────────────────┘  └────────────────────────┘  │
-└──────────────┬──────────────────────┬───────────────┘
-               │ WebSocket            │ WebSocket (noVNC)
-               ▼                      ▼
-┌─────────────────────────────────────────────────────┐
-│  バックエンドサーバー (Python / FastAPI)               │
+┌── Docker Compose ────────────────────────────────────┐
+│                                                       │
 │  ┌──────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │  Chat API    │  │ Agent Loop  │  │websockify │  │
-│  │  (指示受付)   │  │  (AI制御)   │  │(VNC→WS中継)│  │
-│  └──────────────┘  └──────┬──────┘  └─────┬─────┘  │
-└──────────────────────────┬─────────────────┬────────┘
-                           │ VNCプロトコル    │
-                           ▼                  ▼
-┌─────────────────────────────────────────────────────┐
-│  QEMU VM (Linuxデスクトップ)                         │
-│  VNCサーバー :5900                                   │
-│  (Ubuntu + Xfce などの軽量DE)                        │
-└─────────────────────────────────────────────────────┘
+│  │  frontend    │  │  backend     │  │websockify │  │
+│  │  (Next.js)   │  │  (FastAPI)   │  │(VNC→WS)   │  │
+│  │  :3000       │  │  :8080       │  │  :6080    │  │
+│  └──────────────┘  └──────┬───────┘  └─────┬─────┘  │
+│                           │                 │        │
+└───────────────────────────┼─────────────────┼────────┘
+                            │ VNC             │ VNC
+                            ▼                  ▼
+┌── ホスト / WSL2 ─────────────────────────────────────┐
+│  QEMU/KVM VM (Linux Desktop)      VNC :5900          │
+│  (Ubuntu + Xfce などの軽量DE)                         │
+└──────────────────────────────────────────────────────┘
 ```
+
+| レイヤー | 場所 | 役割 |
+|---------|------|------|
+| frontend (Next.js) | Dockerコンテナ | チャットUI + noVNCビューア |
+| backend (FastAPI) | Dockerコンテナ | 指示受付、エージェント制御 |
+| websockify | Dockerコンテナ | VNC→WebSocket中継 |
+| VM (QEMU/KVM) | ホスト / WSL2 | AIが操作する隔離環境 |
+
+ブラウザからは `localhost:3000`（frontend）にアクセス。frontendがbackend (`:8080`) とwebsockify (`:6080`) に接続する。
 
 ## 技術スタック
 
 ### 仮想マシン
 
+QEMU/KVMは **WSL2 上で動作する**（Windows 11 は WSL2 の KVM を正式サポート）。macOS は QEMU + HVF で代用可能。
+
 | 方式 | メリット | デメリット | 適性 |
 |------|---------|-----------|------|
-| **QEMU/KVM** | 高い隔離性、GPUパススルー可、枯れた技術 | やや重い、セットアップに知識必要 | ★★★ 本番向き |
+| **QEMU/KVM** (Linux/WSL2) | 高い隔離性、GPUパススルー可、枯れた技術 | やや重い、セットアップに知識必要 | ★★★ 本番向き |
+| **QEMU/HVF** (macOS) | Apple Siliconで高速、Mac標準搭載 | x86_64エミュレーションは遅い | ★★☆ macOS向き |
 | **Docker + Xvfb + x11vnc** | 軽量高速、コンテナ管理容易、イメージ配布が簡単 | 完全なVM隔離ではない、カーネル共有 | ★★★ 開発/CI向き |
 | **VirtualBox** | GUI管理ツール充実、クロスプラットフォーム | ヘッドレス運用がやや面倒、VBoxManage依存 | ★★☆ 個人利用向き |
 | **クラウドVM** (EC2/GCE等) | スケーラブル、GPU選択可能 | コスト、ネットワーク遅延 | ★★☆ 大規模向き |
 
-**選定方針**: 第一候補は QEMU/KVM。開発環境では Docker+Xvfb の軽量構成も選択肢に入れる。将来的にはプラグイン方式でVMバックエンドを切り替え可能にする。
+**選定方針**: 第一候補は QEMU/KVM。Windows 環境では WSL2 内で KVM が利用可能（Windows 11 Pro/Enterprise で `/dev/kvm` 有効）。開発環境では Docker+Xvfb の軽量構成も選択肢に入れる。将来的にはプラグイン方式でVMバックエンドを切り替え可能にする。
+
+### Docker によるアプリ配備
+
+アプリ本体（backend + frontend + websockify）は Docker Compose で起動する。VMはDockerの外（ホスト側）で動作し、VNCポートをコンテナに公開する。
+
+```yaml
+# docker-compose.yml (予定)
+services:
+  backend:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      - VNC_HOST=host.docker.internal  # ホストのVNCに接続
+      - VNC_PORT=5900
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # VM管理用（オプション）
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:3000"]
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
+      - NEXT_PUBLIC_WEBSOCKIFY_URL=http://localhost:6080
+    depends_on: [backend]
+
+  websockify:
+    image: ghcr.io/novnc/websockify:latest
+    command: 5900  # VNC → WebSocket
+    ports: ["6080:5900"]
+```
+
+**動作環境**:
+
+| OS | 要件 | 備考 |
+|----|------|------|
+| Linux | QEMU + KVM + Docker | ネイティブ動作、最速 |
+| Windows 11 | WSL2 + KVM有効化 + Docker Desktop | `wsl --install` でWSL2導入、BIOSで仮想化有効 |
+| macOS | QEMU + HVF + Docker Desktop | aarch64 VMネイティブ高速、x86_64はエミュレーションで遅い |
+
+**WSL2 の KVM 有効化**（Windows 11）:
+```powershell
+# Windows側
+wsl --install -d Ubuntu-24.04
+wsl --set-default-version 2
+# WSL2内でKVM利用可能か確認
+ls -la /dev/kvm  # 存在すればOK
+```
 
 ### LLM / AI モデル
 
@@ -108,10 +162,12 @@ class OpenAICompatibleProvider(LLMProvider): ... # vLLM, LiteLLM等
 
 ## プロジェクト構成
 
-```
-ai-desktop-agent/
+```\nai-desktop-agent/
 ├── pyproject.toml
 ├── README.md
+├── docker-compose.yml       # Docker Compose 構成
+├── Dockerfile               # backend コンテナ定義
+├── .dockerignore
 ├── docs/
 │   └── architecture.md     # エージェント詳細設計
 ├── src/

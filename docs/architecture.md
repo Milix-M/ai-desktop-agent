@@ -610,3 +610,175 @@ class RateLimiter:
 - VMにはホストファイルシステムをマウントしない（共有フォルダなし）
 - ネットワークはNAT（ホストからの外向きのみ許可）
 - VMイメージはスナップショットから起動し、終了時に破棄（イミュータブル運用）
+
+## Docker 配備設計
+
+### コンテナ構成
+
+アプリ本体（backend + frontend + websockify）は Docker Compose で起動する。VM（QEMU/KVM）はホスト側で動作する。これにより:
+
+- アプリの配布と起動が `docker compose up` で完結する
+- VMとアプリが独立しているため、VMの再起動がアプリに影響しない
+- Windows (WSL2) / Linux / macOS のどの環境でも同じ構成で動作する
+
+```
+┌── Docker Compose ────────────────────────────────────────┐
+│                                                           │
+│  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │  frontend      │  │  backend      │  │  websockify  │ │
+│  │  Next.js       │──│  FastAPI      │  │  VNC→WS中継  │ │
+│  │  :3000         │  │  :8080        │  │  :6080→:5900 │ │
+│  │  (Static →     │  │               │──│               │ │
+│  │   backend:8080)│  │               │  │               │ │
+│  └────────────────┘  └──────┬────────┘  └──────┬────────┘ │
+│                             │                   │          │
+└─────────────────────────────┼───────────────────┼──────────┘
+                              │ host.docker.      │ host.docker.
+                              │ internal:5900     │ internal:5900
+                              ▼                    ▼
+┌── ホスト ─────────────────────────────────────────────────┐
+│  QEMU/KVM プロセス                                         │
+│  VM (Ubuntu Desktop) :5900                                 │
+└───────────────────────────────────────────────────────────┘
+```
+
+### docker-compose.yml
+
+```yaml
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - VNC_HOST=${VNC_HOST:-host.docker.internal}
+      - VNC_PORT=${VNC_PORT:-5900}
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-20250514}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # オプション: VM管理
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
+      - NEXT_PUBLIC_WEBSOCKIFY_URL=http://localhost:6080
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  websockify:
+    image: ghcr.io/novnc/websockify:latest
+    command: ${VNC_PORT:-5900}
+    ports:
+      - "6080:5900"  # ブラウザは 6080 に接続し内部で 5900 → VNC
+    restart: unless-stopped
+```
+
+### 環境ごとの起動方法
+
+#### Linux
+
+```bash
+# VM起動 (ホスト側)
+./scripts/start_vm.sh
+
+# アプリ起動 (Docker)
+docker compose up -d
+
+# ブラウザで http://localhost:3000
+```
+
+#### Windows 11 (WSL2)
+
+```powershell
+# WSL2 インストール（初回のみ）
+wsl --install -d Ubuntu-24.04
+wsl --set-default-version 2
+
+# WSL2 内でKVM確認
+wsl ls -la /dev/kvm
+
+# WSL2 内で VM 起動
+wsl bash scripts/start_vm.sh
+
+# Docker Desktop で起動
+docker compose up -d
+# → http://localhost:3000
+```
+
+#### macOS
+
+```bash
+# QEMU + HVF で VM 起動
+./scripts/start_vm.sh --accel hvf
+
+# Docker Desktop で起動
+docker compose up -d
+# → http://localhost:3000
+```
+
+### コンテナ間通信
+
+| From | To | 経路 |
+|------|-----|------|
+| frontend (ブラウザ) | backend API | `localhost:8080` (ポート公開) |
+| frontend (ブラウザ) | websockify | `localhost:6080` (ポート公開) |
+| backend | VM (VNC) | `host.docker.internal:5900` (ホストネットワーク) |
+| websockify | VM (VNC) | `host.docker.internal:5900` (ホストネットワーク) |
+
+### Dockerfile (backend)
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# uv で依存解決
+COPY pyproject.toml uv.lock* ./
+RUN pip install uv && uv sync --frozen
+
+COPY src/ ./src/
+
+EXPOSE 8080
+CMD ["uv", "run", "python", "-m", "ai_desktop_agent"]
+```
+
+### Dockerfile (frontend)
+
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:22-alpine AS runner
+WORKDIR /app
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+EXPOSE 3000
+CMD ["npm", "start"]
+```
+
+### 設計上の判断
+
+- **VMはDocker外**: QEMU/KVMをコンテナ内で動かすには privileged modeが必要。VMを分離することでコンテナの特権昇格を回避し、セキュリティを向上
+- **host.docker.internal**: DockerコンテナからホストのVNCに接続する標準的な方法。Linuxでは `extra_hosts` で明示指定も可
+- **websockifyをコンテナに含める**: noVNC + websockifyはDockerイメージが公開されているため、自前ビルド不要
