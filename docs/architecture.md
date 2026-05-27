@@ -615,7 +615,7 @@ class RateLimiter:
 
 ### コンテナ構成
 
-アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMコンテナは `/dev/kvm` をマウントしてQEMU/KVMを内部で起動する。macOSはDocker DesktopがネストKVMをサポートしないため、vmコンテナを無効化しホスト側QEMUを併用する。
+アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMコンテナは `/dev/kvm` をマウントしてQEMU/KVMを内部で起動する。
 
 ```
 ┌── Docker Compose ────────────────────────────────────────┐
@@ -714,48 +714,27 @@ volumes:
 #### Linux
 
 ```bash
-# すべて Docker Compose で完結
 docker compose up -d
-
-# ブラウザで http://localhost:3000
+# → http://localhost:3000
 ```
 
 #### Windows 11 (WSL2)
 
 ```powershell
-# WSL2 インストール（初回のみ）
 wsl --install -d Ubuntu-24.04
 wsl --set-default-version 2
-
-# WSL2 内でKVM確認
-wsl ls -la /dev/kvm
-
-# Docker Desktop で起動（WSL2バックエンド）
+wsl ls -la /dev/kvm  # KVM確認
 wsl docker compose up -d
-# → http://localhost:3000
-```
-
-#### macOS
-
-macOS はDocker DesktopがネストKVMをサポートしないため、ホスト側でQEMUを起動し、vmコンテナは無効化する。
-
-```bash
-# VMをホスト側で起動
-./scripts/start_vm.sh --accel hvf
-
-# Docker Compose 起動（macOSオーバーライド付き）
-docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
-# → http://localhost:3000
 ```
 
 ### コンテナ間通信
 
-| From | To | 経路（Linux/WSL2） | 経路（macOS） |
-|------|-----|-------------------|---------------|
-| frontend (ブラウザ) | backend API | `localhost:8080` | `localhost:8080` |
-| frontend (ブラウザ) | websockify | `localhost:6080` | `localhost:6080` |
-| backend | VM (VNC) | `vm:5900` (Docker内) | `host.docker.internal:5900` |
-| websockify | VM (VNC) | `vm:5900` (Docker内) | `host.docker.internal:5900` |
+| From | To | 経路 |
+|------|-----|------|
+| frontend (ブラウザ) | backend API | `localhost:8080` |
+| frontend (ブラウザ) | websockify | `localhost:6080` |
+| backend | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
+| websockify | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
 
 ### Dockerfile (vm)
 
@@ -831,7 +810,6 @@ CMD ["npm", "start"]
 
 ### 設計上の判断
 
-- **VMはDockerコンテナ内**: Linux/WSL2では `/dev/kvm` をマウントすることでQEMU/KVMをコンテナ内でネイティブ動作させる。特権モード不要（`--device /dev/kvm` のみで十分）。`docker compose up` 一発で全コンポーネントが起動する。
-- **macOSフォールバック**: Docker Desktop on Mac はネストKVMをサポートしないため、vmコンテナを`profiles: ["linux"]`で無効化し、`host.docker.internal`経由でホスト側QEMUに接続する別構成ファイル（`docker-compose.mac.yml`）を用意する。
+- **VMはDockerコンテナ内**: `/dev/kvm` をマウントすることでQEMU/KVMをコンテナ内でネイティブ動作させる。特権モード不要（`--device /dev/kvm` のみで十分）。`docker compose up` 一発で全コンポーネントが起動する。
 - **websockifyをコンテナに含める**: noVNC + websockifyはDockerイメージが公開されているため、自前ビルド不要。
 - **Docker内部ネットワーク**: backend→vm、websockify→vm の通信はDockerの内部DNS（`vm` というサービス名）で解決。ホストネットワークスタックに依存しない。

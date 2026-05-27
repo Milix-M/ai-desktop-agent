@@ -14,7 +14,7 @@
 
 ## アーキテクチャ
 
-アプリ全体を **Docker Compose** で完結させる。VMもDockerコンテナ内で動作する（Linux/WSL2のみ。macOSではネストKVMが非対応のためホスト側QEMUを併用）。
+アプリ全体を **Docker Compose** で完結させる。VMもDockerコンテナ内で動作する。
 
 ```
 ┌── Docker Compose ────────────────────────────────────────┐
@@ -49,17 +49,26 @@
 
 ### 仮想マシン
 
-QEMU/KVMは **WSL2 上で動作する**（Windows 11 は WSL2 の KVM を正式サポート）。macOS は QEMU + HVF で代用可能。
+**QEMU/KVM** を採用。ホストの `/dev/kvm` を Docker コンテナにマウントし、コンテナ内でVMを起動する。
 
-| 方式 | メリット | デメリット | 適性 |
-|------|---------|-----------|------|
-| **QEMU/KVM** (Linux/WSL2) | 高い隔離性、GPUパススルー可、枯れた技術 | やや重い、セットアップに知識必要 | ★★★ 本番向き |
-| **QEMU/HVF** (macOS) | Apple Siliconで高速、Mac標準搭載 | x86_64エミュレーションは遅い | ★★☆ macOS向き |
-| **Docker + Xvfb + x11vnc** | 軽量高速、コンテナ管理容易、イメージ配布が簡単 | 完全なVM隔離ではない、カーネル共有 | ★★★ 開発/CI向き |
-| **VirtualBox** | GUI管理ツール充実、クロスプラットフォーム | ヘッドレス運用がやや面倒、VBoxManage依存 | ★★☆ 個人利用向き |
-| **クラウドVM** (EC2/GCE等) | スケーラブル、GPU選択可能 | コスト、ネットワーク遅延 | ★★☆ 大規模向き |
+**要件**: ホストが KVM をサポートし、`/dev/kvm` が利用可能であること。
 
-**選定方針**: 第一候補は QEMU/KVM。Windows 環境では WSL2 内で KVM が利用可能（Windows 11 Pro/Enterprise で `/dev/kvm` 有効）。開発環境では Docker+Xvfb の軽量構成も選択肢に入れる。将来的にはプラグイン方式でVMバックエンドを切り替え可能にする。
+| OS | KVM対応 | 備考 |
+|----|---------|------|
+| Linux | ✅ ネイティブ | 最速 |
+| Windows 11 | ✅ WSL2内で利用可能 | WSL2 + Docker Desktop で `/dev/kvm` が使える |
+| macOS | ❌ 非対応 | Docker DesktopのLinux VMがネストKVMをサポートしない |
+
+**QEMU起動パラメータ**（vmコンテナ内）:
+```bash
+qemu-system-x86_64 \
+  -enable-kvm \
+  -cpu host \
+  -m 4096 \
+  -drive file=/vm/desktop.qcow2,if=virtio \
+  -vnc 0.0.0.0:5900 \
+  -netdev user,id=net0 -device virtio-net,netdev=net0
+```
 
 ### Docker によるアプリ配備
 
@@ -127,28 +136,7 @@ volumes:
 | OS | 要件 | VM動作 | 備考 |
 |----|------|--------|------|
 | Linux | QEMU + KVM + Docker | Docker内KVM | ネイティブ動作、最速 |
-| Windows 11 | WSL2 + KVM有効化 + Docker Desktop | Docker内KVM | `wsl --install` でWSL2導入、BIOSで仮想化有効 |
-| macOS | QEMU + HVF + Docker Desktop | **ホスト側QEMU** | ネストKVM非対応のためvmコンテナはスキップ、代わりにホスト側でVM起動 |
-
-**macOS 用のフォールバック**:
-```yaml
-# docker-compose.mac.yml (macOS向けオーバーライド)
-services:
-  vm:
-    profiles: ["linux"]            # macOSでは無効化
-
-  backend:
-    environment:
-      - VNC_HOST=host.docker.internal  # ホスト側QEMUに接続
-
-  websockify:
-    command: host.docker.internal:5900
-```
-```bash
-# macOS
-./scripts/start_vm.sh --accel hvf   # ホスト側でVM起動
-docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
-```
+| Windows 11 | WSL2 + KVM有効化 + Docker Desktop | Docker内KVM | BIOSで仮想化有効 |
 
 **WSL2 の KVM 有効化**（Windows 11）:
 ```powershell
@@ -251,8 +239,6 @@ class OpenAICompatibleProvider(LLMProvider): ... # vLLM, LiteLLM等
 │       ├── vm/
 │       │   ├── __init__.py
 │       │   ├── base.py          # VMバックエンド抽象化
-│       │   ├── qemu.py          # QEMU/KVMバックエンド
-│       │   ├── docker_xvfb.py   # Docker + Xvfb バックエンド
 │       │   ├── vnc_client.py    # VNC接続と制御
 │       │   └── screenshot.py    # 画面キャプチャ + OCR
 │       └── actions/
