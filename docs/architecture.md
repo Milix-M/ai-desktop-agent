@@ -615,11 +615,7 @@ class RateLimiter:
 
 ### コンテナ構成
 
-アプリ本体（backend + frontend + websockify）は Docker Compose で起動する。VM（QEMU/KVM）はホスト側で動作する。これにより:
-
-- アプリの配布と起動が `docker compose up` で完結する
-- VMとアプリが独立しているため、VMの再起動がアプリに影響しない
-- Windows (WSL2) / Linux / macOS のどの環境でも同じ構成で動作する
+アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMコンテナは `/dev/kvm` をマウントしてQEMU/KVMを内部で起動する。macOSはDocker DesktopがネストKVMをサポートしないため、vmコンテナを無効化しホスト側QEMUを併用する。
 
 ```
 ┌── Docker Compose ────────────────────────────────────────┐
@@ -627,19 +623,19 @@ class RateLimiter:
 │  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │  frontend      │  │  backend      │  │  websockify  │ │
 │  │  Next.js       │──│  FastAPI      │  │  VNC→WS中継  │ │
-│  │  :3000         │  │  :8080        │  │  :6080→:5900 │ │
-│  │  (Static →     │  │               │──│               │ │
-│  │   backend:8080)│  │               │  │               │ │
-│  └────────────────┘  └──────┬────────┘  └──────┬────────┘ │
-│                             │                   │          │
-└─────────────────────────────┼───────────────────┼──────────┘
-                              │ host.docker.      │ host.docker.
-                              │ internal:5900     │ internal:5900
-                              ▼                    ▼
-┌── ホスト ─────────────────────────────────────────────────┐
-│  QEMU/KVM プロセス                                         │
-│  VM (Ubuntu Desktop) :5900                                 │
-└───────────────────────────────────────────────────────────┘
+│  │  :3000         │  │  :8080        │  │  :6080       │ │
+│  │  (Static →     │  │               │──│       │      │ │
+│  │   backend:8080)│  │               │  │       │      │ │
+│  └────────────────┘  └──────┬────────┘  └───────┼──────┘ │
+│                             │                   │         │
+│                             │ Docker内部ネットワーク        │
+│                             ▼                   ▼         │
+│                    ┌──────────────────────────────┐      │
+│                    │  vm                          │      │
+│                    │  QEMU/KVM (Ubuntu Desktop)   │      │
+│                    │  :5900  ← /dev/kvm マウント   │      │
+│                    └──────────────────────────────┘      │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### docker-compose.yml
@@ -648,6 +644,26 @@ class RateLimiter:
 version: "3.9"
 
 services:
+  vm:
+    build:
+      context: ./vm
+      dockerfile: Dockerfile
+    devices:
+      - /dev/kvm:/dev/kvm          # KVMアクセラレーション
+    ports:
+      - "5900:5900"                 # VNC (内部通信 + デバッグ用)
+    volumes:
+      - vm_data:/vm
+    environment:
+      - VM_IMAGE=/vm/desktop.qcow2
+      - VM_MEMORY=4096
+      - VM_VNC_PORT=5900
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo | ncat localhost 5900"]
+      interval: 10s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -655,8 +671,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - VNC_HOST=${VNC_HOST:-host.docker.internal}
-      - VNC_PORT=${VNC_PORT:-5900}
+      - VNC_HOST=vm                 # Docker内部ネットワーク
+      - VNC_PORT=5900
       - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
       - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-20250514}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -664,7 +680,9 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
     volumes:
       - ./data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock  # オプション: VM管理
+    depends_on:
+      vm:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -682,10 +700,13 @@ services:
 
   websockify:
     image: ghcr.io/novnc/websockify:latest
-    command: ${VNC_PORT:-5900}
+    command: vm:5900               # Docker内部ネットワーク
     ports:
-      - "6080:5900"  # ブラウザは 6080 に接続し内部で 5900 → VNC
+      - "6080:5900"
     restart: unless-stopped
+
+volumes:
+  vm_data:
 ```
 
 ### 環境ごとの起動方法
@@ -693,10 +714,7 @@ services:
 #### Linux
 
 ```bash
-# VM起動 (ホスト側)
-./scripts/start_vm.sh
-
-# アプリ起動 (Docker)
+# すべて Docker Compose で完結
 docker compose up -d
 
 # ブラウザで http://localhost:3000
@@ -712,33 +730,67 @@ wsl --set-default-version 2
 # WSL2 内でKVM確認
 wsl ls -la /dev/kvm
 
-# WSL2 内で VM 起動
-wsl bash scripts/start_vm.sh
-
-# Docker Desktop で起動
-docker compose up -d
+# Docker Desktop で起動（WSL2バックエンド）
+wsl docker compose up -d
 # → http://localhost:3000
 ```
 
 #### macOS
 
+macOS はDocker DesktopがネストKVMをサポートしないため、ホスト側でQEMUを起動し、vmコンテナは無効化する。
+
 ```bash
-# QEMU + HVF で VM 起動
+# VMをホスト側で起動
 ./scripts/start_vm.sh --accel hvf
 
-# Docker Desktop で起動
-docker compose up -d
+# Docker Compose 起動（macOSオーバーライド付き）
+docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
 # → http://localhost:3000
 ```
 
 ### コンテナ間通信
 
-| From | To | 経路 |
-|------|-----|------|
-| frontend (ブラウザ) | backend API | `localhost:8080` (ポート公開) |
-| frontend (ブラウザ) | websockify | `localhost:6080` (ポート公開) |
-| backend | VM (VNC) | `host.docker.internal:5900` (ホストネットワーク) |
-| websockify | VM (VNC) | `host.docker.internal:5900` (ホストネットワーク) |
+| From | To | 経路（Linux/WSL2） | 経路（macOS） |
+|------|-----|-------------------|---------------|
+| frontend (ブラウザ) | backend API | `localhost:8080` | `localhost:8080` |
+| frontend (ブラウザ) | websockify | `localhost:6080` | `localhost:6080` |
+| backend | VM (VNC) | `vm:5900` (Docker内) | `host.docker.internal:5900` |
+| websockify | VM (VNC) | `vm:5900` (Docker内) | `host.docker.internal:5900` |
+
+### Dockerfile (vm)
+
+```dockerfile
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qemu-system-x86 qemu-utils \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 5900
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+```bash
+#!/bin/bash
+# vm/entrypoint.sh
+qemu-system-x86_64 \
+  -enable-kvm \
+  -cpu host \
+  -m "${VM_MEMORY:-4096}" \
+  -drive file="${VM_IMAGE:-/vm/desktop.qcow2}",if=virtio \
+  -vnc "0.0.0.0:${VM_VNC_PORT:-5900}" \
+  -device virtio-net,netdev=net0 \
+  -netdev user,id=net0 \
+  -daemonize
+
+# VNC起動を確認
+sleep 3
+exec tail -f /dev/null  # コンテナを生かし続ける
+```
 
 ### Dockerfile (backend)
 
@@ -779,6 +831,7 @@ CMD ["npm", "start"]
 
 ### 設計上の判断
 
-- **VMはDocker外**: QEMU/KVMをコンテナ内で動かすには privileged modeが必要。VMを分離することでコンテナの特権昇格を回避し、セキュリティを向上
-- **host.docker.internal**: DockerコンテナからホストのVNCに接続する標準的な方法。Linuxでは `extra_hosts` で明示指定も可
-- **websockifyをコンテナに含める**: noVNC + websockifyはDockerイメージが公開されているため、自前ビルド不要
+- **VMはDockerコンテナ内**: Linux/WSL2では `/dev/kvm` をマウントすることでQEMU/KVMをコンテナ内でネイティブ動作させる。特権モード不要（`--device /dev/kvm` のみで十分）。`docker compose up` 一発で全コンポーネントが起動する。
+- **macOSフォールバック**: Docker Desktop on Mac はネストKVMをサポートしないため、vmコンテナを`profiles: ["linux"]`で無効化し、`host.docker.internal`経由でホスト側QEMUに接続する別構成ファイル（`docker-compose.mac.yml`）を用意する。
+- **websockifyをコンテナに含める**: noVNC + websockifyはDockerイメージが公開されているため、自前ビルド不要。
+- **Docker内部ネットワーク**: backend→vm、websockify→vm の通信はDockerの内部DNS（`vm` というサービス名）で解決。ホストネットワークスタックに依存しない。
