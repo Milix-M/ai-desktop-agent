@@ -31,7 +31,14 @@ else
     DEBOOTSTRAP_ARGS="$DEBOOTSTRAP_ARGS --arch=$TARGET_ARCH"
 fi
 
-debootstrap $DEBOOTSTRAP_ARGS noble "$ROOTFS" http://ports.ubuntu.com/ubuntu-ports
+# amd64(x86_64)はarchive.ubuntu.com、それ以外はports.ubuntu.com
+if [ "$TARGET_ARCH" = "amd64" ] || [ "$TARGET_ARCH" = "i386" ]; then
+    MIRROR="http://archive.ubuntu.com/ubuntu"
+else
+    MIRROR="http://ports.ubuntu.com/ubuntu-ports"
+fi
+
+debootstrap $DEBOOTSTRAP_ARGS noble "$ROOTFS" "$MIRROR"
 
 # foreignの場合はsecond stageを実行
 if [ -f "$ROOTFS/debootstrap/debootstrap" ]; then
