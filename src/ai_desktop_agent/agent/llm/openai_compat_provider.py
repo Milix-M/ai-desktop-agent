@@ -449,9 +449,7 @@ ID: {subtask.id}
                 if attempt == max_retries - 1:
                     raise
             except Exception:
-                logger.exception(
-                    "API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries
-                )
+                logger.exception("API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries)
                 if attempt == max_retries - 1:
                     raise
         return {}
