@@ -1,6 +1,7 @@
 #!/bin/bash
 # prepare-image.sh — Dockerfile内で呼ばれる。qcow2イメージをビルドする。
 # debootstrap → KDE Plasmaインストール → 設定 → ext4イメージ → qcow2変換
+# クロスアーキテクチャ（ARM64ホスト→AMD64ゲスト）対応
 set -euo pipefail
 
 ROOTFS="/rootfs"
@@ -8,16 +9,47 @@ IMAGE_DIR="/vm"
 IMAGE_FILE="$IMAGE_DIR/desktop.qcow2"
 IMAGE_SIZE="${IMAGE_SIZE:-20G}"
 DISK_IMG="$IMAGE_DIR/disk.raw"
+TARGET_ARCH="${TARGET_ARCH:-amd64}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # ── Step 1: debootstrap で Ubuntu Noble の最小rootfsを作成 ──
-log "Step 1: debootstrap Ubuntu Noble"
-debootstrap --variant=minbase --include=systemd,apt,ubuntu-keyring \
-    noble "$ROOTFS" http://ports.ubuntu.com/ubuntu-ports
+log "Step 1: debootstrap Ubuntu Noble ($TARGET_ARCH)"
+
+# クロスアーキテクチャの場合: --foreign で1段階目だけ実行
+DEBOOTSTRAP_ARGS="--variant=minbase --include=systemd,apt,ubuntu-keyring"
+if [ "$(uname -m)" != "x86_64" ] && [ "$TARGET_ARCH" = "amd64" ]; then
+    log "Cross-architecture: host=$(uname -m), target=$TARGET_ARCH"
+    DEBOOTSTRAP_ARGS="$DEBOOTSTRAP_ARGS --foreign --arch=$TARGET_ARCH"
+    # ARM64→AMD64用のQEMU静的バイナリをコピー（debootstrap second stage用）
+    QEMU_STATIC=$(which qemu-x86_64-static 2>/dev/null || echo "")
+    if [ -n "$QEMU_STATIC" ]; then
+        mkdir -p "$ROOTFS/usr/bin"
+        cp "$QEMU_STATIC" "$ROOTFS/usr/bin/"
+    fi
+else
+    DEBOOTSTRAP_ARGS="$DEBOOTSTRAP_ARGS --arch=$TARGET_ARCH"
+fi
+
+debootstrap $DEBOOTSTRAP_ARGS noble "$ROOTFS" http://ports.ubuntu.com/ubuntu-ports
+
+# foreignの場合はsecond stageを実行
+if [ -f "$ROOTFS/debootstrap/debootstrap" ]; then
+    log "Running debootstrap second stage..."
+    # QEMU静的バイナリでsecond stageを実行
+    if [ -n "${QEMU_STATIC:-}" ] && [ -f "$QEMU_STATIC" ]; then
+        cp "$QEMU_STATIC" "$ROOTFS/usr/bin/"
+    fi
+    chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
+fi
 
 # ── Step 2: chroot の準備とパッケージインストール ──
 log "Step 2: Installing kernel and KDE Plasma"
+
+# QEMU静的バイナリをchroot内にコピー（クロスアーキテクチャ用）
+if [ -n "${QEMU_STATIC:-}" ] && [ -f "${QEMU_STATIC:-}" ]; then
+    cp "$QEMU_STATIC" "$ROOTFS/usr/bin/"
+fi
 
 # 必要なマウントを設定
 mount -t proc proc "$ROOTFS/proc"

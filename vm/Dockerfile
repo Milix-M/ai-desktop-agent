@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     debootstrap \
     qemu-utils \
     e2fsprogs \
+    qemu-user-static \
     && rm -rf /var/lib/apt/lists/*
 
 ENV IMAGE_SIZE=20G
