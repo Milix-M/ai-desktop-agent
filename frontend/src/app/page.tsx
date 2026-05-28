@@ -24,9 +24,6 @@ export default function Home() {
   const [state, setState] = useState("idle");
   const [subtaskIndex, setSubtaskIndex] = useState(0);
   const [subtaskCount, setSubtaskCount] = useState(0);
-  const [actionCount, setActionCount] = useState(0);
-  const [successCount, setSuccessCount] = useState(0);
-  const [failureCount, setFailureCount] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [vncConnected, setVncConnected] = useState(false);
   const [vmResolution, setVmResolution] = useState<string | undefined>();
@@ -51,16 +48,10 @@ export default function Home() {
           setState(data.state);
           setSubtaskIndex(data.subtask_index);
           setSubtaskCount(data.subtask_count);
-          setActionCount(data.action_count);
           addLog(data.state, "state");
           break;
 
         case "action":
-          if (data.success) {
-            setSuccessCount((n) => n + 1);
-          } else {
-            setFailureCount((n) => n + 1);
-          }
           addLog(
             `${data.action_type} ${data.description || ""}`,
             data.success ? "action" : "error"
@@ -73,7 +64,7 @@ export default function Home() {
 
         case "complete":
           addLog(
-            data.success ? "✅ タスク完了" : "❌ タスク失敗",
+            data.success ? "タスク完了" : "タスク失敗",
             data.success ? "complete" : "error"
           );
           setState(data.success ? "completed" : "failed");
@@ -106,12 +97,9 @@ export default function Home() {
 
   const handleSubmit = useCallback(
     async (instruction: string) => {
-      addLog(`📝 ${instruction}`, "action");
+      addLog(`${instruction}`, "action");
       const result = await createTask(instruction);
       setState(result.state);
-      setActionCount(result.action_count);
-      setSuccessCount(result.success_count);
-      setFailureCount(result.failure_count);
     },
     [addLog]
   );
@@ -134,7 +122,7 @@ export default function Home() {
         <VncViewer onConnectionChange={handleVncChange} />
 
         <div className="sidebar">
-          <h1>🤖 AI Desktop Agent</h1>
+          <h1>AI Desktop Agent</h1>
 
           <InstructionInput
             onSubmit={handleSubmit}
@@ -145,9 +133,6 @@ export default function Home() {
             state={state}
             subtaskIndex={subtaskIndex}
             subtaskCount={subtaskCount}
-            actionCount={actionCount}
-            successCount={successCount}
-            failureCount={failureCount}
           />
 
           <ControlPanel onControl={handleControl} state={state} />

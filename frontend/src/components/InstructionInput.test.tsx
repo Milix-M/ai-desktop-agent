@@ -8,7 +8,7 @@ describe("InstructionInput", () => {
     render(<InstructionInput onSubmit={vi.fn()} disabled={false} />);
 
     expect(screen.getByPlaceholderText(/LibreOffice/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "▶ 実行" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "実行" })).toBeInTheDocument();
   });
 
   it("disables submit button when textarea is empty", () => {
@@ -66,6 +66,6 @@ describe("InstructionInput", () => {
 
     expect(screen.getByPlaceholderText(/LibreOffice/)).toBeDisabled();
     expect(screen.getByRole("button")).toBeDisabled();
-    expect(screen.getByRole("button")).toHaveTextContent("⏳ 処理中...");
+    expect(screen.getByRole("button")).toHaveTextContent("処理中...");
   });
 });

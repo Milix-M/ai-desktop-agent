@@ -4,9 +4,6 @@ interface Props {
   state: string;
   subtaskIndex: number;
   subtaskCount: number;
-  actionCount: number;
-  successCount: number;
-  failureCount: number;
 }
 
 const STATE_CLASSES: Record<string, string> = {
@@ -26,13 +23,10 @@ export default function StatusPanel({
   state,
   subtaskIndex,
   subtaskCount,
-  actionCount,
-  successCount,
-  failureCount,
 }: Props) {
   return (
     <div className="section">
-      <h2>📊 状態</h2>
+      <h2>状態</h2>
       <div className="status-row">
         状態:{" "}
         <span
@@ -46,20 +40,6 @@ export default function StatusPanel({
             サブタスク {subtaskIndex + 1}/{subtaskCount}
           </span>
         )}
-      </div>
-      <div className="stats-grid">
-        <div className="stat">
-          <div className="val">{actionCount}</div>
-          <div className="lbl">アクション</div>
-        </div>
-        <div className="stat">
-          <div className="val">{successCount}</div>
-          <div className="lbl">成功</div>
-        </div>
-        <div className="stat">
-          <div className="val">{failureCount}</div>
-          <div className="lbl">失敗</div>
-        </div>
       </div>
     </div>
   );

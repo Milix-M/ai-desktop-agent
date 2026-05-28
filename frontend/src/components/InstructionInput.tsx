@@ -30,7 +30,7 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
 
   return (
     <div className="section">
-      <h2>📝 指示</h2>
+      <h2>指示</h2>
       <textarea
         id="instruction"
         className="instruction-input"
@@ -46,7 +46,7 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
         onClick={handleSubmit}
         disabled={disabled || !value.trim()}
       >
-        {disabled ? "⏳ 処理中..." : "▶ 実行"}
+        {disabled ? "処理中..." : "実行"}
       </button>
     </div>
   );
