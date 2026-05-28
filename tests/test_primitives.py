@@ -1,11 +1,12 @@
 """Action primitives のテスト。"""
 
 import pytest
+
 from ai_desktop_agent.actions.primitives import (
+    _REQUIRED_PARAMS,
     ALL_ACTION_TYPES,
     Action,
     ActionType,
-    _REQUIRED_PARAMS,
 )
 
 
@@ -123,13 +124,13 @@ class TestActionImmutability:
     def test_cannot_reassign_action_type(self):
         """action_type 再代入で FrozenInstanceError。"""
         action = Action(action_type=ActionType.LEFT_CLICK)
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             action.action_type = ActionType.RIGHT_CLICK  # type: ignore
 
     def test_cannot_reassign_params(self):
         """params フィールドの再代入で FrozenInstanceError。"""
         action = Action(action_type=ActionType.LEFT_CLICK)
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             action.params = {"x": 100}  # type: ignore
 
 

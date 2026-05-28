@@ -1,6 +1,7 @@
 """エージェント状態管理のテスト。"""
 
 import pytest
+
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.state import (
     AgentContext,
@@ -127,18 +128,22 @@ class TestAgentContext:
         assert not ctx.is_task_complete
 
     def test_current_subtask(self):
-        ctx = AgentContext(subtasks=[
-            Subtask(id="s1", description="step 1"),
-            Subtask(id="s2", description="step 2"),
-        ])
+        ctx = AgentContext(
+            subtasks=[
+                Subtask(id="s1", description="step 1"),
+                Subtask(id="s2", description="step 2"),
+            ]
+        )
         assert ctx.current_subtask is not None
         assert ctx.current_subtask.id == "s1"
 
     def test_advance_subtask(self):
-        ctx = AgentContext(subtasks=[
-            Subtask(id="s1", description="step 1"),
-            Subtask(id="s2", description="step 2"),
-        ])
+        ctx = AgentContext(
+            subtasks=[
+                Subtask(id="s1", description="step 1"),
+                Subtask(id="s2", description="step 2"),
+            ]
+        )
         next_st = ctx.advance_subtask()
         assert next_st is not None
         assert next_st.id == "s2"
@@ -157,10 +162,12 @@ class TestAgentContext:
         assert not ctx.is_task_complete
 
     def test_is_task_complete_after_advance(self):
-        ctx = AgentContext(subtasks=[
-            Subtask(id="s1", description="step 1"),
-            Subtask(id="s2", description="step 2"),
-        ])
+        ctx = AgentContext(
+            subtasks=[
+                Subtask(id="s1", description="step 1"),
+                Subtask(id="s2", description="step 2"),
+            ]
+        )
         ctx.advance_subtask()  # → s2
         ctx.advance_subtask()  # → past end
         assert ctx.is_task_complete
@@ -169,14 +176,18 @@ class TestAgentContext:
         ctx = AgentContext()
         action = Action(action_type=ActionType.LEFT_CLICK)
         ctx.record_action(action, success=True, duration_ms=150.0)
-        ctx.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), success=False, error="timeout")
+        ctx.record_action(
+            Action(action_type=ActionType.TYPE, params={"text": "hello"}),
+            success=False,
+            error="timeout",
+        )
         assert len(ctx.action_history) == 2
         assert ctx.success_count == 1
         assert ctx.failure_count == 1
 
     def test_last_actions(self):
         ctx = AgentContext()
-        for i in range(15):
+        for _i in range(15):
             action = Action(action_type=ActionType.WAIT, params={"seconds": 1.0})
             ctx.record_action(action, success=True)
         assert len(ctx.last_actions(10)) == 10

@@ -2,6 +2,7 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
 from ai_desktop_agent.server import app as server_app
 
 
