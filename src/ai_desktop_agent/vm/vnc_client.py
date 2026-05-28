@@ -41,9 +41,18 @@ _KEY_MAP: dict[str, str] = {
     "down": "down",
     "left": "left",
     "right": "right",
-    "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4",
-    "f5": "f5", "f6": "f6", "f7": "f7", "f8": "f8",
-    "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12",
+    "f1": "f1",
+    "f2": "f2",
+    "f3": "f3",
+    "f4": "f4",
+    "f5": "f5",
+    "f6": "f6",
+    "f7": "f7",
+    "f8": "f8",
+    "f9": "f9",
+    "f10": "f10",
+    "f11": "f11",
+    "f12": "f12",
     "ctrl": "ctrl",
     "control": "ctrl",
     "alt": "alt",
@@ -72,7 +81,7 @@ class VNCClient(DisplayBackend):
     """
 
     def __init__(self) -> None:
-        self._client: Any = None   # ThreadedVNCClientProxy
+        self._client: Any = None  # ThreadedVNCClientProxy
         self._connected = False
         self._frame_count = 0
         self._width = 0
@@ -102,7 +111,7 @@ class VNCClient(DisplayBackend):
     def disconnect(self) -> None:
         """VNC接続を切断する。"""
         if self._client is not None:
-            try:
+            try:  # noqa: SIM105
                 self._client.disconnect()
             except Exception:
                 pass
@@ -167,12 +176,16 @@ class VNCClient(DisplayBackend):
         self.mouse_down(button)
         self.mouse_up(button)
 
-    def mouse_double_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
+    def mouse_double_click(
+        self, x: int | None = None, y: int | None = None, button: int = 1
+    ) -> None:
         """ダブルクリック。"""
         self.mouse_click(x, y, button)
         self.mouse_click(button=button)
 
-    def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1) -> None:
+    def mouse_drag(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1
+    ) -> None:
         """ドラッグ操作。"""
         self._ensure_connected()
         self._client.mouseMove(start_x, start_y)

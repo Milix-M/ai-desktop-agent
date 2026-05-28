@@ -3,12 +3,9 @@
 WebSocket でフロントエンドと通信し、TaskSession を管理する。
 """
 
-import asyncio
 import logging
-from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ai_desktop_agent.server.session import TaskSession
@@ -35,6 +32,7 @@ class TaskStatus(BaseModel):
 
 
 # ── REST API ──────────────────────────────────────────
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -66,8 +64,12 @@ async def get_current_task() -> TaskStatus:
     """現在のタスク状態を返す。"""
     if _active_session is None:
         return TaskStatus(
-            session_id=None, state="idle", is_running=False,
-            action_count=0, success_count=0, failure_count=0,
+            session_id=None,
+            state="idle",
+            is_running=False,
+            action_count=0,
+            success_count=0,
+            failure_count=0,
         )
     return _make_status(_active_session)
 
@@ -98,6 +100,7 @@ async def stop_task() -> dict[str, str]:
 
 # ── WebSocket ─────────────────────────────────────────
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     """WebSocket エンドポイント。
@@ -113,36 +116,40 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     # セッションのイベントを WebSocket に転送する
     async def on_state(state, ctx):
-        try:
-            await ws.send_json({
-                "type": "state",
-                "state": state.value,
-                "subtask_index": ctx.current_subtask_index,
-                "subtask_count": len(ctx.subtasks),
-                "action_count": len(ctx.action_history),
-            })
+        try:  # noqa: SIM105
+            await ws.send_json(
+                {
+                    "type": "state",
+                    "state": state.value,
+                    "subtask_index": ctx.current_subtask_index,
+                    "subtask_count": len(ctx.subtasks),
+                    "action_count": len(ctx.action_history),
+                }
+            )
         except Exception:
             pass
 
     async def on_action(action, success):
-        try:
-            await ws.send_json({
-                "type": "action",
-                "action_type": action.action_type.value,
-                "description": action.description,
-                "success": success,
-            })
+        try:  # noqa: SIM105
+            await ws.send_json(
+                {
+                    "type": "action",
+                    "action_type": action.action_type.value,
+                    "description": action.description,
+                    "success": success,
+                }
+            )
         except Exception:
             pass
 
     async def on_error(error):
-        try:
+        try:  # noqa: SIM105
             await ws.send_json({"type": "error", "message": error})
         except Exception:
             pass
 
     async def on_complete(success):
-        try:
+        try:  # noqa: SIM105
             await ws.send_json({"type": "complete", "success": success})
         except Exception:
             pass
@@ -166,6 +173,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 
 # ── ヘルパー ──────────────────────────────────────────
+
 
 def _make_status(session: TaskSession) -> TaskStatus:
     ctx = session.loop.context

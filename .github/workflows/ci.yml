@@ -1,0 +1,89 @@
+name: CI
+
+# develop と PR で実行
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+# 同一ブランチの連続push時は前のrunをキャンセル
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run ruff check
+        run: uv run ruff check src/ tests/
+
+  format:
+    name: Format (ruff format --check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run ruff format check
+        run: uv run ruff format --check src/ tests/
+
+  test:
+    name: Test (pytest + coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests with coverage
+        run: uv run pytest --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
+
+      - name: Upload coverage to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # 全ジョブが通ったことの確認（branch protection用）
+  all-checks:
+    name: All checks passed
+    needs: [lint, format, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.format.result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "Some checks failed"
+            exit 1
+          fi
+          echo "All checks passed"

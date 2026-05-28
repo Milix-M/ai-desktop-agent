@@ -1,12 +1,13 @@
 """エージェントループのテスト。"""
 
 import pytest
-from ai_desktop_agent.actions.primitives import Action, ActionType
-from ai_desktop_agent.agent.state import AgentContext, AgentState, Goal, Subtask
-from ai_desktop_agent.agent.loop import AgentLoop, InvalidTransitionError
 
+from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.agent.loop import AgentLoop, InvalidTransitionError
+from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 
 # ── フィクスチャ ──────────────────────────────────────
+
 
 @pytest.fixture
 def loop() -> AgentLoop:
@@ -22,14 +23,17 @@ def loop_with_goal(loop: AgentLoop) -> AgentLoop:
 
 @pytest.fixture
 def loop_executing(loop_with_goal: AgentLoop) -> AgentLoop:
-    loop_with_goal.plan_ready([
-        Subtask(id="s1", description="step 1"),
-        Subtask(id="s2", description="step 2"),
-    ])
+    loop_with_goal.plan_ready(
+        [
+            Subtask(id="s1", description="step 1"),
+            Subtask(id="s2", description="step 2"),
+        ]
+    )
     return loop_with_goal
 
 
 # ── 初期状態 ──────────────────────────────────────────
+
 
 class TestInitialState:
     def test_default_state_is_idle(self, loop):
@@ -43,6 +47,7 @@ class TestInitialState:
 
 
 # ── 正常なライフサイクル ──────────────────────────────
+
 
 class TestHappyPath:
     """IDLE → UNDERSTANDING → PLANNING → EXECUTING → ... → COMPLETED → IDLE"""
@@ -81,6 +86,7 @@ class TestHappyPath:
 
 # ── 無効遷移 ──────────────────────────────────────────
 
+
 class TestInvalidTransitions:
     def test_idle_to_executing_raises(self, loop):
         with pytest.raises(InvalidTransitionError):
@@ -110,6 +116,7 @@ class TestInvalidTransitions:
 
 
 # ── エラー回復パス ────────────────────────────────────
+
 
 class TestRecoveryPath:
     def test_verify_failed_to_recovering_to_retry(self, loop_executing):
@@ -151,6 +158,7 @@ class TestRecoveryPath:
 
 # ── 計画失敗パス ──────────────────────────────────────
 
+
 class TestPlanningFailure:
     def test_understanding_failed(self, loop):
         loop.start(Goal(description="x"))
@@ -163,6 +171,7 @@ class TestPlanningFailure:
 
 
 # ── 一時停止・再開 ────────────────────────────────────
+
 
 class TestPauseResume:
     def test_pause_from_executing(self, loop_executing):
@@ -182,6 +191,7 @@ class TestPauseResume:
 
 # ── サブタスク進行 ────────────────────────────────────
 
+
 class TestSubtaskProgression:
     def test_verify_success_after_last_subtask(self, loop):
         """全サブタスク完了後に verify_subtask_done → COMPLETED。"""
@@ -199,11 +209,13 @@ class TestSubtaskProgression:
     def test_multiple_subtasks_complete_in_order(self, loop):
         loop.start(Goal(description="test"))
         loop.understanding_done()
-        loop.plan_ready([
-            Subtask(id="s1", description="step 1"),
-            Subtask(id="s2", description="step 2"),
-            Subtask(id="s3", description="step 3"),
-        ])
+        loop.plan_ready(
+            [
+                Subtask(id="s1", description="step 1"),
+                Subtask(id="s2", description="step 2"),
+                Subtask(id="s3", description="step 3"),
+            ]
+        )
         assert loop.context.current_subtask is not None
         assert loop.context.current_subtask.id == "s1"
 
@@ -227,6 +239,7 @@ class TestSubtaskProgression:
 
 
 # ── フック ────────────────────────────────────────────
+
 
 class TestHooks:
     def test_on_enter(self, loop):
@@ -253,10 +266,10 @@ class TestHooks:
 
 # ── アクション記録 ────────────────────────────────────
 
+
 class TestActionRecording:
     def test_record_action(self, loop_executing):
-        action = Action(action_type=ActionType.LEFT_CLICK,
-                        params={"x": 10, "y": 20})
+        action = Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20})
         loop_executing.record_action(action, success=True, duration_ms=50.0)
         assert loop_executing.context.success_count == 1
         assert len(loop_executing.context.action_history) == 1

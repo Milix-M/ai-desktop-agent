@@ -7,15 +7,15 @@ AgentLoop + ActionExecutor + LLMProvider を束ね、
 import asyncio
 import logging
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.agent.llm.base import LLMProvider
+from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+from ai_desktop_agent.agent.llm.types import ActionDecision, ErrorContext
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
-from ai_desktop_agent.agent.llm.base import LLMProvider
-from ai_desktop_agent.agent.llm.types import ActionDecision, ErrorContext
-from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
 

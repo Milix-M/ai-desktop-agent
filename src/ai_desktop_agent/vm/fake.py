@@ -32,9 +32,9 @@ class FakeDisplayBackend(DisplayBackend):
 
         # 操作ログ
         self.mouse_moves: list[tuple[int, int]] = []
-        self.clicks: list[dict] = []          # {button, x, y}
-        self.drags: list[dict] = []            # {start, end}
-        self.scrolls: list[dict] = []          # {direction, amount}
+        self.clicks: list[dict] = []  # {button, x, y}
+        self.drags: list[dict] = []  # {start, end}
+        self.scrolls: list[dict] = []  # {direction, amount}
         self.key_presses: list[str] = []
         self.key_combos: list[list[str]] = []
         self.text_inputs: list[str] = []
@@ -91,14 +91,18 @@ class FakeDisplayBackend(DisplayBackend):
         self.mouse_moves.append((x, y))
         self.clicks.append({"button": button, "x": x, "y": y, "double": True})
 
-    def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1) -> None:
+    def mouse_drag(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1
+    ) -> None:
         self.mouse_moves.append((start_x, start_y))
         self.mouse_moves.append((end_x, end_y))
-        self.drags.append({
-            "start": (start_x, start_y),
-            "end": (end_x, end_y),
-            "button": button,
-        })
+        self.drags.append(
+            {
+                "start": (start_x, start_y),
+                "end": (end_x, end_y),
+                "button": button,
+            }
+        )
 
     def mouse_scroll(self, direction: str, amount: int) -> None:
         self.scrolls.append({"direction": direction, "amount": amount})

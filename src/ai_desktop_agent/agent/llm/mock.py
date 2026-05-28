@@ -4,7 +4,6 @@
 """
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
-from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
@@ -14,6 +13,7 @@ from ai_desktop_agent.agent.llm.types import (
     UnderstandingResult,
     VerificationResult,
 )
+from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 
 
 class MockLLMProvider(LLMProvider):
@@ -57,7 +57,7 @@ class MockLLMProvider(LLMProvider):
         if self._decompose_result:
             return self._decompose_result
         return DecompositionResult(
-            subtasks=[Subtask(id=f"step_{subtask_count+1}", description=goal.description)],
+            subtasks=[Subtask(id=f"step_{subtask_count + 1}", description=goal.description)],
             reasoning="mock decomposition",
         )
 

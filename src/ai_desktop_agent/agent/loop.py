@@ -5,8 +5,8 @@ AgentLoop は AgentContext の状態遷移を管理する。
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from ai_desktop_agent.actions.primitives import Action
 from ai_desktop_agent.agent.state import (
@@ -24,9 +24,7 @@ class InvalidTransitionError(ValueError):
     """不正な状態遷移が試みられた場合のエラー。"""
 
     def __init__(self, from_state: AgentState, to_state: AgentState) -> None:
-        super().__init__(
-            f"不正な状態遷移: {from_state.value} → {to_state.value}"
-        )
+        super().__init__(f"不正な状態遷移: {from_state.value} → {to_state.value}")
         self.from_state = from_state
         self.to_state = to_state
 
@@ -61,11 +59,13 @@ class AgentLoop:
             raise InvalidTransitionError(from_state, to_state)
 
         self.context.state = to_state
-        self._history.append(TransitionRecord(
-            from_state=from_state,
-            to_state=to_state,
-            timestamp=time.monotonic(),
-        ))
+        self._history.append(
+            TransitionRecord(
+                from_state=from_state,
+                to_state=to_state,
+                timestamp=time.monotonic(),
+            )
+        )
 
         # 遷移後フックを実行
         for hook in self._hooks.get(to_state, []):

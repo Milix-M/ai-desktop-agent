@@ -1,8 +1,9 @@
 """LLMプロバイダ型定義とモックのテスト。"""
 
 import pytest
+
 from ai_desktop_agent.actions.primitives import Action, ActionType
-from ai_desktop_agent.agent.state import Goal, Subtask
+from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
     DecompositionResult,
@@ -12,13 +13,12 @@ from ai_desktop_agent.agent.llm.types import (
     UnderstandingResult,
     VerificationResult,
 )
-from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+from ai_desktop_agent.agent.state import Goal, Subtask
 
 
 class TestActionDecision:
     def test_create_valid(self):
-        action = Action(action_type=ActionType.LEFT_CLICK,
-                        params={"x": 100, "y": 200})
+        action = Action(action_type=ActionType.LEFT_CLICK, params={"x": 100, "y": 200})
         decision = ActionDecision(
             action=action,
             expected_effect="メニューが開く",
@@ -106,6 +106,7 @@ class TestUnderstandingResult:
 
 
 # ── MockLLMProvider ────────────────────────────────────
+
 
 @pytest.mark.asyncio
 class TestMockLLMProvider:

@@ -42,7 +42,7 @@ class ActionType(StrEnum):
 # アクション種別ごとの必須パラメータ定義
 _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.MOUSE_MOVE: {"x", "y"},
-    ActionType.LEFT_CLICK: set(),       # x, y はオプション（省略時は現在位置）
+    ActionType.LEFT_CLICK: set(),  # x, y はオプション（省略時は現在位置）
     ActionType.RIGHT_CLICK: set(),
     ActionType.DOUBLE_CLICK: set(),
     ActionType.MIDDLE_CLICK: set(),
@@ -94,15 +94,11 @@ class Action:
 
         missing = required - provided
         if missing:
-            raise ValueError(
-                f"{self.action_type.value} に必須パラメータが不足: {missing}"
-            )
+            raise ValueError(f"{self.action_type.value} に必須パラメータが不足: {missing}")
 
         unknown = provided - valid_keys
         if unknown:
-            raise ValueError(
-                f"{self.action_type.value} に不明なパラメータ: {unknown}"
-            )
+            raise ValueError(f"{self.action_type.value} に不明なパラメータ: {unknown}")
 
         # description が空なら自動生成
         if not self.description:
@@ -149,7 +145,8 @@ class Action:
             case ActionType.WAIT:
                 return f"{self.params['seconds']}秒待機"
             case ActionType.WAIT_FOR_TEXT:
-                return f"「{self.params['text']}」が表示されるまで待機 (timeout={self.params['timeout']}s)"
+                timeout_s = self.params["timeout"]
+                return f"「{self.params['text']}」が表示されるまで待機 (timeout={timeout_s}s)"
             case ActionType.WAIT_FOR_STILL:
                 return f"画面変化が収まるまで待機 (timeout={self.params['timeout']}s)"
             case ActionType.SCREENSHOT:

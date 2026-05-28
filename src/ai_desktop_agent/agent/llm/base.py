@@ -6,7 +6,6 @@
 
 from abc import ABC, abstractmethod
 
-from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
     DecompositionResult,
@@ -15,6 +14,7 @@ from ai_desktop_agent.agent.llm.types import (
     UnderstandingResult,
     VerificationResult,
 )
+from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 
 
 class LLMProvider(ABC):
