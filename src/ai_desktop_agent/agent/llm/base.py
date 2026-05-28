@@ -15,6 +15,7 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 
 class LLMProvider(ABC):
@@ -75,6 +76,7 @@ class LLMProvider(ABC):
         current_subtask: Subtask,
         action_history: list[ActionRecord],
         error_context: ErrorContext | None = None,
+        screenshot: Screenshot | None = None,
     ) -> ActionDecision:
         """現在の状態から次のアクションを決定する。
 
@@ -85,6 +87,7 @@ class LLMProvider(ABC):
             current_subtask: 現在実行中のサブタスク。
             action_history: 全アクションの実行履歴。
             error_context: エラー回復中の場合はエラー情報。
+            screenshot: 現在のデスクトップ画面（PNG画像）。
 
         Returns:
             次に実行すべきアクションの決定。

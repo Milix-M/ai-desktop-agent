@@ -6,6 +6,7 @@ AgentLoop + ActionExecutor + LLMProvider を束ね、
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import Callable
 
@@ -18,6 +19,8 @@ from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from ai_desktop_agent.vm.screenshot import Screenshot
+from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,19 @@ class TaskSession:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
         self.llm = llm or MockLLMProvider()
-        self.display = display or FakeDisplayBackend()
+
+        if display is not None:
+            self.display = display
+        elif os.environ.get("VNC_HOST"):
+            vnc_host = os.environ["VNC_HOST"]
+            vnc_port = int(os.environ.get("VNC_PORT", "5900"))
+            vnc_password = os.environ.get("VNC_PASSWORD")
+            logger.info("VNC 接続: %s:%d", vnc_host, vnc_port)
+            self.display = VNCClient()
+            self.display.connect(vnc_host, vnc_port, vnc_password)
+        else:
+            self.display = FakeDisplayBackend()
+
         self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None
 
@@ -230,12 +245,24 @@ class TaskSession:
         await self._emit_state_change()
 
     async def _decide_action(self, subtask: Subtask) -> ActionDecision:
-        """LLMに次のアクションを決定させる。"""
+        """LLMに次のアクションを決定させる。画面キャプチャ付き。"""
+        screenshot = self._capture_screenshot()
         return await self.llm.decide_next_action(
             goal=self.loop.context.goal or Goal(description=""),
             current_subtask=subtask,
             action_history=self.loop.context.action_history,
+            screenshot=screenshot,
         )
+
+    def _capture_screenshot(self) -> Screenshot | None:
+        """現在のVM画面をキャプチャする。失敗時は None。"""
+        if not self.display.is_connected:
+            return None
+        try:
+            return self.display.capture_screen()
+        except Exception:
+            logger.debug("画面キャプチャに失敗", exc_info=True)
+            return None
 
     # ── 制御 ──────────────────────────────────────────
 

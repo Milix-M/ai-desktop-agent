@@ -14,6 +14,7 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 
 class MockLLMProvider(LLMProvider):
@@ -67,6 +68,7 @@ class MockLLMProvider(LLMProvider):
         current_subtask: Subtask,
         action_history: list[ActionRecord],
         error_context: ErrorContext | None = None,
+        screenshot: Screenshot | None = None,
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))
         if self._decide_result:
