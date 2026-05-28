@@ -1,24 +1,23 @@
 #cloud-config
 # AI Desktop Agent VM — cloud-init user-data
-# 初回起動時にKDE Plasmaデスクトップ環境をセットアップする
+# getty自動ログイン → .profileからKDE Plasmaを起動（SDDM不要）
 
 hostname: desktop-agent
 manage_etc_hosts: true
 
 # インストールパッケージ
 # - kde-plasma-desktop: KDE Plasma 最小デスクトップ
-# - sddm: KDEネイティブのディスプレイマネージャ（自動ログイン用）
 # - konsole, firefox: AIが操作するアプリケーション
 # - xdotool, wmctrl: ウィンドウ操作ユーティリティ
+# - xauth: startplasma-x11に必要
 packages:
   - kde-plasma-desktop
-  - sddm
   - konsole
   - firefox
   - dolphin
   - xdotool
   - wmctrl
-  - libgl1-mesa-dri
+  - xauth
 
 # エージェント用ユーザー
 users:
@@ -28,46 +27,40 @@ users:
     lock_passwd: false
     shell: /bin/bash
 
-# SDDM 設定
-# - DisplayServer=x11: QEMU仮想GPUではWaylandがクラッシュするためX11固定
-# - Autologin: agentユーザーでPlasmaに自動ログイン
+# 設定ファイル
 write_files:
-  - path: /etc/sddm.conf.d/autologin.conf
+  # agentの.profile: tty1ならKDEを自動起動
+  - path: /home/agent/.profile
     content: |
-      [Autologin]
-      User=agent
-      Session=plasma
-      Relogin=false
-
-      [General]
-      DisplayServer=x11
-      HaltCommand=
-      RebootCommand=
-    permissions: "0644"
-  
-  # 念のためsddm.confにも書いておく（sddm.conf.dが読み込まれない環境対策）
-  - path: /etc/sddm.conf
-    content: |
-      [Autologin]
-      User=agent
-      Session=plasma
-      Relogin=false
-
-      [General]
-      DisplayServer=x11
+      # ~/.profile: コンソールログイン時にKDE Plasmaを自動起動
+      if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+          exec startplasma-x11
+      fi
+    owner: "agent:agent"
     permissions: "0644"
 
 # 起動時コマンド
 runcmd:
+  # agentユーザーのパスワード設定
   - echo "agent:agent" | chpasswd
-  - systemctl enable sddm
-  - systemctl set-default graphical.target
 
-# cloud-init完了後に再起動 → graphical.target有効化 → SDDM起動
-# （QEMUのkillでファイルシステムが壊れる前に、VM自身が綺麗に再起動する）
+  # getty@tty1 で agent を自動ログイン
+  - mkdir -p /etc/systemd/system/getty@tty1.service.d
+  - |
+    cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+    [Service]
+    ExecStart=
+    ExecStart=-/sbin/agetty --autologin agent --noclear %I $TERM
+    EOF
+
+  # システム起動時の自動ログイン用にautologin@tty1を有効化（gettyの代わり）
+  - systemctl daemon-reload
+  - systemctl enable getty@tty1
+
+# cloud-init完了後にVM自身が綺麗にpoweroff → QEMUが-no-rebootで終了
 power_state:
   mode: poweroff
   timeout: 30
   condition: true
 
-final_message: "VM setup complete. KDE Plasma desktop is ready at VNC port 5900."
+final_message: "VM setup complete. KDE Plasma desktop will start automatically on next boot via getty autologin."
