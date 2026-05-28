@@ -250,4 +250,4 @@ class TestBackendDockerfile:
 
     def test_exposes_backend_port(self):
         content = (PROJECT_ROOT / "Dockerfile").read_text()
-        assert "EXPOSE 8080" in content, "Dockerfile に EXPOSE 8080 が必要です"
+        assert "EXPOSE 8081" in content, "Dockerfile に EXPOSE 8081 が必要です"
