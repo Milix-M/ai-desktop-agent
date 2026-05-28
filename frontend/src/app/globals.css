@@ -24,10 +24,18 @@ body {
   overflow: hidden;
 }
 
+/* ── App Container ── */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
 /* ── Layout ── */
 .main-layout {
   display: flex;
-  height: 100vh;
+  flex: 1;
   overflow: hidden;
 }
 
@@ -293,6 +301,43 @@ body {
   border-left: 2px solid var(--success);
   color: var(--success);
 }
+
+/* ── Status Bar ── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 28px;
+  min-height: 28px;
+  background: #0d1b2a;
+  border-top: 1px solid var(--border);
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.sb-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.sb-spacer {
+  flex: 1;
+}
+
+.sb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sb-dot.green { background: var(--success); }
+.sb-dot.red { background: var(--error); }
+.sb-dot.blue { background: var(--accent); }
+.sb-dot.yellow { background: var(--warning); }
 
 .log .time {
   color: var(--dim);
