@@ -25,9 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# KDE Plasma 最小デスクトップ
+# KDE Plasma 最小デスクトップ + SDDM ディスプレイマネージャ
 RUN apt-get update && apt-get install -y --no-install-recommends \
     kde-plasma-desktop \
+    sddm \
     konsole \
     firefox \
     xdotool \
@@ -36,22 +37,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dolphin \
     && rm -rf /var/lib/apt/lists/*
 
-# agent ユーザーと自動ログイン設定
+# agent ユーザーとSDDM自動ログイン設定
 RUN useradd -m -s /bin/bash -G sudo agent \
     && echo "agent:agent" | chpasswd \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
 
-RUN mkdir -p /etc/systemd/system/getty@tty1.service.d
-RUN echo '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin agent --noclear %I $TERM' \
-    > /etc/systemd/system/getty@tty1.service.d/autologin.conf
+RUN mkdir -p /etc/sddm.conf.d
+RUN echo '[Autologin]\nUser=agent\nSession=plasma-x11\n' \
+    > /etc/sddm.conf.d/autologin.conf
 
-RUN echo 'if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then\n    exec startplasma-x11\nfi' \
-    > /home/agent/.profile \
-    && chown agent:agent /home/agent/.profile
-
-# systemd ターゲットを graphical.target に
+# systemd: graphical.target + SDDM有効化
 RUN systemctl set-default graphical.target \
-    && systemctl enable getty@tty1 \
+    && systemctl enable sddm \
     && systemctl enable NetworkManager
 
 # ── rootfs から ext4 → qcow2 イメージを作成 ──

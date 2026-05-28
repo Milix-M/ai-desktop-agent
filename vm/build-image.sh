@@ -15,7 +15,7 @@ KERNEL_VER=$(ls /lib/modules | head -1)
 log "Kernel version: $KERNEL_VER"
 cp "/boot/vmlinuz-$KERNEL_VER" "$IMAGE_DIR/vmlinuz"
 cp "/boot/initrd.img-$KERNEL_VER" "$IMAGE_DIR/initrd.img"
-echo "console=ttyS0 root=/dev/vda rw" > "$IMAGE_DIR/cmdline.txt"
+echo "console=tty0 console=ttyS0 root=/dev/vda rw" > "$IMAGE_DIR/cmdline.txt"
 
 # ── rootfsを別ディレクトリにコピー（tarパイプで中間ファイルなし） ──
 log "Copying rootfs (tar pipe, no intermediate file)..."
