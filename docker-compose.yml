@@ -45,5 +45,14 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  websockify:
+    build:
+      context: ./websockify
+      dockerfile: Dockerfile
+    command: 0.0.0.0:6080 vm:5900
+    ports:
+      - "6080:6080"
+    restart: unless-stopped
+
 volumes:
   vm_data:
