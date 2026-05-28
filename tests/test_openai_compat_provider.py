@@ -9,6 +9,7 @@ from ai_desktop_agent.agent.llm.factory import create_llm_provider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.openai_compat_provider import OpenAICompatProvider
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 # ── OpenAICompatProvider ─────────────────────────────
 
@@ -20,6 +21,10 @@ class TestOpenAICompatProvider:
     def provider(self):
         with patch("openai.AsyncOpenAI", autospec=True):
             return OpenAICompatProvider(api_key="test-key")
+
+    @staticmethod
+    def _fake_screenshot() -> Screenshot:
+        return Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
 
     def _make_mock_response(self, json_data: dict) -> MagicMock:
         """JSONデータを含むモックAPIレスポンスを作成。"""
@@ -108,7 +113,7 @@ class TestOpenAICompatProvider:
         )
         goal = Goal(description="test")
         subtask = Subtask(id="s1", description="click")
-        result = await provider.decide_next_action(goal, subtask, [])
+        result = await provider.decide_next_action(goal, subtask, [], self._fake_screenshot())
         assert result.action.action_type == ActionType.LEFT_CLICK
         assert result.action.params == {"x": 100, "y": 200}
 
@@ -126,7 +131,7 @@ class TestOpenAICompatProvider:
             )
         )
         result = await provider.decide_next_action(
-            Goal(description="t"), Subtask(id="s1", description="d"), []
+            Goal(description="t"), Subtask(id="s1", description="d"), [], self._fake_screenshot()
         )
         assert result.action.action_type == ActionType.SUBTASK_COMPLETE
 
@@ -154,6 +159,7 @@ class TestOpenAICompatProvider:
             Goal(description="t"),
             Subtask(id="s1", description="retry"),
             [],
+            self._fake_screenshot(),
             error_context=error,
         )
         assert result.action.action_type == ActionType.WAIT
@@ -268,6 +274,49 @@ class TestOpenAICompatProvider:
         assert "✗" in text
         assert "mouse_move" in text
         assert "timeout" in text
+
+    # ── スクリーンショット ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_decide_next_action_with_screenshot(self, provider):
+        """decide_next_action にスクリーンショットを渡せる。"""
+        from unittest.mock import AsyncMock
+
+        from ai_desktop_agent.vm.screenshot import Screenshot
+
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {
+                    "action_type": "left_click",
+                    "params": {"x": 100, "y": 200},
+                    "expected_effect": "クリック",
+                    "confidence": 0.9,
+                    "reasoning": "ボタンを押す",
+                }
+            )
+        )
+        goal = Goal(description="ファイルを開く", intent="file_management")
+        subtask = Subtask(id="s1", description="ファイルマネージャーを起動")
+        screenshot = Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+
+        result = await provider.decide_next_action(goal, subtask, [], screenshot=screenshot)
+        assert result.action.action_type == ActionType.LEFT_CLICK
+
+    @pytest.mark.asyncio
+    async def test_call_with_image_bytes(self, provider):
+        """_call に image_bytes を渡すと vision API リクエストになる。"""
+        from unittest.mock import AsyncMock
+
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {"action_type": "wait", "params": {}, "confidence": 1.0, "reasoning": "ok"}
+            )
+        )
+        data = await provider._call(
+            "prompt",
+            image_bytes=b"fake_png_data",
+        )
+        assert data["action_type"] == "wait"
 
 
 # ── LLMProviderFactory ────────────────────────────────

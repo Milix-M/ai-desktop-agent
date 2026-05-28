@@ -25,7 +25,7 @@ class FakeDisplayBackend(DisplayBackend):
     """
 
     def __init__(self, screen_width: int = 1024, screen_height: int = 768) -> None:
-        self._connected = False
+        self._connected = True  # テストではデフォルトで接続状態
         self._screen_width = screen_width
         self._screen_height = screen_height
         self._frame_count = 0

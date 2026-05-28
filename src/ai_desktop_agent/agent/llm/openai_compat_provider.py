@@ -9,6 +9,7 @@ JSON パースエラーを根本的に防止する。
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +284,7 @@ class OpenAICompatProvider(LLMProvider):
         goal: Goal,
         current_subtask: Subtask,
         action_history: list[ActionRecord],
+        screenshot: Screenshot,
         error_context: ErrorContext | None = None,
     ) -> ActionDecision:
         history_text = self._format_action_history(action_history[-10:])
@@ -306,7 +309,8 @@ ID: {current_subtask.id}
 {error_block}
 【直近の操作履歴】
 {history_text}"""
-        data = await self._call(prompt, _SCHEMA_ACTION)
+        image_bytes = screenshot.image_bytes
+        data = await self._call(prompt, _SCHEMA_ACTION, image_bytes=image_bytes)
         action_type_str = data.get("action_type", "subtask_complete")
         try:
             action_type = ActionType(action_type_str)
@@ -383,12 +387,30 @@ ID: {subtask.id}
 
     # ── 内部 ──────────────────────────────────────────
 
-    async def _call(self, prompt: str, json_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _call(
+        self,
+        prompt: str,
+        json_schema: dict[str, Any] | None = None,
+        image_bytes: bytes | None = None,
+    ) -> dict[str, Any]:
         """OpenAI API を呼び出し、JSON 応答を返す。
 
-        json_schema 指定時は Structured Output で出力を強制し、
-        JSON パースエラーを防止する。
+        json_schema 指定時は Structured Output で出力を強制。
+        image_bytes 指定時は Vision API でマルチモーダルリクエスト。
         """
+        # メッセージ構築
+        if image_bytes:
+            b64 = base64.b64encode(image_bytes).decode("ascii")
+            user_content: Any = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                },
+            ]
+        else:
+            user_content = prompt
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -398,7 +420,7 @@ ID: {subtask.id}
                     "temperature": self._temperature,
                     "messages": [
                         {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": user_content},
                     ],
                 }
                 if json_schema:
