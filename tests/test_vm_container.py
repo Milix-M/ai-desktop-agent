@@ -137,18 +137,17 @@ class TestCloudInit:
         data = yaml.safe_load(path.read_text())
         assert "users" in data, "user-data に users キーが必要です"
 
-    def test_user_data_installs_desktop(self):
+    def test_user_data_installs_kde_plasma_desktop(self):
         path = VM_DIR / "cloud-init" / "user-data"
         data = yaml.safe_load(path.read_text())
         packages = data.get("packages", [])
-        assert "xorg" in packages, "デスクトップ用に xorg が必要です"
-        assert "openbox" in packages, "ウィンドウマネージャ openbox が必要です"
+        assert "kde-plasma-desktop" in packages, "KDE Plasma デスクトップが必要です"
 
-    def test_user_data_installs_lightdm(self):
+    def test_user_data_installs_sddm(self):
         path = VM_DIR / "cloud-init" / "user-data"
         data = yaml.safe_load(path.read_text())
         packages = data.get("packages", [])
-        assert "lightdm" in packages, "自動ログイン用に lightdm が必要です"
+        assert "sddm" in packages, "KDE用ディスプレイマネージャ sddm が必要です"
 
     def test_user_data_installs_automation_tools(self):
         path = VM_DIR / "cloud-init" / "user-data"
@@ -164,10 +163,10 @@ class TestCloudInit:
         user_names = [u.get("name") for u in users if isinstance(u, dict)]
         assert "agent" in user_names, "エージェント用ユーザー 'agent' が必要です"
 
-    def test_user_data_configures_autologin(self):
+    def test_user_data_configures_sddm_autologin(self):
         content = (VM_DIR / "cloud-init" / "user-data").read_text()
-        assert "autologin-user=agent" in content, \
-            "lightdm の自動ログイン設定が必要です"
+        assert "User=agent" in content, "SDDM の自動ログイン設定 (User=agent) が必要です"
+        assert "Session=plasma" in content, "Plasma セッション設定が必要です"
 
     def test_meta_data_has_instance_id(self):
         path = VM_DIR / "cloud-init" / "meta-data"

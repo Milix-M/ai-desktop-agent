@@ -24,15 +24,15 @@ if [ ! -f "$VM_IMAGE" ]; then
     wget -q --show-progress -O "$BACKING_IMAGE" "$CLOUD_IMAGE_URL"
 
     # バッキングファイルからオーバーレイを作成
-    log "Creating overlay image (20G)..."
-    qemu-img create -f qcow2 -F qcow2 -b "$BACKING_IMAGE" "$VM_IMAGE" 20G
+    log "Creating overlay image (30G)..."
+    qemu-img create -f qcow2 -F qcow2 -b "$BACKING_IMAGE" "$VM_IMAGE" 30G
 
     # cloud-init seed イメージ作成
     log "Creating cloud-init seed..."
     cloud-localds "$SEED_IMAGE" /cloud-init/user-data /cloud-init/meta-data
 
     # 初回起動（cloud-init実行のため、snapshotなし）
-    log "Booting VM for cloud-init provisioning (3-8 min)..."
+    log "Booting VM for cloud-init provisioning (5-10 min, KDE Plasma)..."
     qemu-system-x86_64 \
         -enable-kvm \
         -cpu host \
@@ -53,7 +53,7 @@ if [ ! -f "$VM_IMAGE" ]; then
     for i in $(seq 1 90); do
         if echo | nc -z localhost "$VM_VNC_PORT" 2>/dev/null; then
             log "VNC port $VM_VNC_PORT is open, waiting for cloud-init completion..."
-            sleep 120
+            sleep 240
             break
         fi
         sleep 10
