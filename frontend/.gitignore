@@ -1,0 +1,9 @@
+# Next.js
+.next/
+node_modules/
+
+# Output
+out/
+
+# Env
+.env*.local

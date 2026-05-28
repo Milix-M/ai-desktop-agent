@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir uv && \
     uv sync --frozen --no-dev
 
 COPY src/ ./src/
-COPY frontend/ ./frontend/
 
 EXPOSE 8080
 CMD ["uv", "run", "uvicorn", "ai_desktop_agent.server.app:app", "--host", "0.0.0.0", "--port", "8080"]

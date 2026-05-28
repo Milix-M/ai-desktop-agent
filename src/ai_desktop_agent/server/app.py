@@ -1,13 +1,14 @@
 """FastAPI アプリケーション — AI Desktop Agent のバックエンドサーバー。
 
 WebSocket でフロントエンドと通信し、TaskSession を管理する。
+フロントエンドは Next.js で別途配信される。
 """
 
+import contextlib
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ai_desktop_agent.server.session import TaskSession
@@ -16,9 +17,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0")
 
-# フロントエンド HTML
-_frontend_dir = Path(__file__).resolve().parent.parent.parent.parent / "frontend"
-_index_html = _frontend_dir / "index.html"
+# CORS: Next.js (port 3000) からの API 呼び出しを許可
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # アクティブなセッション（シングルトン運用）
 _active_session: TaskSession | None = None
@@ -40,14 +46,6 @@ class TaskStatus(BaseModel):
 # ── REST API ──────────────────────────────────────────
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    """フロントエンド HTML を返す。"""
-    if _index_html.exists():
-        return _index_html.read_text(encoding="utf-8")
-    return "<h1>AI Desktop Agent</h1><p>frontend/index.html が見つかりません。</p>"
-
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -59,15 +57,10 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     global _active_session
 
     if _active_session and _active_session.is_running:
-        # 既存タスクを停止
         _active_session.stop()
 
     session = TaskSession()
     _active_session = session
-
-    # WebSocket 用のブリッジ: 状態変化をキューに蓄積
-    # （create_task ではまだ WebSocket は接続されていないので、
-    #   イベントは WS 接続後に送信される）
 
     await session.start_async(req.instruction)
     return _make_status(session)
@@ -130,7 +123,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     # セッションのイベントを WebSocket に転送する
     async def on_state(state, ctx):
-        try:  # noqa: SIM105
+        with contextlib.suppress(Exception):
             await ws.send_json(
                 {
                     "type": "state",
@@ -140,11 +133,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     "action_count": len(ctx.action_history),
                 }
             )
-        except Exception:
-            pass
 
     async def on_action(action, success):
-        try:  # noqa: SIM105
+        with contextlib.suppress(Exception):
             await ws.send_json(
                 {
                     "type": "action",
@@ -153,20 +144,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     "success": success,
                 }
             )
-        except Exception:
-            pass
 
     async def on_error(error):
-        try:  # noqa: SIM105
+        with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": error})
-        except Exception:
-            pass
 
     async def on_complete(success):
-        try:  # noqa: SIM105
+        with contextlib.suppress(Exception):
             await ws.send_json({"type": "complete", "success": success})
-        except Exception:
-            pass
 
     if _active_session:
         _active_session.on_state_change(on_state)
@@ -176,7 +161,6 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     try:
         while True:
-            # クライアントからのメッセージを待つ（ping用）
             data = await ws.receive_text()
             if data == "ping":
                 await ws.send_json({"type": "pong"})
