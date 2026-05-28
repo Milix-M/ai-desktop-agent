@@ -71,9 +71,45 @@ if [ ! -f "$VM_IMAGE" ]; then
         sleep 10
     done
 
-    # cloud-init パッケージインストール完了を待つ（TCGは15分）
-    log "Waiting 15 minutes for cloud-init to install KDE Plasma..."
-    sleep 900
+    # cloud-init 完了を待つ。
+    # TCGは非常に遅いので、VNC解像度の変化でデスクトップ起動を検出する。
+    CLOUD_INIT_TIMEOUT=3600
+    if [ "$USE_KVM" = "true" ] && [ -e /dev/kvm ]; then
+        CLOUD_INIT_TIMEOUT=600
+    fi
+    log "Waiting for cloud-init to finish (max ${CLOUD_INIT_TIMEOUT}s)..."
+    POLL_INTERVAL=30
+    ELAPSED=0
+    while [ $ELAPSED -lt $CLOUD_INIT_TIMEOUT ]; do
+        RESOLUTION=$(timeout 3 python3 -c "
+import socket, struct
+try:
+    s = socket.socket(); s.settimeout(2)
+    s.connect(('localhost', $VM_VNC_PORT))
+    s.recv(12)
+    s.send(b'RFB 003.008\n')
+    n = struct.unpack('B', s.recv(1))[0]
+    if n > 0: s.recv(n)
+    s.send(b'\x01')
+    s.recv(4)
+    s.send(b'\x01')
+    w = struct.unpack('>H', s.recv(2))[0]
+    h = struct.unpack('>H', s.recv(2))[0]
+    s.close()
+    print(f'{w}x{h}')
+except:
+    print('0x0')
+" 2>/dev/null || echo "0x0")
+        log "  VNC resolution: $RESOLUTION (elapsed: ${ELAPSED}s)"
+
+        if [ "$RESOLUTION" != "720x400" ] && [ "$RESOLUTION" != "0x0" ]; then
+            log "Desktop detected! Resolution changed to $RESOLUTION"
+            break
+        fi
+
+        sleep $POLL_INTERVAL
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+    done
 
     # VM を停止
     log "Shutting down provisioning VM (PID=$QEMU_PID)..."
