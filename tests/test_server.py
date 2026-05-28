@@ -3,15 +3,24 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.server import app as server_app
+from ai_desktop_agent.server.session import TaskSession
+from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
 
 @pytest.fixture(autouse=True)
 def _reset_session():
-    """各テスト前にグローバルセッションをリセット。"""
+    """各テスト前にグローバルセッションをリセットし、モックを使うようにする。"""
     server_app._active_session = None
+    # セッションファクトリをモックに差し替え（本番コードパスはそのまま）
+    server_app._create_session = lambda: TaskSession(
+        llm=MockLLMProvider(),
+        display=FakeDisplayBackend(),
+    )
     yield
     server_app._active_session = None
+    server_app._create_session = TaskSession  # デフォルトに戻す
 
 
 @pytest.mark.asyncio

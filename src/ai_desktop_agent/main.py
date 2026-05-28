@@ -23,7 +23,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("AI Desktop Agent v0.1.0 starting...")
-    logger.info("LLM_PROVIDER=%s", os.environ.get("LLM_PROVIDER", "mock"))
+    logger.info("LLM_PROVIDER=%s", os.environ.get("LLM_PROVIDER", "openai"))
     vnc_host = os.environ.get("VNC_HOST", "localhost")
     vnc_port = os.environ.get("VNC_PORT", "5900")
     logger.info("VNC_HOST=%s VNC_PORT=%s", vnc_host, vnc_port)

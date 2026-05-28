@@ -39,7 +39,7 @@ def create_llm_provider(
 
     対応プロバイダ: openai, anthropic, openrouter, ollama, mock
     """
-    provider = provider or os.environ.get("LLM_PROVIDER", "mock")
+    provider = provider or os.environ.get("LLM_PROVIDER", "openai")
 
     if provider == "mock":
         return MockLLMProvider(model=model or "mock-model")
