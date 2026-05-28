@@ -1,26 +1,23 @@
-version: "3.9"
-
 services:
   vm:
     build:
       context: ./vm
       dockerfile: Dockerfile
-    devices:
-      - /dev/kvm:/dev/kvm
     ports:
       - "5900:5900"
     volumes:
       - vm_data:/vm
     environment:
       - VM_IMAGE=/vm/desktop.qcow2
-      - VM_MEMORY=4096
+      - VM_MEMORY=2048
       - VM_VNC_PORT=5900
+      - USE_KVM=${USE_KVM:-false}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "echo | nc -z localhost 5900"]
       interval: 10s
       retries: 5
-      start_period: 300s
+      start_period: 900s
 
   backend:
     build:
@@ -28,15 +25,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       - VNC_HOST=vm
       - VNC_PORT=5900
-      - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
-      - LLM_MODEL=${LLM_MODEL:-anthropic/claude-sonnet-4}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
     volumes:
       - ./data:/app/data
     depends_on:
@@ -50,13 +43,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
-    restart: unless-stopped
-
-  websockify:
-    image: ghcr.io/novnc/websockify:latest
-    command: vm:5900
-    ports:
-      - "6080:5900"
     restart: unless-stopped
 
 volumes:

@@ -4,7 +4,7 @@ FROM node:24-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 COPY tsconfig.json next.config.ts ./
 COPY src/ ./src/
