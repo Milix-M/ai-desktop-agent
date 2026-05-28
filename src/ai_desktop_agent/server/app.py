@@ -29,6 +29,9 @@ app.add_middleware(
 # アクティブなセッション（シングルトン運用）
 _active_session: TaskSession | None = None
 
+# テスト用のセッションファクトリ。テストから差し替え可能。
+_create_session = TaskSession  # type: ignore[var-annotated]
+
 
 class CreateTaskRequest(BaseModel):
     instruction: str
@@ -59,7 +62,7 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     if _active_session and _active_session.is_running:
         _active_session.stop()
 
-    session = TaskSession()
+    session = _create_session()
     _active_session = session
 
     await session.start_async(req.instruction)

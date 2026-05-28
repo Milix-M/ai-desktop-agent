@@ -13,12 +13,11 @@ from collections.abc import Callable
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.base import LLMProvider
-from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+from ai_desktop_agent.agent.llm.factory import create_llm_provider
 from ai_desktop_agent.agent.llm.types import ActionDecision, ErrorContext
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.vm.base import DisplayBackend
-from ai_desktop_agent.vm.fake import FakeDisplayBackend
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
@@ -39,7 +38,7 @@ class TaskSession:
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
-        self.llm = llm or MockLLMProvider()
+        self.llm = llm or create_llm_provider()
 
         if display is not None:
             self.display = display
@@ -51,7 +50,12 @@ class TaskSession:
             self.display = VNCClient()
             self.display.connect(vnc_host, vnc_port, vnc_password)
         else:
-            self.display = FakeDisplayBackend()
+            self.display = VNCClient()
+            # VNC_HOST 未設定の場合は起動エラーにする（モックにフォールバックしない）
+            raise ValueError(
+                "VNC_HOST が設定されていません。"
+                "環境変数 VNC_HOST を設定するか、display オブジェクトを明示的に渡してください。"
+            )
 
         self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None

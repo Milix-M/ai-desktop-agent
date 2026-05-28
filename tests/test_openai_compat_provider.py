@@ -325,8 +325,13 @@ class TestOpenAICompatProvider:
 class TestLLMProviderFactory:
     """create_llm_provider のテスト。"""
 
-    def test_default_is_mock(self):
-        assert isinstance(create_llm_provider(), MockLLMProvider)
+    def test_default_is_openai_requires_key(self):
+        """デフォルトプロバイダはopenai。APIキー未設定時はエラー。"""
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(ValueError, match="OPENAI_API_KEY"),
+        ):
+            create_llm_provider()
 
     def test_explicit_mock(self):
         assert isinstance(create_llm_provider(provider="mock"), MockLLMProvider)
