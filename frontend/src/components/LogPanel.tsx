@@ -11,7 +11,7 @@ export default function LogPanel({ entries }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    endRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [entries.length]);
 
   function escapeHtml(str: string): string {
