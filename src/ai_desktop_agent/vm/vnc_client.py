@@ -97,7 +97,7 @@ class VNCClient(DisplayBackend):
         """VNCサーバーに接続する。"""
         from vncdotool import api
 
-        server = f"{host}:{port}"
+        server = f"{host}::{port}"  # vncdotool: double-colon for explicit port (single colon = display number)
         logger.info("VNC接続中: %s", server)
 
         self._client = api.connect(
@@ -126,7 +126,7 @@ class VNCClient(DisplayBackend):
         self._ensure_connected()
 
         buf = io.BytesIO()
-        self._client.captureScreen(buf)
+        self._client.captureScreen(buf, format="png")
         data = buf.getvalue()
         self._frame_count += 1
 
