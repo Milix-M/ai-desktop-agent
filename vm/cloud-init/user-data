@@ -63,4 +63,11 @@ runcmd:
   - systemctl enable sddm
   - systemctl set-default graphical.target
 
+# cloud-init完了後に再起動 → graphical.target有効化 → SDDM起動
+# （QEMUのkillでファイルシステムが壊れる前に、VM自身が綺麗に再起動する）
+power_state:
+  mode: poweroff
+  timeout: 30
+  condition: true
+
 final_message: "VM setup complete. KDE Plasma desktop is ready at VNC port 5900."
