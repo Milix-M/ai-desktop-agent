@@ -45,8 +45,8 @@ function useBackendHealth(): boolean {
       try {
         const BACKEND_URL =
           typeof window !== "undefined"
-            ? `${window.location.protocol}//${window.location.hostname}:8080`
-            : "http://localhost:8080";
+            ? `${window.location.protocol}//${window.location.hostname}:8081`
+            : "http://localhost:8081";
         const resp = await fetch(`${BACKEND_URL}/health`);
         setAlive(resp.ok);
       } catch {
