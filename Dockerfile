@@ -9,5 +9,7 @@ RUN pip install --no-cache-dir uv && \
 
 COPY src/ ./src/
 
-EXPOSE 8080
-CMD ["uv", "run", "uvicorn", "ai_desktop_agent.server.app:app", "--host", "0.0.0.0", "--port", "8080"]
+ENV PYTHONPATH=/app/src
+
+EXPOSE 8081
+CMD ["/app/.venv/bin/uvicorn", "ai_desktop_agent.server.app:app", "--host", "0.0.0.0", "--port", "8081"]

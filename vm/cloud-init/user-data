@@ -18,6 +18,7 @@ packages:
   - dolphin
   - xdotool
   - wmctrl
+  - libgl1-mesa-dri
 
 # エージェント用ユーザー
 users:
@@ -27,13 +28,33 @@ users:
     lock_passwd: false
     shell: /bin/bash
 
-# SDDM 自動ログイン設定
+# SDDM 設定
+# - DisplayServer=x11: QEMU仮想GPUではWaylandがクラッシュするためX11固定
+# - Autologin: agentユーザーでPlasmaに自動ログイン
 write_files:
   - path: /etc/sddm.conf.d/autologin.conf
     content: |
       [Autologin]
       User=agent
       Session=plasma
+      Relogin=false
+
+      [General]
+      DisplayServer=x11
+      HaltCommand=
+      RebootCommand=
+    permissions: "0644"
+  
+  # 念のためsddm.confにも書いておく（sddm.conf.dが読み込まれない環境対策）
+  - path: /etc/sddm.conf
+    content: |
+      [Autologin]
+      User=agent
+      Session=plasma
+      Relogin=false
+
+      [General]
+      DisplayServer=x11
     permissions: "0644"
 
 # 起動時コマンド

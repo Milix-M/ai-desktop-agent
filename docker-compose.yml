@@ -24,12 +24,13 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "8081:8081"
     env_file:
       - .env
     environment:
       - VNC_HOST=vm
       - VNC_PORT=5900
+      - PORT=8081
     volumes:
       - ./data:/app/data
     depends_on:

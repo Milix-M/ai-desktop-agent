@@ -2,8 +2,8 @@ import type { TaskStatus } from "./types";
 
 const BACKEND_URL =
   typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8080`
-    : "http://localhost:8080";
+    ? `${window.location.protocol}//${window.location.hostname}:8081`
+    : "http://localhost:8081";
 
 export async function createTask(
   instruction: string
@@ -35,9 +35,9 @@ export async function controlTask(
 }
 
 export function getWsUrl(): string {
-  if (typeof window === "undefined") return "ws://localhost:8080/ws";
+  if (typeof window === "undefined") return "ws://localhost:8081/ws";
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:8080/ws`;
+  return `${protocol}//${window.location.hostname}:8081/ws`;
 }
 
 export function getVncWsUrl(): string {
