@@ -1,94 +1,35 @@
 #!/bin/bash
-# prepare-image.sh — Dockerfile内で呼ばれる。qcow2イメージをビルドする。
+# prepare-image.sh — Dockerfile builder stage内で実行される。
 # debootstrap → KDE Plasmaインストール → 設定 → ext4イメージ → qcow2変換
-# クロスアーキテクチャ（ARM64ホスト→AMD64ゲスト）対応
+# builder stage は --platform=linux/amd64 で動作するため、常にネイティブamd64環境
 set -euo pipefail
 
 ROOTFS="/rootfs"
 IMAGE_DIR="/vm"
 IMAGE_FILE="$IMAGE_DIR/desktop.qcow2"
 DISK_IMG="$IMAGE_DIR/disk.raw"
-TARGET_ARCH="${TARGET_ARCH:-amd64}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
-# ── クロスアーキテクチャ検出とセットアップ ──
-
-CROSS_ARCH=false
-QEMU_STATIC=""
-if [ "$(uname -m)" != "x86_64" ] && [ "$TARGET_ARCH" = "amd64" ]; then
-    QEMU_STATIC=$(which qemu-x86_64-static 2>/dev/null || echo "")
-    if [ -z "$QEMU_STATIC" ]; then
-        log "ERROR: qemu-x86_64-static not found, need qemu-user-static package"
-        exit 1
-    fi
-    CROSS_ARCH=true
-    log "Cross-architecture: host=$(uname -m), target=$TARGET_ARCH"
-fi
-
-# chrootラッパー: クロスアーキテクチャ時はqemu-static経由で実行
-if $CROSS_ARCH; then
-    chroot_cmd() {
-        local script="$1"
-        # QEMU静的バイナリをchroot内に配置
-        cp "$QEMU_STATIC" "$ROOTFS/usr/bin/"
-        # スクリプトファイルをchroot内に書き込んで実行
-        echo "$script" > "$ROOTFS/tmp/_setup.sh"
-        chroot "$ROOTFS" /usr/bin/qemu-x86_64-static /bin/sh /tmp/_setup.sh
-        rm -f "$ROOTFS/tmp/_setup.sh"
-    }
-else
-    chroot_cmd() {
-        local script="$1"
-        echo "$script" > "$ROOTFS/tmp/_setup.sh"
-        chroot "$ROOTFS" /bin/sh /tmp/_setup.sh
-        rm -f "$ROOTFS/tmp/_setup.sh"
-    }
-fi
-
 # ── Step 1: debootstrap ──
 
-log "Step 1: debootstrap Ubuntu Noble ($TARGET_ARCH)"
+log "Step 1: debootstrap Ubuntu Noble (amd64)"
 
-DEBOOTSTRAP_ARGS="--variant=minbase --include=systemd,apt,ubuntu-keyring"
-if $CROSS_ARCH; then
-    DEBOOTSTRAP_ARGS="$DEBOOTSTRAP_ARGS --foreign --arch=$TARGET_ARCH"
-else
-    DEBOOTSTRAP_ARGS="$DEBOOTSTRAP_ARGS --arch=$TARGET_ARCH"
-fi
-
-# amd64(x86_64)はarchive.ubuntu.com、それ以外はports.ubuntu.com
-if [ "$TARGET_ARCH" = "amd64" ] || [ "$TARGET_ARCH" = "i386" ]; then
-    MIRROR="http://archive.ubuntu.com/ubuntu"
-else
-    MIRROR="http://ports.ubuntu.com/ubuntu-ports"
-fi
-
-debootstrap $DEBOOTSTRAP_ARGS noble "$ROOTFS" "$MIRROR"
-
-# foreignの場合はsecond stageを実行
-if [ -f "$ROOTFS/debootstrap/debootstrap" ]; then
-    log "Running debootstrap second stage..."
-    if $CROSS_ARCH; then
-        cp "$QEMU_STATIC" "$ROOTFS/usr/bin/"
-        chroot "$ROOTFS" /usr/bin/qemu-x86_64-static /bin/sh /debootstrap/debootstrap --second-stage
-    else
-        chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
-    fi
-fi
+debootstrap --variant=minbase --include=systemd,apt,ubuntu-keyring \
+    --arch=amd64 noble "$ROOTFS" http://archive.ubuntu.com/ubuntu
 
 # ── Step 2: パッケージインストール ──
 
 log "Step 2: Installing kernel and KDE Plasma"
 
-# 必要なマウントを設定
+# 必要なマウントをchroot用に設定
 mount -t proc proc "$ROOTFS/proc"
 mount -t sysfs sys "$ROOTFS/sys"
 mount -o bind /dev "$ROOTFS/dev"
 mount -o bind /dev/pts "$ROOTFS/dev/pts"
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
-chroot_cmd '
+chroot "$ROOTFS" /bin/bash -euo pipefail << 'CHROOT_EOF'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 
@@ -120,17 +61,20 @@ apt-get install -y --no-install-recommends \
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
-'
+CHROOT_EOF
 
 # ── Step 3: agent ユーザーと自動ログイン設定 ──
 
 log "Step 3: Creating agent user and autologin"
 
-chroot_cmd '
+chroot "$ROOTFS" /bin/bash -euo pipefail << 'CHROOT_EOF'
 useradd -m -s /bin/bash -G sudo agent
 echo "agent:agent" | chpasswd
 echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
-'
+chown agent:agent /home/agent/.profile
+systemctl enable systemd-resolved
+systemctl enable getty@tty1
+CHROOT_EOF
 
 mkdir -p "$ROOTFS/etc/systemd/system/getty@tty1.service.d"
 cat > "$ROOTFS/etc/systemd/system/getty@tty1.service.d/autologin.conf" << 'UNIT_EOF'
@@ -145,11 +89,7 @@ if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
 fi
 PROFILE_EOF
 
-chroot_cmd '
-chown agent:agent /home/agent/.profile
-systemctl enable systemd-resolved
-systemctl enable getty@tty1
-'
+chroot "$ROOTFS" chown agent:agent /home/agent/.profile
 
 # ── Step 4: カーネルとinitrdを抽出 ──
 

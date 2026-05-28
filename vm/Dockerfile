@@ -1,11 +1,11 @@
-# Stage 1: qcow2 イメージをビルド
-FROM ubuntu:24.04 AS builder
+# Stage 1: qcow2 イメージをビルド (常に amd64 — x86_64 VM用)
+# ARM64ホストではQEMUユーザーエミュレーション経由で実行される
+FROM --platform=linux/amd64 ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     debootstrap \
     qemu-utils \
     e2fsprogs \
-    qemu-user-static \
     && rm -rf /var/lib/apt/lists/*
 
 ENV IMAGE_SIZE=20G
@@ -14,7 +14,7 @@ RUN mkdir -p /vm /rootfs
 COPY prepare-image.sh /prepare-image.sh
 RUN chmod +x /prepare-image.sh && /prepare-image.sh
 
-# Stage 2: QEMU実行環境（最小）
+# Stage 2: QEMU実行環境（最小 — ホストアーキテクチャ）
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
