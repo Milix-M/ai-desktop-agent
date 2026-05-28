@@ -1,0 +1,56 @@
+#cloud-config
+# AI Desktop Agent VM — cloud-init user-data
+# 初回起動時に最小限のデスクトップ環境をセットアップする
+
+hostname: desktop-agent
+manage_etc_hosts: true
+
+# インストールパッケージ
+# - xorg + openbox: 最小限のデスクトップ
+# - lightdm: 自動ログイン用ディスプレイマネージャ
+# - xterm, firefox, libreoffice-calc: AIが操作するアプリケーション
+# - xdotool, wmctrl: ウィンドウ操作ユーティリティ
+packages:
+  - xorg
+  - openbox
+  - lightdm
+  - lightdm-gtk-greeter
+  - xterm
+  - firefox
+  - xdotool
+  - wmctrl
+
+# エージェント用ユーザー
+users:
+  - name: agent
+    gecos: "AI Desktop Agent"
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: false
+    shell: /bin/bash
+
+# 自動ログイン設定
+write_files:
+  - path: /etc/lightdm/lightdm.conf.d/99-autologin.conf
+    content: |
+      [Seat:*]
+      autologin-user=agent
+      autologin-user-timeout=0
+      user-session=openbox
+    permissions: "0644"
+
+  - path: /home/agent/.config/openbox/autostart
+    content: |
+      # VM起動時に自動実行されるアプリケーション
+      xterm &
+    owner: "agent:agent"
+    permissions: "0755"
+
+# 起動時コマンド — lightdm有効化 + パスワード設定
+runcmd:
+  - mkdir -p /home/agent/.config/openbox
+  - chown -R agent:agent /home/agent/.config
+  - echo "agent:agent" | chpasswd
+  - systemctl enable lightdm
+  - systemctl set-default graphical.target
+
+final_message: "VM setup complete. Desktop is ready at VNC port 5900."
