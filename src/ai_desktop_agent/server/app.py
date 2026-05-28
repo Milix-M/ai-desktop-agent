@@ -4,8 +4,10 @@ WebSocket でフロントエンドと通信し、TaskSession を管理する。
 """
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from ai_desktop_agent.server.session import TaskSession
@@ -13,6 +15,10 @@ from ai_desktop_agent.server.session import TaskSession
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0")
+
+# フロントエンド HTML
+_frontend_dir = Path(__file__).resolve().parent.parent.parent.parent / "frontend"
+_index_html = _frontend_dir / "index.html"
 
 # アクティブなセッション（シングルトン運用）
 _active_session: TaskSession | None = None
@@ -32,6 +38,14 @@ class TaskStatus(BaseModel):
 
 
 # ── REST API ──────────────────────────────────────────
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> str:
+    """フロントエンド HTML を返す。"""
+    if _index_html.exists():
+        return _index_html.read_text(encoding="utf-8")
+    return "<h1>AI Desktop Agent</h1><p>frontend/index.html が見つかりません。</p>"
 
 
 @app.get("/health")
