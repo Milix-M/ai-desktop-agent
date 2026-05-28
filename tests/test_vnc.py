@@ -225,6 +225,48 @@ class TestActionExecutor:
         result = await executor.execute(action)
         assert result  # FakeDisplayBackend は切断中でもエラーにならない
 
+    async def test_wait_for_still_stabilizes(self, backend):
+        """同一画像が連続する場合 wait_for_still が早期完了すること。"""
+        executor = ActionExecutor(backend)
+        action = Action(action_type=ActionType.WAIT_FOR_STILL,
+                        params={"timeout": 5.0})
+        result = await executor.execute(action)
+        assert result  # モックPNGは常に同一なので即座に安定判定
+
+    async def test_wait_for_text_with_custom_extractor(self, backend):
+        """テキスト抽出器を注入できること。"""
+        captured_texts: list[str] = []
+
+        def fake_ocr(image_bytes: bytes) -> str:
+            captured_texts.append(f"ocr:{len(image_bytes)}bytes")
+            return "Loading complete"
+
+        executor = ActionExecutor(backend, text_extractor=fake_ocr)
+        action = Action(action_type=ActionType.WAIT_FOR_TEXT,
+                        params={"text": "Loading", "timeout": 0.5})
+        result = await executor.execute(action)
+        assert result
+        assert len(captured_texts) > 0
+
+    async def test_wait_for_text_times_out_without_ocr(self, backend):
+        """OCRなしではテキスト検出できないためタイムアウトするがエラーにはならない。"""
+        executor = ActionExecutor(backend)
+        action = Action(action_type=ActionType.WAIT_FOR_TEXT,
+                        params={"text": "Loading", "timeout": 0.1})
+        result = await executor.execute(action)
+        assert result  # タイムアウトしても例外ではなく True を返す
+
+    async def test_image_hash(self):
+        """_image_hash が決定的な値を返すこと。"""
+        from ai_desktop_agent.actions.executor import ActionExecutor as AE
+        h1 = AE._image_hash(b"test_image_data")
+        h2 = AE._image_hash(b"test_image_data")
+        h3 = AE._image_hash(b"different_data")
+        assert h1 == h2
+        assert h1 != h3
+        assert len(h1) == 64  # SHA256 hex digest
+
+
 
 class TestAllActionTypesExecuted:
     """全 ActionType が ActionExecutor で処理できることの網羅テスト。"""

@@ -5,24 +5,48 @@ DisplayBackend（VNCクライアント等）を通じてVM上で実行する。
 """
 
 import asyncio
+import hashlib
+import io
 import time
 import logging
-from typing import Any
+from typing import Callable
+
+from PIL import Image
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
+
+# テキスト抽出器の型: 画像バイナリ → 抽出テキスト
+TextExtractor = Callable[[bytes], str]
+
+
+def _default_text_extractor(_image_bytes: bytes) -> str:
+    """デフォルトのテキスト抽出器。OCRが設定されていない場合は空文字列を返す。"""
+    return ""
 
 
 class ActionExecutor:
     """ActionをVM上で実行するエンジン。
 
     DisplayBackend に依存し、各ActionTypeを適切な操作に変換する。
+
+    Args:
+        backend: VM操作に使用する表示バックエンド。
+        text_extractor: スクリーンショットからテキストを抽出する関数。
+            デフォルトは空文字列を返す。OCRを使用する場合は
+            pytesseract等を使った関数を注入する。
     """
 
-    def __init__(self, backend: DisplayBackend) -> None:
+    def __init__(
+        self,
+        backend: DisplayBackend,
+        text_extractor: TextExtractor | None = None,
+    ) -> None:
         self._backend = backend
+        self._extract_text = text_extractor or _default_text_extractor
 
     async def execute(self, action: Action) -> bool:
         """1つのアクションを実行する。
@@ -115,22 +139,70 @@ class ActionExecutor:
     # ── 待機ロジック ───────────────────────────────────
 
     async def _wait_for_text(self, text: str, timeout: float) -> None:
-        """画面に指定テキストが現れるまで待機（現状は単純スリープで代用）。
+        """画面に指定テキストが現れるまでスクリーンショットを取得して待機。
 
-        将来的にはOCRと組み合わせて実装する。
+        テキスト抽出器（OCR）が設定されている場合は抽出テキストから検索する。
+        設定されていない場合は画面変化を検出する。
         """
         elapsed = 0.0
         interval = 0.5
+        prev_hash = ""
+
         while elapsed < timeout:
+            ss = self._backend.capture_screen()
+            extracted = self._extract_text(ss.image_bytes)
+
+            if extracted and text in extracted:
+                logger.info("テキスト検出: %s", text)
+                return
+
+            # OCR未設定時: 画面変化があれば何か表示されたとみなす
+            current_hash = self._image_hash(ss.image_bytes)
+            if prev_hash and current_hash != prev_hash:
+                if not self._extract_text(ss.image_bytes):
+                    # OCRがない → 変化を検出したので進む
+                    logger.debug("画面変化を検出 (wait_for_text fallback)")
+                    return
+
+            prev_hash = current_hash
             await asyncio.sleep(interval)
             elapsed += interval
-            # TODO: OCRで画面からテキストを抽出し、textの出現を確認
+
         logger.warning("wait_for_text がタイムアウト: %s", text)
 
     async def _wait_for_still(self, timeout: float) -> None:
-        """画面変化が収まるまで待機（現状は単純スリープで代用）。
+        """画面変化が収まるまで待機する。
 
-        将来的には画像差分検出と組み合わせて実装する。
+        連続するスクリーンショットの画像ハッシュを比較し、
+        指定回数連続で変化がなければ安定とみなす。
         """
-        await asyncio.sleep(min(timeout, 3.0))
-        # TODO: 連続するスクリーンショットの差分が閾値以下になるまで待つ
+        check_interval = 0.3
+        min_stable_frames = 3
+        stable_count = 0
+        prev_hash = ""
+        elapsed = 0.0
+
+        while elapsed < timeout:
+            ss = self._backend.capture_screen()
+            current_hash = self._image_hash(ss.image_bytes)
+
+            if prev_hash and current_hash == prev_hash:
+                stable_count += 1
+                if stable_count >= min_stable_frames:
+                    logger.debug("画面が安定 (wait_for_still: %.1fs)", elapsed)
+                    return
+            else:
+                stable_count = 0
+
+            prev_hash = current_hash
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+        logger.debug("wait_for_still がタイムアウト (%.1fs経過)", timeout)
+
+    # ── 画像ユーティリティ ─────────────────────────────
+
+    @staticmethod
+    def _image_hash(image_bytes: bytes) -> str:
+        """画像のSHA256ハッシュを返す（変化検出用）。"""
+        return hashlib.sha256(image_bytes).hexdigest()
