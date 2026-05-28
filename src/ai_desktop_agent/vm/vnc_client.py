@@ -97,7 +97,8 @@ class VNCClient(DisplayBackend):
         """VNCサーバーに接続する。"""
         from vncdotool import api
 
-        server = f"{host}::{port}"  # vncdotool: double-colon for explicit port (single colon = display number)
+        # vncdotool: double-colon for explicit port (single colon = display number)
+        server = f"{host}::{port}"
         logger.info("VNC接続中: %s", server)
 
         self._client = api.connect(
