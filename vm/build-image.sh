@@ -1,11 +1,10 @@
 #!/bin/bash
 # build-image.sh — Dockerfile builder stage内で、現在のrootfsからqcow2イメージを作成
-# debootstrap不要。builder自身（amd64 Ubuntu）がそのままVMのrootfsになる
+# mount不要。mkfs.ext4 -d でrootfsを直接書き込む
 set -euo pipefail
 
 IMAGE_DIR="/vm"
 IMAGE_FILE="$IMAGE_DIR/desktop.qcow2"
-DISK_IMG="$IMAGE_DIR/disk.raw"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
@@ -19,7 +18,6 @@ cp "/boot/initrd.img-$KERNEL_VER" "$IMAGE_DIR/initrd.img"
 echo "console=ttyS0 root=/dev/vda rw" > "$IMAGE_DIR/cmdline.txt"
 
 # ── ファイルシステムサイズ計算 ──
-# /proc, /sys, /dev, /vm, /tmp, /run, /var/cache, /var/lib/apt/lists を除外
 ROOTFS_SIZE_KB=$(du -sk \
     --exclude=/proc \
     --exclude=/sys \
@@ -27,40 +25,48 @@ ROOTFS_SIZE_KB=$(du -sk \
     --exclude=/vm \
     --exclude=/tmp \
     --exclude=/run \
-    --exclude=/var/cache/apt \
-    --exclude=/var/lib/apt/lists \
-    --exclude=/build-image.sh \
     / 2>/dev/null | cut -f1)
 ROOTFS_SIZE_MB=$((ROOTFS_SIZE_KB / 1024))
 DISK_SIZE_MB=$((ROOTFS_SIZE_MB + 2048))
 log "Rootfs size: ${ROOTFS_SIZE_MB}MB, Disk size: ${DISK_SIZE_MB}MB"
 
-# ── ext4 ディスクイメージ作成 ──
-dd if=/dev/zero of="$DISK_IMG" bs=1M count="$DISK_SIZE_MB" status=progress
-mkfs.ext4 -F "$DISK_IMG"
+# ── 一時tarでクリーンなrootfsを準備 ──
+# mkfs.ext4 -d に除外リストがないため、先に除外してtarで固める
+log "Preparing rootfs tarball..."
+tar cpf /tmp/rootfs.tar \
+    --exclude=/proc \
+    --exclude=/sys \
+    --exclude=/dev \
+    --exclude=/vm \
+    --exclude=/tmp \
+    --exclude=/run \
+    --exclude=/var/cache/apt \
+    --exclude=/build-image.sh \
+    --exclude=/tmp/rootfs.tar \
+    -C / . 2>/dev/null
 
-mkdir -p /mnt/disk
-mount "$DISK_IMG" /mnt/disk
+mkdir -p /tmp/rootfs-target
+tar xpf /tmp/rootfs.tar -C /tmp/rootfs-target
+rm -f /tmp/rootfs.tar
 
-# 必要なディレクトリを先に作成
-mkdir -p /mnt/disk/{proc,sys,dev,tmp,run,media,mnt}
-
-# rootfsをコピー (proc/sys/dev/vm/tmp/run 以外)
-log "Copying rootfs to disk image..."
-cp -a / /mnt/disk/ 2>/dev/null || true
-# 不要なマウントポイントを削除
-rm -rf /mnt/disk/proc/* /mnt/disk/sys/* /mnt/disk/dev/* /mnt/disk/run/* /mnt/disk/tmp/* /mnt/disk/mnt/* /mnt/disk/var/cache/apt/* 2>/dev/null || true
-rm -f /mnt/disk/build-image.sh 2>/dev/null || true
+# 必要な空ディレクトリを作成
+mkdir -p /tmp/rootfs-target/{proc,sys,dev,tmp,run,media,mnt}
 
 # fstab作成
-echo "/dev/vda / ext4 defaults 0 1" > /mnt/disk/etc/fstab
+echo "/dev/vda / ext4 defaults 0 1" > /tmp/rootfs-target/etc/fstab
 
-umount /mnt/disk
+# ── ext4 ディスクイメージ作成 (mount不要！) ──
+log "Creating ext4 disk image with mkfs.ext4 -d (no mount needed)..."
+dd if=/dev/zero of="$IMAGE_DIR/disk.raw" bs=1M count="$DISK_SIZE_MB" status=progress
+mkfs.ext4 -F -d /tmp/rootfs-target "$IMAGE_DIR/disk.raw"
+
+# 後片付け
+rm -rf /tmp/rootfs-target
 
 # ── qcow2 変換 ──
 log "Converting to qcow2 format"
-qemu-img convert -f raw -O qcow2 "$DISK_IMG" "$IMAGE_FILE"
-rm -f "$DISK_IMG"
+qemu-img convert -f raw -O qcow2 "$IMAGE_DIR/disk.raw" "$IMAGE_FILE"
+rm -f "$IMAGE_DIR/disk.raw"
 
 log "Done! qcow2 size: $(du -sh "$IMAGE_FILE" | cut -f1)"
 log "Kernel: $(du -sh "$IMAGE_DIR/vmlinuz" | cut -f1)"
