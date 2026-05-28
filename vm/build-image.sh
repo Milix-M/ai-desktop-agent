@@ -47,17 +47,10 @@ mkdir -p /mnt/disk/{proc,sys,dev,tmp,run,media,mnt}
 
 # rootfsをコピー (proc/sys/dev/vm/tmp/run 以外)
 log "Copying rootfs to disk image..."
-rsync -a \
-    --exclude=/proc \
-    --exclude=/sys \
-    --exclude=/dev \
-    --exclude=/vm \
-    --exclude=/tmp \
-    --exclude=/run \
-    --exclude=/var/cache/apt \
-    --exclude=/build-image.sh \
-    --exclude=/mnt \
-    / /mnt/disk/
+cp -a / /mnt/disk/ 2>/dev/null || true
+# 不要なマウントポイントを削除
+rm -rf /mnt/disk/proc/* /mnt/disk/sys/* /mnt/disk/dev/* /mnt/disk/run/* /mnt/disk/tmp/* /mnt/disk/mnt/* /mnt/disk/var/cache/apt/* 2>/dev/null || true
+rm -f /mnt/disk/build-image.sh 2>/dev/null || true
 
 # fstab作成
 echo "/dev/vda / ext4 defaults 0 1" > /mnt/disk/etc/fstab

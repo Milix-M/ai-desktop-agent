@@ -55,6 +55,7 @@ RUN systemctl set-default graphical.target \
     && systemctl enable NetworkManager
 
 # ── rootfs から ext4 → qcow2 イメージを作成 ──
+RUN mkdir -p /vm
 COPY build-image.sh /build-image.sh
 RUN chmod +x /build-image.sh && /build-image.sh
 
