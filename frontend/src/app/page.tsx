@@ -6,6 +6,7 @@ import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
 import ControlPanel from "@/components/ControlPanel";
 import LogPanel from "@/components/LogPanel";
+import StatusBar from "@/components/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { createTask, controlTask } from "@/lib/api";
 import type { WsMessage, LogEntry } from "@/lib/types";
@@ -27,6 +28,8 @@ export default function Home() {
   const [successCount, setSuccessCount] = useState(0);
   const [failureCount, setFailureCount] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [vncConnected, setVncConnected] = useState(false);
+  const [vmResolution, setVmResolution] = useState<string | undefined>();
 
   const addLog = useCallback(
     (message: string, level: LogEntry["level"]) => {
@@ -82,6 +85,14 @@ export default function Home() {
 
   useWebSocket(handleWsMessage);
 
+  const handleVncChange = useCallback(
+    (connected: boolean, resolution?: string) => {
+      setVncConnected(connected);
+      if (resolution) setVmResolution(resolution);
+    },
+    []
+  );
+
   const RUNNING_STATES = [
     "understanding",
     "planning",
@@ -118,30 +129,38 @@ export default function Home() {
   );
 
   return (
-    <div className="main-layout">
-      <VncViewer />
+    <div className="app-container">
+      <div className="main-layout">
+        <VncViewer onConnectionChange={handleVncChange} />
 
-      <div className="sidebar">
-        <h1>🤖 AI Desktop Agent</h1>
+        <div className="sidebar">
+          <h1>🤖 AI Desktop Agent</h1>
 
-        <InstructionInput
-          onSubmit={handleSubmit}
-          disabled={submitDisabled}
-        />
+          <InstructionInput
+            onSubmit={handleSubmit}
+            disabled={submitDisabled}
+          />
 
-        <StatusPanel
-          state={state}
-          subtaskIndex={subtaskIndex}
-          subtaskCount={subtaskCount}
-          actionCount={actionCount}
-          successCount={successCount}
-          failureCount={failureCount}
-        />
+          <StatusPanel
+            state={state}
+            subtaskIndex={subtaskIndex}
+            subtaskCount={subtaskCount}
+            actionCount={actionCount}
+            successCount={successCount}
+            failureCount={failureCount}
+          />
 
-        <ControlPanel onControl={handleControl} state={state} />
+          <ControlPanel onControl={handleControl} state={state} />
 
-        <LogPanel entries={logs} />
+          <LogPanel entries={logs} />
+        </div>
       </div>
+
+      <StatusBar
+        vncConnected={vncConnected}
+        agentState={state}
+        vmResolution={vmResolution}
+      />
     </div>
   );
 }
