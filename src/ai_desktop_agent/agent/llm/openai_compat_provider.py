@@ -1,8 +1,7 @@
-"""Claude LLM プロバイダ実装（Anthropic SDK 使用）。
+"""OpenAI 互換 API 用 LLM プロバイダ実装。
 
-Anthropic Messages API 経由で Claude モデルを呼び出す。
-base_url でカスタムエンドポイント (OpenRouter 等) にも対応。
-構造化された JSON 応答をプロンプトエンジニアリングで実現する。
+OpenAI SDK を使用し、OpenAI / OpenRouter / Ollama / vLLM など
+OpenAI Chat Completions 互換エンドポイント全般に対応する。
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import logging
 import os
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.base import LLMProvider
@@ -50,15 +49,16 @@ _SYSTEM_PROMPT = """\
 回答は必ず指定されたJSON形式で返してください。"""
 
 
-class ClaudeProvider(LLMProvider):
-    """Claude モデルを使用する LLM プロバイダ（Anthropic SDK 経由）。
+class OpenAICompatProvider(LLMProvider):
+    """OpenAI 互換 API を使用する LLM プロバイダ。
 
-    base_url を指定することで OpenRouter 等の互換 API にも接続可能。
+    base_url でカスタムエンドポイント (OpenRouter / Ollama / vLLM) に接続。
+    api_key と model は環境変数または引数で指定。
     """
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "gpt-4o",
         api_key: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.0,
@@ -67,20 +67,16 @@ class ClaudeProvider(LLMProvider):
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY が設定されていません。"
-                "環境変数またはコンストラクタで指定してください。"
-            )
+
+        api_key = api_key or os.environ.get("OPENAI_API_KEY") or "sk-placeholder"
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
-            self._client = AsyncAnthropic(api_key=api_key, base_url=base_url)
-        else:
-            self._client = AsyncAnthropic(api_key=api_key)
+            client_kwargs["base_url"] = base_url
+        self._client = AsyncOpenAI(**client_kwargs)
 
     @property
     def provider_name(self) -> str:
-        return "anthropic"
+        return "openai_compat"
 
     @property
     def model_name(self) -> str:
@@ -101,7 +97,6 @@ class ClaudeProvider(LLMProvider):
   "constraints": ["制約条件1", "制約条件2"],
   "reasoning": "判断理由"
 }}"""
-
         data = await self._call(prompt)
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
@@ -135,10 +130,8 @@ class ClaudeProvider(LLMProvider):
             "}}\n"
             f"\nサブタスクIDは step_{subtask_count + 1} からの連番で生成してください。"
         )
-
         data = await self._call(prompt)
         raw_subtasks = data.get("subtasks", [])
-
         subtasks = [
             Subtask(
                 id=st.get("id", f"step_{subtask_count + idx + 1}"),
@@ -147,11 +140,7 @@ class ClaudeProvider(LLMProvider):
             )
             for idx, st in enumerate(raw_subtasks)
         ]
-
-        return DecompositionResult(
-            subtasks=subtasks,
-            reasoning=data.get("reasoning", ""),
-        )
+        return DecompositionResult(subtasks=subtasks, reasoning=data.get("reasoning", ""))
 
     # ── アクション決定 ─────────────────────────────────
 
@@ -163,7 +152,6 @@ class ClaudeProvider(LLMProvider):
         error_context: ErrorContext | None = None,
     ) -> ActionDecision:
         history_text = self._format_action_history(action_history[-10:])
-
         error_block = ""
         if error_context:
             error_block = f"""
@@ -172,7 +160,6 @@ class ClaudeProvider(LLMProvider):
 エラーメッセージ: {error_context.error_message}
 再試行回数: {error_context.retry_count}
 """
-
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 
 【ゴール】{goal.description}
@@ -195,14 +182,12 @@ ID: {current_subtask.id}
   "confidence": 0.0〜1.0,
   "reasoning": "判断理由"
 }}"""
-
         data = await self._call(prompt)
         action_type_str = data.get("action_type", "subtask_complete")
         try:
             action_type = ActionType(action_type_str)
         except ValueError:
             action_type = ActionType.SUBTASK_COMPLETE
-
         return ActionDecision(
             action=Action(action_type=action_type, params=data.get("params", {})),
             expected_effect=data.get("expected_effect", ""),
@@ -213,9 +198,7 @@ ID: {current_subtask.id}
     # ── 結果検証 ───────────────────────────────────────
 
     async def verify_result(
-        self,
-        action: ActionDecision,
-        expected_effect: str,
+        self, action: ActionDecision, expected_effect: str
     ) -> VerificationResult:
         prompt = f"""アクションの実行結果を検証してください。
 
@@ -235,7 +218,6 @@ ID: {current_subtask.id}
   "reasoning": "検証の判断理由",
   "evidence": "成功/失敗の根拠"
 }}"""
-
         data = await self._call(prompt)
         return VerificationResult(
             success=bool(data.get("success", True)),
@@ -252,7 +234,6 @@ ID: {current_subtask.id}
         subtask: Subtask,
     ) -> RecoveryPlan:
         history_text = self._format_action_history(action_history[-10:])
-
         prompt = f"""エラーからの回復計画を立案してください。
 
 【現在のサブタスク】
@@ -275,7 +256,6 @@ ID: {subtask.id}
   "reasoning": "回復の判断理由",
   "recoverable": trueまたはfalse
 }}"""
-
         data = await self._call(prompt)
         raw_actions = data.get("actions", [])
         recovery_actions = [
@@ -285,7 +265,6 @@ ID: {subtask.id}
             )
             for a in raw_actions
         ]
-
         return RecoveryPlan(
             strategy=data.get("strategy", "wait_and_retry"),
             actions=recovery_actions,
@@ -296,33 +275,26 @@ ID: {subtask.id}
     # ── 内部 ──────────────────────────────────────────
 
     async def _call(self, prompt: str) -> dict[str, Any]:
-        """Anthropic API を呼び出し、JSON応答をパースして返す。"""
+        """OpenAI API を呼び出し、JSON応答をパースして返す。"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = await self._client.messages.create(
+                response = await self._client.chat.completions.create(
                     model=self._model,
                     max_tokens=self._max_tokens,
                     temperature=self._temperature,
-                    system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
                 )
-                # テキストブロックを抽出
-                text = ""
-                for block in response.content:
-                    if getattr(block, "type", None) == "text":
-                        text = getattr(block, "text", "")
-                        break
+                text = response.choices[0].message.content or ""
                 if not text:
-                    raise ValueError("応答にテキストブロックが含まれていません")
+                    raise ValueError("応答が空です")
                 return self._parse_json(text)
-            except (
-                json.JSONDecodeError,
-                KeyError,
-                IndexError,
-            ) as e:
+            except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(
-                    "Anthropic API 応答のパースに失敗 (attempt %d/%d): %s",
+                    "API 応答のパースに失敗 (attempt %d/%d): %s",
                     attempt + 1,
                     max_retries,
                     e,
@@ -330,23 +302,15 @@ ID: {subtask.id}
                 if attempt == max_retries - 1:
                     raise
             except Exception:
-                logger.exception(
-                    "Anthropic API 呼び出しエラー (attempt %d/%d)",
-                    attempt + 1,
-                    max_retries,
-                )
+                logger.exception("API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries)
                 if attempt == max_retries - 1:
                     raise
-
-        # 到達しないが型チェック用
         return {}
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
         """LLM応答テキストからJSONを抽出してパースする。"""
         text = text.strip()
-
-        # ```json ... ``` ブロックを抽出
         if "```json" in text:
             start = text.index("```json") + 7
             end = text.index("```", start)
@@ -355,7 +319,6 @@ ID: {subtask.id}
             start = text.index("```") + 3
             end = text.index("```", start)
             text = text[start:end].strip()
-
         return json.loads(text)
 
     @staticmethod
@@ -363,7 +326,6 @@ ID: {subtask.id}
         """アクション履歴をLLM向けテキストに整形。"""
         if not history:
             return "（履歴なし）"
-
         lines = []
         for i, record in enumerate(history, 1):
             status = "✓" if record.success else "✗"
