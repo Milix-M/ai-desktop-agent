@@ -57,9 +57,27 @@ write_files:
       DisplayServer=x11
     permissions: "0644"
 
+  # agentの.profile: tty1かつX未起動ならKDEを自動起動
+  - path: /home/agent/.profile
+    content: |
+      # ~/.profile: getty自動ログイン時、KDE Plasmaを自動起動
+      if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+          exec startplasma-x11
+      fi
+    owner: "agent:agent"
+    permissions: "0644"
+
 # 起動時コマンド
 runcmd:
   - echo "agent:agent" | chpasswd
+  # getty自動ログイン設定（write_filesより後に実行するためruncmdで作成）
+  - mkdir -p /etc/systemd/system/getty@tty1.service.d
+  - |
+    cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+    [Service]
+    ExecStart=
+    ExecStart=-/sbin/agetty --autologin agent --noclear %I $TERM
+    EOF
   - systemctl enable sddm
   - systemctl set-default graphical.target
 
