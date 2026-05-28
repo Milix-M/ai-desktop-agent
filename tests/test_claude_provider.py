@@ -1,27 +1,27 @@
-"""AnthropicProvider と LLMProviderFactory のテスト。"""
+"""ClaudeProvider と LLMProviderFactory のテスト。"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
-from ai_desktop_agent.agent.llm.anthropic_provider import AnthropicProvider
+from ai_desktop_agent.agent.llm.claude_provider import ClaudeProvider
 from ai_desktop_agent.agent.llm.factory import create_llm_provider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.types import ActionDecision, ErrorContext
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 
-# ── AnthropicProvider ─────────────────────────────────
+# ── ClaudeProvider ─────────────────────────────────
 
 
-class TestAnthropicProvider:
-    """AnthropicProvider のユニットテスト（API はモック）。"""
+class TestClaudeProvider:
+    """ClaudeProvider のユニットテスト（API はモック）。"""
 
     @pytest.fixture
     def provider(self):
-        """APIキー不要の AnthropicProvider（モック注入）。"""
+        """APIキー不要の ClaudeProvider（モック注入）。"""
         with patch("anthropic.AsyncAnthropic", autospec=True):
-            return AnthropicProvider(api_key="test-key")
+            return ClaudeProvider(api_key="test-key")
 
     def _make_mock_response(self, json_data: dict) -> MagicMock:
         """JSONデータを含むモックAPIレスポンスを作成。"""
@@ -43,14 +43,14 @@ class TestAnthropicProvider:
 
     def test_custom_model_name(self):
         with patch("anthropic.AsyncAnthropic", autospec=True):
-            p = AnthropicProvider(model="claude-opus-4-20250514", api_key="test-key")
+            p = ClaudeProvider(model="claude-opus-4-20250514", api_key="test-key")
         assert p.model_name == "claude-opus-4-20250514"
 
     def test_raises_without_api_key(self):
         """APIキーがない場合は ValueError。"""
         with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
             with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
-                AnthropicProvider()
+                ClaudeProvider()
 
     # ── understand_instruction ───────────────────────
 
@@ -341,7 +341,7 @@ class TestLLMProviderFactory:
         assert isinstance(provider, MockLLMProvider)
 
     def test_anthropic_requires_api_key(self):
-        """APIキーがない場合、AnthropicProvider でエラーになる。"""
+        """APIキーがない場合、ClaudeProvider でエラーになる。"""
         with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
             with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
                 create_llm_provider(provider="anthropic")
@@ -386,7 +386,7 @@ class TestLLMProviderFactory:
                 create_llm_provider(provider="openrouter")
 
     def test_openrouter_with_api_key(self):
-        with patch("ai_desktop_agent.agent.llm.anthropic_provider.AsyncAnthropic"):
+        with patch("ai_desktop_agent.agent.llm.claude_provider.AsyncAnthropic"):
             provider = create_llm_provider(provider="openrouter", api_key="sk-or-test")
         assert provider.provider_name == "anthropic"
         assert "anthropic/" in provider.model_name
@@ -412,12 +412,12 @@ class TestLLMProviderFactory:
 
     def test_anthropic_with_base_url(self):
         """base_url を指定してカスタムエンドポイントに接続。"""
-        with patch("ai_desktop_agent.agent.llm.anthropic_provider.AsyncAnthropic") as mock_client:
-            from ai_desktop_agent.agent.llm.anthropic_provider import (
-                AnthropicProvider,
+        with patch("ai_desktop_agent.agent.llm.claude_provider.AsyncAnthropic") as mock_client:
+            from ai_desktop_agent.agent.llm.claude_provider import (
+                ClaudeProvider,
             )
 
-            AnthropicProvider(
+            ClaudeProvider(
                 api_key="test-key",
                 base_url="https://custom-endpoint.example.com/v1",
             )

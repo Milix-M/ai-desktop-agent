@@ -1,7 +1,8 @@
-"""Anthropic Claude 用 LLM プロバイダ実装。
+"""Claude LLM プロバイダ実装（Anthropic SDK 使用）。
 
-Anthropic Messages API を使用し、構造化された JSON 応答を
-プロンプトエンジニアリングで実現する。
+Anthropic Messages API 経由で Claude モデルを呼び出す。
+base_url でカスタムエンドポイント (OpenRouter 等) にも対応。
+構造化された JSON 応答をプロンプトエンジニアリングで実現する。
 """
 
 from __future__ import annotations
@@ -49,8 +50,11 @@ _SYSTEM_PROMPT = """\
 回答は必ず指定されたJSON形式で返してください。"""
 
 
-class AnthropicProvider(LLMProvider):
-    """Anthropic Claude を使用する LLM プロバイダ。"""
+class ClaudeProvider(LLMProvider):
+    """Claude モデルを使用する LLM プロバイダ（Anthropic SDK 経由）。
+
+    base_url を指定することで OpenRouter 等の互換 API にも接続可能。
+    """
 
     def __init__(
         self,
