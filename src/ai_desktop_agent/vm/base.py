@@ -82,12 +82,16 @@ class DisplayBackend(ABC):
         self.mouse_down(button)
         self.mouse_up(button)
 
-    def mouse_double_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
+    def mouse_double_click(
+        self, x: int | None = None, y: int | None = None, button: int = 1
+    ) -> None:
         """ダブルクリック（デフォルト実装: click → click）。"""
         self.mouse_click(x, y, button)
         self.mouse_click(button=button)
 
-    def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1) -> None:
+    def mouse_drag(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1
+    ) -> None:
         """ドラッグ操作（デフォルト実装: move → down → move → up）。"""
         self.mouse_move(start_x, start_y)
         self.mouse_down(button)

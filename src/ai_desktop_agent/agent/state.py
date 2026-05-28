@@ -6,7 +6,6 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 from ai_desktop_agent.actions.primitives import Action
 
@@ -14,37 +13,51 @@ from ai_desktop_agent.actions.primitives import Action
 class AgentState(StrEnum):
     """エージェントの状態。"""
 
-    IDLE = "idle"                # 指示待ち
+    IDLE = "idle"  # 指示待ち
     UNDERSTANDING = "understanding"  # ユーザー指示を解析中
-    PLANNING = "planning"        # サブタスク分解・計画立案中
-    EXECUTING = "executing"      # アクション実行中
-    WAITING = "waiting"          # UI変化待機中
-    VERIFYING = "verifying"      # 実行結果を検証中
-    RECOVERING = "recovering"    # エラーからの回復を試行中
-    PAUSED = "paused"            # ユーザーによる一時停止
-    COMPLETED = "completed"      # タスク正常完了
-    FAILED = "failed"            # タスク遂行不能
+    PLANNING = "planning"  # サブタスク分解・計画立案中
+    EXECUTING = "executing"  # アクション実行中
+    WAITING = "waiting"  # UI変化待機中
+    VERIFYING = "verifying"  # 実行結果を検証中
+    RECOVERING = "recovering"  # エラーからの回復を試行中
+    PAUSED = "paused"  # ユーザーによる一時停止
+    COMPLETED = "completed"  # タスク正常完了
+    FAILED = "failed"  # タスク遂行不能
 
 
 # 有効な状態遷移
 _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
-    AgentState.IDLE:           {AgentState.UNDERSTANDING},
-    AgentState.UNDERSTANDING:  {AgentState.PLANNING, AgentState.FAILED},
-    AgentState.PLANNING:       {AgentState.EXECUTING, AgentState.FAILED},
-    AgentState.EXECUTING:      {AgentState.WAITING, AgentState.RECOVERING, AgentState.COMPLETED, AgentState.FAILED, AgentState.EXECUTING, AgentState.PAUSED},
-    AgentState.WAITING:        {AgentState.VERIFYING, AgentState.RECOVERING},
-    AgentState.VERIFYING:      {AgentState.EXECUTING, AgentState.RECOVERING, AgentState.COMPLETED, AgentState.FAILED},
-    AgentState.RECOVERING:     {AgentState.PLANNING, AgentState.EXECUTING, AgentState.FAILED},
-    AgentState.PAUSED:         {AgentState.EXECUTING, AgentState.IDLE},
-    AgentState.COMPLETED:      {AgentState.IDLE},
-    AgentState.FAILED:         {AgentState.IDLE},
+    AgentState.IDLE: {AgentState.UNDERSTANDING},
+    AgentState.UNDERSTANDING: {AgentState.PLANNING, AgentState.FAILED},
+    AgentState.PLANNING: {AgentState.EXECUTING, AgentState.FAILED},
+    AgentState.EXECUTING: {
+        AgentState.WAITING,
+        AgentState.RECOVERING,
+        AgentState.COMPLETED,
+        AgentState.FAILED,
+        AgentState.EXECUTING,
+        AgentState.PAUSED,
+    },
+    AgentState.WAITING: {AgentState.VERIFYING, AgentState.RECOVERING},
+    AgentState.VERIFYING: {
+        AgentState.EXECUTING,
+        AgentState.RECOVERING,
+        AgentState.COMPLETED,
+        AgentState.FAILED,
+    },
+    AgentState.RECOVERING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.FAILED},
+    AgentState.PAUSED: {AgentState.EXECUTING, AgentState.IDLE},
+    AgentState.COMPLETED: {AgentState.IDLE},
+    AgentState.FAILED: {AgentState.IDLE},
 }
 
 # 終端状態
-_TERMINAL_STATES: frozenset[AgentState] = frozenset({
-    AgentState.COMPLETED,
-    AgentState.FAILED,
-})
+_TERMINAL_STATES: frozenset[AgentState] = frozenset(
+    {
+        AgentState.COMPLETED,
+        AgentState.FAILED,
+    }
+)
 
 
 def can_transition(from_state: AgentState, to_state: AgentState) -> bool:
@@ -161,14 +174,18 @@ class AgentContext:
         self.current_subtask_index += 1
         return self.current_subtask
 
-    def record_action(self, action: Action, success: bool, error: str = "", duration_ms: float = 0.0) -> None:
+    def record_action(
+        self, action: Action, success: bool, error: str = "", duration_ms: float = 0.0
+    ) -> None:
         """アクションの実行結果を履歴に記録する。"""
-        self.action_history.append(ActionRecord(
-            action=action,
-            success=success,
-            error_message=error,
-            duration_ms=duration_ms,
-        ))
+        self.action_history.append(
+            ActionRecord(
+                action=action,
+                success=success,
+                error_message=error,
+                duration_ms=duration_ms,
+            )
+        )
 
     def last_actions(self, n: int = 10) -> list[ActionRecord]:
         """直近 n 件のアクション履歴を返す（LLMコンテキスト用）。"""

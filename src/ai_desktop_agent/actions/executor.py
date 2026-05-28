@@ -6,16 +6,12 @@ DisplayBackend（VNCクライアント等）を通じてVM上で実行する。
 
 import asyncio
 import hashlib
-import io
-import time
 import logging
-from typing import Callable
-
-from PIL import Image
+import time
+from collections.abc import Callable
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.vm.base import DisplayBackend
-from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +98,10 @@ class ActionExecutor:
                     self._backend.mouse_up(2)
             case ActionType.DRAG:
                 self._backend.mouse_drag(
-                    p["start_x"], p["start_y"],
-                    p["end_x"], p["end_y"],
+                    p["start_x"],
+                    p["start_y"],
+                    p["end_x"],
+                    p["end_y"],
                 )
             case ActionType.SCROLL:
                 self._backend.mouse_scroll(p["direction"], p["amount"])
@@ -158,11 +156,10 @@ class ActionExecutor:
 
             # OCR未設定時: 画面変化があれば何か表示されたとみなす
             current_hash = self._image_hash(ss.image_bytes)
-            if prev_hash and current_hash != prev_hash:
-                if not self._extract_text(ss.image_bytes):
-                    # OCRがない → 変化を検出したので進む
-                    logger.debug("画面変化を検出 (wait_for_text fallback)")
-                    return
+            if prev_hash and current_hash != prev_hash and not self._extract_text(ss.image_bytes):
+                # OCRがない → 変化を検出したので進む
+                logger.debug("画面変化を検出 (wait_for_text fallback)")
+                return
 
             prev_hash = current_hash
             await asyncio.sleep(interval)
