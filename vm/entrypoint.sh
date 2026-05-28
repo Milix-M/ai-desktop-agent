@@ -1,18 +1,30 @@
 #!/bin/bash
 # VM Entrypoint — 初回起動時にUbuntu Cloud Imageをダウンロードし、
-# cloud-initでデスクトップ環境をセットアップした後、QEMU/KVMを起動する。
+# cloud-initでデスクトップ環境をセットアップした後、QEMUを起動する。
+# KVMが使えない環境では USE_KVM=false でTCGエミュレーションに切り替え。
 set -euo pipefail
 
 VM_IMAGE="${VM_IMAGE:-/vm/desktop.qcow2}"
-VM_MEMORY="${VM_MEMORY:-4096}"
+VM_MEMORY="${VM_MEMORY:-2048}"
 VM_VNC_PORT="${VM_VNC_PORT:-5900}"
 CLOUD_IMAGE_URL="${CLOUD_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 SEED_IMAGE="/vm/seed.img"
 BACKING_IMAGE="/vm/cloudimg.qcow2"
 VNC_DISPLAY=$((VM_VNC_PORT - 5900))
+USE_KVM="${USE_KVM:-false}"
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
-log_err() { echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2; }
+
+# ── QEMU 起動オプション ──────────────────────────────
+
+QEMU_ACCEL=()
+if [ "$USE_KVM" = "true" ] && [ -e /dev/kvm ]; then
+    log "KVM acceleration enabled"
+    QEMU_ACCEL=(-enable-kvm -cpu host -smp 2)
+else
+    log "Using TCG software emulation (no KVM)"
+    QEMU_ACCEL=(-cpu qemu64 -smp 1)
+fi
 
 # ── 初回起動: VMイメージの準備 ──────────────────────
 
@@ -31,36 +43,40 @@ if [ ! -f "$VM_IMAGE" ]; then
     log "Creating cloud-init seed..."
     cloud-localds "$SEED_IMAGE" /cloud-init/user-data /cloud-init/meta-data
 
-    # 初回起動（cloud-init実行のため、snapshotなし）
-    log "Booting VM for cloud-init provisioning (5-10 min, KDE Plasma)..."
+    # 初回起動（cloud-init実行用。-display none + background &）
+    log "Booting VM for cloud-init provisioning (TCG requires 30-60 min)..."
     qemu-system-x86_64 \
-        -enable-kvm \
-        -cpu host \
+        "${QEMU_ACCEL[@]}" \
         -m "$VM_MEMORY" \
-        -smp 2 \
         -drive file="$VM_IMAGE",if=virtio \
         -drive file="$SEED_IMAGE",if=virtio,format=raw \
         -vnc "0.0.0.0:$VNC_DISPLAY" \
         -device virtio-net,netdev=net0 \
         -netdev user,id=net0 \
-        -nographic \
-        -daemonize
+        -display none &
 
     QEMU_PID=$!
+    log "QEMU PID=$QEMU_PID"
 
-    # cloud-init 完了を待つ（VNCが開く → さらに120秒でパッケージインストール完了）
-    log "Waiting for cloud-init to finish..."
-    for i in $(seq 1 90); do
+    # VNC が開くのを待つ
+    log "Waiting for VNC to become available..."
+    for i in $(seq 1 360); do
         if echo | nc -z localhost "$VM_VNC_PORT" 2>/dev/null; then
-            log "VNC port $VM_VNC_PORT is open, waiting for cloud-init completion..."
-            sleep 240
+            log "VNC port $VM_VNC_PORT is open!"
             break
+        fi
+        if [ $((i % 60)) -eq 0 ]; then
+            log "... still waiting (${i}0s elapsed)"
         fi
         sleep 10
     done
 
+    # cloud-init パッケージインストール完了を待つ（TCGは15分）
+    log "Waiting 15 minutes for cloud-init to install KDE Plasma..."
+    sleep 900
+
     # VM を停止
-    log "Shutting down provisioning VM..."
+    log "Shutting down provisioning VM (PID=$QEMU_PID)..."
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true
     sleep 3
@@ -73,15 +89,13 @@ fi
 
 # ── 本番起動 ────────────────────────────────────────
 
-log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB)..."
+log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB, KVM=$USE_KVM)..."
 
 exec qemu-system-x86_64 \
-    -enable-kvm \
-    -cpu host \
+    "${QEMU_ACCEL[@]}" \
     -m "$VM_MEMORY" \
-    -smp 2 \
     -drive file="$VM_IMAGE",if=virtio \
     -vnc "0.0.0.0:$VNC_DISPLAY" \
     -device virtio-net,netdev=net0 \
     -netdev user,id=net0 \
-    -nographic
+    -display none

@@ -213,9 +213,12 @@ class TestDockerCompose:
         services = data.get("services", {})
         assert "websockify" in services, "docker-compose.yml に websockify サービスが必要です"
 
-    def test_vm_has_kvm_device(self):
+    def test_vm_uses_tcg_by_default(self):
+        """KVM がない環境向けに、デフォルトは TCG（ソフトウェアエミュレーション）。"""
         content = (PROJECT_ROOT / "docker-compose.yml").read_text()
-        assert "/dev/kvm:/dev/kvm" in content, "vm サービスに /dev/kvm デバイスマウントが必要です"
+        assert "USE_KVM" in content, "vm サービスに USE_KVM 環境変数が必要です"
+        has_tcg_default = "USE_KVM=${USE_KVM:-false}" in content
+        assert has_tcg_default, "USE_KVM のデフォルトは TCG (false) であるべき"
 
     def test_vm_exposes_vnc_port(self):
         content = (PROJECT_ROOT / "docker-compose.yml").read_text()
