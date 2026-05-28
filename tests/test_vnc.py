@@ -3,7 +3,7 @@
 import pytest
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.actions.executor import ActionExecutor
-from ai_desktop_agent.vm.screenshot import Screenshot, make_mock_screenshot
+from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
 
@@ -18,14 +18,19 @@ class TestScreenshot:
         assert ss.size == (800, 600)
         assert ss.size_bytes == len(png)
 
-    def test_mock_screenshot(self):
-        ss = make_mock_screenshot()
+    def test_mock_screenshot_via_fake_backend(self):
+        """FakeDisplayBackend 経由でスクリーンショットが取得できる。"""
+        backend = FakeDisplayBackend()
+        backend.connect("localhost")
+        ss = backend.capture_screen()
         assert ss.width == 1024
         assert ss.height == 768
         assert len(ss.image_bytes) > 0
 
-    def test_mock_custom_size(self):
-        ss = make_mock_screenshot(width=640, height=480)
+    def test_custom_size(self):
+        backend = FakeDisplayBackend(screen_width=640, screen_height=480)
+        backend.connect("localhost")
+        ss = backend.capture_screen()
         assert ss.width == 640
         assert ss.height == 480
 

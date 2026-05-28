@@ -3,8 +3,19 @@
 実際のVM/VNCを使わず、操作を記録して検証可能にする。
 """
 
+import io
+
+from PIL import Image
+
 from ai_desktop_agent.vm.base import DisplayBackend
-from ai_desktop_agent.vm.screenshot import Screenshot, make_mock_screenshot
+from ai_desktop_agent.vm.screenshot import Screenshot
+
+
+def _make_dummy_png() -> bytes:
+    """1x1 ピクセルの最小PNGを生成。"""
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 1), color="black").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 class FakeDisplayBackend(DisplayBackend):
@@ -44,12 +55,24 @@ class FakeDisplayBackend(DisplayBackend):
     def capture_screen(self) -> Screenshot:
         self._frame_count += 1
         self.screenshots_taken += 1
-        return make_mock_screenshot(self._screen_width, self._screen_height)
+        return Screenshot(
+            image_bytes=_make_dummy_png(),
+            width=self._screen_width,
+            height=self._screen_height,
+            timestamp=0.0,
+            frame_number=self._frame_count,
+        )
 
     def capture_region(self, x: int, y: int, width: int, height: int) -> Screenshot:
         self._frame_count += 1
         self.screenshots_taken += 1
-        return make_mock_screenshot(width, height)
+        return Screenshot(
+            image_bytes=_make_dummy_png(),
+            width=width,
+            height=height,
+            timestamp=0.0,
+            frame_number=self._frame_count,
+        )
 
     def mouse_move(self, x: int, y: int) -> None:
         self.mouse_moves.append((x, y))
