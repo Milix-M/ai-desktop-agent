@@ -2,6 +2,9 @@
 
 OpenAI SDK を使用し、OpenAI / OpenRouter / Ollama / vLLM など
 OpenAI Chat Completions 互換エンドポイント全般に対応する。
+
+Structured Output (response_format) で LLM の出力を強制し、
+JSON パースエラーを根本的に防止する。
 """
 
 from __future__ import annotations
@@ -45,8 +48,156 @@ _SYSTEM_PROMPT = """\
 - screenshot: スクリーンショット取得 {}
 - subtask_complete: サブタスク完了宣言 {}
 
-画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。
-回答は必ず指定されたJSON形式で返してください。"""
+画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
+
+# ── Structured Output JSON Schemas ─────────────────────
+# OpenAI の response_format で出力を強制し、JSON パースエラーを防止する。
+# ref: https://platform.openai.com/docs/guides/structured-outputs
+
+_ACTION_TYPES = [
+    "mouse_move",
+    "left_click",
+    "right_click",
+    "double_click",
+    "drag",
+    "scroll",
+    "type",
+    "key_press",
+    "key_combo",
+    "wait",
+    "screenshot",
+    "subtask_complete",
+]
+
+_SCHEMA_UNDERSTAND = {
+    "name": "understand_instruction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": [
+                    "spreadsheet_creation",
+                    "file_management",
+                    "web_browsing",
+                    "text_editing",
+                    "system_operation",
+                    "unknown",
+                ],
+            },
+            "target_application": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "reasoning": {"type": "string"},
+        },
+        "required": ["intent", "target_application", "constraints", "reasoning"],
+        "additionalProperties": False,
+    },
+}
+
+_SCHEMA_DECOMPOSE = {
+    "name": "decompose_task",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "description": {"type": "string"},
+                        "expected_outcome": {"type": "string"},
+                    },
+                    "required": ["id", "description", "expected_outcome"],
+                    "additionalProperties": False,
+                },
+            },
+            "reasoning": {"type": "string"},
+        },
+        "required": ["subtasks", "reasoning"],
+        "additionalProperties": False,
+    },
+}
+
+_SCHEMA_ACTION = {
+    "name": "action_decision",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action_type": {"type": "string", "enum": _ACTION_TYPES},
+            "params": {"type": "object"},
+            "expected_effect": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reasoning": {"type": "string"},
+        },
+        "required": [
+            "action_type",
+            "params",
+            "expected_effect",
+            "confidence",
+            "reasoning",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+_SCHEMA_VERIFY = {
+    "name": "verify_result",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "success": {"type": "boolean"},
+            "reasoning": {"type": "string"},
+            "evidence": {"type": "string"},
+        },
+        "required": ["success", "reasoning", "evidence"],
+        "additionalProperties": False,
+    },
+}
+
+_SCHEMA_RECOVER = {
+    "name": "recover_from_error",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "strategy": {
+                "type": "string",
+                "enum": [
+                    "wait_and_retry",
+                    "alternative_approach",
+                    "replan_subtask",
+                    "give_up",
+                ],
+            },
+            "actions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": {"type": "string", "enum": _ACTION_TYPES},
+                        "params": {"type": "object"},
+                    },
+                    "required": ["action_type", "params"],
+                    "additionalProperties": False,
+                },
+            },
+            "reasoning": {"type": "string"},
+            "recoverable": {"type": "boolean"},
+        },
+        "required": ["strategy", "actions", "reasoning", "recoverable"],
+        "additionalProperties": False,
+    },
+}
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -54,6 +205,7 @@ class OpenAICompatProvider(LLMProvider):
 
     base_url でカスタムエンドポイント (OpenRouter / Ollama / vLLM) に接続。
     api_key と model は環境変数または引数で指定。
+    Structured Output (response_format) で全メソッドの出力を強制。
     """
 
     def __init__(
@@ -68,7 +220,7 @@ class OpenAICompatProvider(LLMProvider):
         self._max_tokens = max_tokens
         self._temperature = temperature
 
-        api_key = api_key or os.environ.get("OPENAI_API_KEY") or "sk-placeholder"
+        api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
         client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
@@ -88,16 +240,8 @@ class OpenAICompatProvider(LLMProvider):
         prompt = f"""ユーザー指示を解析し、意図・対象アプリ・制約を抽出してください。
 
 【ユーザー指示】
-{goal.description}
-
-【出力形式】
-{{
-  "intent": "意図の分類（spreadsheet_creation / file_management / web_browsing / text_editing）",
-  "target_application": "使用すべきアプリ名（不明ならnull）",
-  "constraints": ["制約条件1", "制約条件2"],
-  "reasoning": "判断理由"
-}}"""
-        data = await self._call(prompt)
+{goal.description}"""
+        data = await self._call(prompt, _SCHEMA_UNDERSTAND)
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
             target_application=data.get("target_application"),
@@ -117,20 +261,9 @@ class OpenAICompatProvider(LLMProvider):
             f"説明: {goal.description}\n"
             f"対象アプリ: {goal.target_application or '指定なし'}\n"
             f"制約: {constraints_text}\n"
-            f"\n【出力形式】\n"
-            "{{\n"
-            '  "subtasks": [\n'
-            "    {{\n"
-            '      "id": "step_1",\n'
-            '      "description": "サブタスクの説明",\n'
-            '      "expected_outcome": "完了時に期待される状態"\n'
-            "    }}\n"
-            "  ],\n"
-            '  "reasoning": "分解の理由"\n'
-            "}}\n"
             f"\nサブタスクIDは step_{subtask_count + 1} からの連番で生成してください。"
         )
-        data = await self._call(prompt)
+        data = await self._call(prompt, _SCHEMA_DECOMPOSE)
         raw_subtasks = data.get("subtasks", [])
         subtasks = [
             Subtask(
@@ -172,17 +305,8 @@ ID: {current_subtask.id}
 期待結果: {current_subtask.expected_outcome}
 {error_block}
 【直近の操作履歴】
-{history_text}
-
-【出力形式】
-{{
-  "action_type": "アクション種別",
-  "params": {{}},
-  "expected_effect": "このアクションで期待される効果",
-  "confidence": 0.0〜1.0,
-  "reasoning": "判断理由"
-}}"""
-        data = await self._call(prompt)
+{history_text}"""
+        data = await self._call(prompt, _SCHEMA_ACTION)
         action_type_str = data.get("action_type", "subtask_complete")
         try:
             action_type = ActionType(action_type_str)
@@ -210,15 +334,8 @@ ID: {current_subtask.id}
 {expected_effect}
 
 【LLMの判断理由】
-{action.reasoning}
-
-【出力形式】
-{{
-  "success": trueまたはfalse,
-  "reasoning": "検証の判断理由",
-  "evidence": "成功/失敗の根拠"
-}}"""
-        data = await self._call(prompt)
+{action.reasoning}"""
+        data = await self._call(prompt, _SCHEMA_VERIFY)
         return VerificationResult(
             success=bool(data.get("success", True)),
             reasoning=data.get("reasoning", ""),
@@ -247,16 +364,8 @@ ID: {subtask.id}
 再試行回数: {error.retry_count} / 最大 {subtask.max_retries}
 
 【直近の操作履歴】
-{history_text}
-
-【出力形式】
-{{
-  "strategy": "回復戦略（wait_and_retry / alternative_approach / replan_subtask / give_up）",
-  "actions": [{{"action_type": "...", "params": {{}}}}],
-  "reasoning": "回復の判断理由",
-  "recoverable": trueまたはfalse
-}}"""
-        data = await self._call(prompt)
+{history_text}"""
+        data = await self._call(prompt, _SCHEMA_RECOVER)
         raw_actions = data.get("actions", [])
         recovery_actions = [
             Action(
@@ -274,24 +383,40 @@ ID: {subtask.id}
 
     # ── 内部 ──────────────────────────────────────────
 
-    async def _call(self, prompt: str) -> dict[str, Any]:
-        """OpenAI API を呼び出し、JSON応答をパースして返す。"""
+    async def _call(self, prompt: str, json_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+        """OpenAI API を呼び出し、JSON 応答を返す。
+
+        json_schema 指定時は Structured Output で出力を強制し、
+        JSON パースエラーを防止する。
+        """
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    messages=[
+                kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "max_tokens": self._max_tokens,
+                    "temperature": self._temperature,
+                    "messages": [
                         {"role": "system", "content": _SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                )
+                }
+                if json_schema:
+                    kwargs["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema,
+                    }
+
+                response = await self._client.chat.completions.create(**kwargs)
                 text = response.choices[0].message.content or ""
                 if not text:
                     raise ValueError("応答が空です")
+
+                # Structured Output 使用時は API が有効な JSON を保証する
+                if json_schema:
+                    return json.loads(text)  # type: ignore[no-any-return]
                 return self._parse_json(text)
+
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(
                     "API 応答のパースに失敗 (attempt %d/%d): %s",
@@ -309,7 +434,7 @@ ID: {subtask.id}
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """LLM応答テキストからJSONを抽出してパースする。"""
+        """LLM応答テキストからJSONを抽出してパースする（フォールバック用）。"""
         text = text.strip()
         if "```json" in text:
             start = text.index("```json") + 7
