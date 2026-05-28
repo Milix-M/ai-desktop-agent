@@ -376,3 +376,51 @@ class TestLLMProviderFactory:
         with patch.dict("os.environ", {"LLM_PROVIDER": "mock"}):
             provider = create_llm_provider()
         assert isinstance(provider, MockLLMProvider)
+
+    # ── OpenRouter ───────────────────────────────────
+
+    def test_openrouter_requires_api_key(self):
+        """OPENROUTER_API_KEY がない場合はエラー。"""
+        with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
+            with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+                create_llm_provider(provider="openrouter")
+
+    def test_openrouter_with_api_key(self):
+        with patch("ai_desktop_agent.agent.llm.anthropic_provider.AsyncAnthropic"):
+            provider = create_llm_provider(provider="openrouter", api_key="sk-or-test")
+        assert provider.provider_name == "anthropic"
+        assert "anthropic/" in provider.model_name
+
+    def test_openrouter_with_env_key(self):
+        with (
+            patch("anthropic.AsyncAnthropic", autospec=True),
+            patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-env"}),
+        ):
+            provider = create_llm_provider(provider="openrouter")
+        assert provider.provider_name == "anthropic"
+
+    def test_openrouter_custom_model(self):
+        with patch("anthropic.AsyncAnthropic", autospec=True):
+            provider = create_llm_provider(
+                provider="openrouter",
+                api_key="sk-or-test",
+                model="anthropic/claude-opus-4",
+            )
+        assert provider.model_name == "anthropic/claude-opus-4"
+
+    # ── base_url parameter ───────────────────────────
+
+    def test_anthropic_with_base_url(self):
+        """base_url を指定してカスタムエンドポイントに接続。"""
+        with patch("ai_desktop_agent.agent.llm.anthropic_provider.AsyncAnthropic") as mock_client:
+            from ai_desktop_agent.agent.llm.anthropic_provider import (
+                AnthropicProvider,
+            )
+
+            AnthropicProvider(
+                api_key="test-key",
+                base_url="https://custom-endpoint.example.com/v1",
+            )
+        mock_client.assert_called_once()
+        _, kwargs = mock_client.call_args
+        assert kwargs.get("base_url") == "https://custom-endpoint.example.com/v1"

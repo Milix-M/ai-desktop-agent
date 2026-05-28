@@ -58,6 +58,7 @@ class AnthropicProvider(LLMProvider):
         api_key: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.0,
+        base_url: str | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
@@ -68,7 +69,10 @@ class AnthropicProvider(LLMProvider):
                 "ANTHROPIC_API_KEY が設定されていません。"
                 "環境変数またはコンストラクタで指定してください。"
             )
-        self._client = AsyncAnthropic(api_key=api_key)
+        if base_url:
+            self._client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+        else:
+            self._client = AsyncAnthropic(api_key=api_key)
 
     @property
     def provider_name(self) -> str:

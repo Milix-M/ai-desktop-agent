@@ -48,12 +48,29 @@ def create_llm_provider(
             api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
         )
 
+    if provider == "openrouter":
+        from ai_desktop_agent.agent.llm.anthropic_provider import (
+            AnthropicProvider,
+        )
+
+        openrouter_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not openrouter_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY が設定されていません。"
+                "OpenRouter を使用する場合は環境変数で指定してください。"
+            )
+
+        model = model or os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4")
+        logger.info("OpenRouter 経由で Anthropic プロバイダを使用: model=%s", model)
+        return AnthropicProvider(
+            model=model,
+            api_key=openrouter_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
     if provider == "mock":
         return MockLLMProvider(model=model or "mock-model")
 
-    # 将来のプロバイダ追加ポイント
-    # if provider == "openai": ...
-    # if provider == "google": ...
-    # if provider == "ollama": ...
-
-    raise ValueError(f"未対応のLLMプロバイダです: {provider}。対応プロバイダ: anthropic, mock")
+    raise ValueError(
+        f"未対応のLLMプロバイダです: {provider}。対応プロバイダ: anthropic, openrouter, mock"
+    )
