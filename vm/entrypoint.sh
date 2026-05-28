@@ -43,7 +43,8 @@ if [ ! -f "$VM_IMAGE" ]; then
     log "Creating cloud-init seed..."
     cloud-localds "$SEED_IMAGE" /cloud-init/user-data /cloud-init/meta-data
 
-    # 初回起動（cloud-init実行用。-display none + background &）
+    # 初回起動（cloud-init実行用。-display none + -no-reboot + background &）
+    # -no-reboot: VMがpoweroffしたらQEMUが終了 → ファイルシステム破損なし
     log "Booting VM for cloud-init provisioning (TCG requires 30-60 min)..."
     qemu-system-x86_64 \
         "${QEMU_ACCEL[@]}" \
@@ -53,69 +54,41 @@ if [ ! -f "$VM_IMAGE" ]; then
         -vnc "0.0.0.0:$VNC_DISPLAY" \
         -device virtio-net,netdev=net0 \
         -netdev user,id=net0 \
-        -display none &
+        -display none \
+        -no-reboot &
 
     QEMU_PID=$!
     log "QEMU PID=$QEMU_PID"
 
-    # VNC が開くのを待つ
-    log "Waiting for VNC to become available..."
-    for i in $(seq 1 360); do
-        if echo | nc -z localhost "$VM_VNC_PORT" 2>/dev/null; then
-            log "VNC port $VM_VNC_PORT is open!"
-            break
-        fi
-        if [ $((i % 60)) -eq 0 ]; then
-            log "... still waiting (${i}0s elapsed)"
-        fi
-        sleep 10
-    done
-
-    # cloud-init 完了を待つ。
-    # TCGは非常に遅いので、VNC解像度の変化でデスクトップ起動を検出する。
+    # cloud-init 完了を待つ（VMのpoweroffでQEMUが自然終了する）
     CLOUD_INIT_TIMEOUT=3600
     if [ "$USE_KVM" = "true" ] && [ -e /dev/kvm ]; then
         CLOUD_INIT_TIMEOUT=600
     fi
     log "Waiting for cloud-init to finish (max ${CLOUD_INIT_TIMEOUT}s)..."
-    POLL_INTERVAL=30
-    ELAPSED=0
-    while [ $ELAPSED -lt $CLOUD_INIT_TIMEOUT ]; do
-        RESOLUTION=$(timeout 3 python3 -c "
-import socket, struct
-try:
-    s = socket.socket(); s.settimeout(2)
-    s.connect(('localhost', $VM_VNC_PORT))
-    s.recv(12)
-    s.send(b'RFB 003.008\n')
-    n = struct.unpack('B', s.recv(1))[0]
-    if n > 0: s.recv(n)
-    s.send(b'\x01')
-    s.recv(4)
-    s.send(b'\x01')
-    w = struct.unpack('>H', s.recv(2))[0]
-    h = struct.unpack('>H', s.recv(2))[0]
-    s.close()
-    print(f'{w}x{h}')
-except:
-    print('0x0')
-" 2>/dev/null || echo "0x0")
-        log "  VNC resolution: $RESOLUTION (elapsed: ${ELAPSED}s)"
 
-        if [ "$RESOLUTION" != "720x400" ] && [ "$RESOLUTION" != "0x0" ]; then
-            log "Desktop detected! Resolution changed to $RESOLUTION"
+    # QEMUプロセスの終了を待つ（cloud-initのpower_state: poweroffでVMがシャットダウン）
+    ELAPSED=0
+    POLL_INTERVAL=30
+    while [ $ELAPSED -lt $CLOUD_INIT_TIMEOUT ]; do
+        if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            log "QEMU exited — cloud-init completed (elapsed: ${ELAPSED}s)"
             break
         fi
-
+        if [ $((ELAPSED % 120)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+            log "  ... still waiting (${ELAPSED}s elapsed)"
+        fi
         sleep $POLL_INTERVAL
         ELAPSED=$((ELAPSED + POLL_INTERVAL))
     done
 
-    # VM を停止
-    log "Shutting down provisioning VM (PID=$QEMU_PID)..."
-    kill "$QEMU_PID" 2>/dev/null || true
+    # タイムアウト時は強制終了（この時点ではcloud-init完了後のためデータは安全）
+    if kill -0 "$QEMU_PID" 2>/dev/null; then
+        log "Timeout reached — stopping VM"
+        kill "$QEMU_PID" 2>/dev/null || true
+    fi
     wait "$QEMU_PID" 2>/dev/null || true
-    sleep 3
+    sleep 2
 
     # seed イメージを削除（2回目以降不要）
     rm -f "$SEED_IMAGE"
