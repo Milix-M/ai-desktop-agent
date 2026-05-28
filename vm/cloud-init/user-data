@@ -1,0 +1,45 @@
+#cloud-config
+# AI Desktop Agent VM — cloud-init user-data
+# 初回起動時にKDE Plasmaデスクトップ環境をセットアップする
+
+hostname: desktop-agent
+manage_etc_hosts: true
+
+# インストールパッケージ
+# - kde-plasma-desktop: KDE Plasma 最小デスクトップ
+# - sddm: KDEネイティブのディスプレイマネージャ（自動ログイン用）
+# - konsole, firefox: AIが操作するアプリケーション
+# - xdotool, wmctrl: ウィンドウ操作ユーティリティ
+packages:
+  - kde-plasma-desktop
+  - sddm
+  - konsole
+  - firefox
+  - dolphin
+  - xdotool
+  - wmctrl
+
+# エージェント用ユーザー
+users:
+  - name: agent
+    gecos: "AI Desktop Agent"
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: false
+    shell: /bin/bash
+
+# SDDM 自動ログイン設定
+write_files:
+  - path: /etc/sddm.conf.d/autologin.conf
+    content: |
+      [Autologin]
+      User=agent
+      Session=plasma
+    permissions: "0644"
+
+# 起動時コマンド
+runcmd:
+  - echo "agent:agent" | chpasswd
+  - systemctl enable sddm
+  - systemctl set-default graphical.target
+
+final_message: "VM setup complete. KDE Plasma desktop is ready at VNC port 5900."
