@@ -254,15 +254,11 @@ class TaskSession:
             screenshot=screenshot,
         )
 
-    def _capture_screenshot(self) -> Screenshot | None:
-        """現在のVM画面をキャプチャする。失敗時は None。"""
+    def _capture_screenshot(self) -> Screenshot:
+        """現在のVM画面をキャプチャする。失敗時は例外を送出。"""
         if not self.display.is_connected:
-            return None
-        try:
-            return self.display.capture_screen()
-        except Exception:
-            logger.debug("画面キャプチャに失敗", exc_info=True)
-            return None
+            raise RuntimeError("ディスプレイが接続されていません")
+        return self.display.capture_screen()
 
     # ── 制御 ──────────────────────────────────────────
 

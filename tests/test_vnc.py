@@ -42,7 +42,7 @@ class TestScreenshot:
 class TestFakeDisplayBackend:
     def test_initial_state(self):
         backend = FakeDisplayBackend()
-        assert not backend.is_connected
+        assert backend.is_connected  # 本実装フェーズ: デフォルトで接続状態
 
     def test_connect_disconnect(self):
         backend = FakeDisplayBackend()

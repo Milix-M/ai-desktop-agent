@@ -284,8 +284,8 @@ class OpenAICompatProvider(LLMProvider):
         goal: Goal,
         current_subtask: Subtask,
         action_history: list[ActionRecord],
+        screenshot: Screenshot,
         error_context: ErrorContext | None = None,
-        screenshot: Screenshot | None = None,
     ) -> ActionDecision:
         history_text = self._format_action_history(action_history[-10:])
         error_block = ""
@@ -309,7 +309,7 @@ ID: {current_subtask.id}
 {error_block}
 【直近の操作履歴】
 {history_text}"""
-        image_bytes = screenshot.image_bytes if screenshot else None
+        image_bytes = screenshot.image_bytes
         data = await self._call(prompt, _SCHEMA_ACTION, image_bytes=image_bytes)
         action_type_str = data.get("action_type", "subtask_complete")
         try:

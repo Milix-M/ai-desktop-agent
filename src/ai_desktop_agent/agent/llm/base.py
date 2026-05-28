@@ -75,8 +75,8 @@ class LLMProvider(ABC):
         goal: Goal,
         current_subtask: Subtask,
         action_history: list[ActionRecord],
+        screenshot: Screenshot,
         error_context: ErrorContext | None = None,
-        screenshot: Screenshot | None = None,
     ) -> ActionDecision:
         """現在の状態から次のアクションを決定する。
 

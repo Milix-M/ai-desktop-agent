@@ -67,8 +67,8 @@ class MockLLMProvider(LLMProvider):
         goal: Goal,
         current_subtask: Subtask,
         action_history: list[ActionRecord],
+        screenshot: Screenshot,
         error_context: ErrorContext | None = None,
-        screenshot: Screenshot | None = None,
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))
         if self._decide_result:

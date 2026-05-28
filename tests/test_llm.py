@@ -14,6 +14,11 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.state import Goal, Subtask
+from ai_desktop_agent.vm.screenshot import Screenshot
+
+
+def _fake_screenshot() -> Screenshot:
+    return Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
 
 
 class TestActionDecision:
@@ -126,6 +131,7 @@ class TestMockLLMProvider:
             Goal(description="test"),
             Subtask(id="s1", description="test"),
             [],
+            _fake_screenshot(),
         )
         assert result.action.action_type == ActionType.SUBTASK_COMPLETE
 
@@ -165,7 +171,7 @@ class TestMockLLMProvider:
         subtask = Subtask(id="s1", description="test")
 
         assert provider.decide_call_count == 0
-        await provider.decide_next_action(goal, subtask, [])
+        await provider.decide_next_action(goal, subtask, [], _fake_screenshot())
         assert provider.decide_call_count == 1
-        await provider.decide_next_action(goal, subtask, [])
+        await provider.decide_next_action(goal, subtask, [], _fake_screenshot())
         assert provider.decide_call_count == 2
