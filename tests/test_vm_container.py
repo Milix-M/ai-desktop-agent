@@ -1,6 +1,6 @@
 """VMコンテナ関連ファイルのバリデーションテスト。
 
-Dockerfile / entrypoint.sh / cloud-init ファイルの構文と
+Dockerfile / entrypoint.sh / prepare-image.sh の構文と
 必須項目が正しいことを確認する。Dockerビルドは行わない。
 """
 
@@ -45,9 +45,12 @@ class TestDockerfile:
             "Dockerfile で qemu-system-x86 をインストールする必要があります"
         )
 
-    def test_installs_cloud_image_utils(self):
+    def test_has_builder_stage(self):
+        """プリビルド方式: マルチステージビルドで builder ステージがあること。"""
         content = (VM_DIR / "Dockerfile").read_text()
-        assert "cloud-image-utils" in content, "cloud-init seed 作成に cloud-image-utils が必要です"
+        assert "AS builder" in content, (
+            "Dockerfile にマルチステージビルドの builder ステージが必要です"
+        )
 
     def test_healthcheck_present(self):
         content = (VM_DIR / "Dockerfile").read_text()
@@ -91,94 +94,58 @@ class TestEntrypoint:
         content = (VM_DIR / "entrypoint.sh").read_text()
         assert "-vnc" in content, "entrypoint.sh で -vnc を指定する必要があります"
 
-    def test_first_boot_handling(self):
-        """初回起動時のイメージダウンロードロジックがあること。"""
+    def test_uses_kernel_direct_boot(self):
+        """プリビルド方式: -kernel と -initrd でダイレクトブートすること。"""
         content = (VM_DIR / "entrypoint.sh").read_text()
-        assert (
-            'if [ ! -f "$VM_IMAGE" ]' in content
-            or 'if [ ! -f "${VM_IMAGE}" ]' in content
-            or "if [ ! -f" in content
-        ), "初回起動時の VM イメージ確認ロジックが必要です"
+        assert "-kernel" in content, "entrypoint.sh で -kernel を指定する必要があります"
+        assert "-initrd" in content, "entrypoint.sh で -initrd を指定する必要があります"
 
 
-# ── cloud-init ────────────────────────────────────────
+# ── prepare-image.sh ──────────────────────────────────
 
 
-class TestCloudInit:
-    """cloud-init ファイルの検証。"""
+class TestPrepareImage:
+    """vm/prepare-image.sh の構文と内容を検証する。"""
 
-    def test_user_data_exists(self):
-        assert (VM_DIR / "cloud-init" / "user-data").is_file(), (
-            "vm/cloud-init/user-data が存在しません"
+    def test_exists(self):
+        assert (VM_DIR / "prepare-image.sh").is_file(), "vm/prepare-image.sh が存在しません"
+
+    def test_is_executable(self):
+        path = VM_DIR / "prepare-image.sh"
+        assert path.stat().st_mode & 0o111, "prepare-image.sh に実行権限が必要です"
+
+    def test_bash_syntax_valid(self):
+        path = VM_DIR / "prepare-image.sh"
+        result = subprocess.run(
+            ["bash", "-n", str(path)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"prepare-image.sh に構文エラーがあります:\n{result.stderr}"
+
+    def test_uses_debootstrap(self):
+        content = (VM_DIR / "prepare-image.sh").read_text()
+        assert "debootstrap" in content, (
+            "prepare-image.sh で debootstrap を使う必要があります"
         )
 
-    def test_meta_data_exists(self):
-        assert (VM_DIR / "cloud-init" / "meta-data").is_file(), (
-            "vm/cloud-init/meta-data が存在しません"
+    def test_installs_kde(self):
+        content = (VM_DIR / "prepare-image.sh").read_text()
+        assert "kde-plasma-desktop" in content, (
+            "prepare-image.sh で KDE Plasma をインストールする必要があります"
         )
 
-    def test_user_data_is_valid_yaml(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        content = path.read_text()
-        data = yaml.safe_load(content)
-        assert isinstance(data, dict), "user-data はYAMLマッピングである必要があります"
-
-    def test_user_data_has_cloud_config_header(self):
-        content = (VM_DIR / "cloud-init" / "user-data").read_text()
-        assert content.startswith("#cloud-config"), (
-            "user-data は #cloud-config で始まる必要があります"
+    def test_configures_getty_autologin(self):
+        content = (VM_DIR / "prepare-image.sh").read_text()
+        assert "agetty --autologin agent" in content, (
+            "prepare-image.sh で agent の getty 自動ログインを設定する必要があります"
         )
 
-    def test_user_data_has_packages(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        assert "packages" in data, "user-data に packages キーが必要です"
-
-    def test_user_data_has_users(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        assert "users" in data, "user-data に users キーが必要です"
-
-    def test_user_data_installs_kde_plasma_desktop(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        packages = data.get("packages", [])
-        assert "kde-plasma-desktop" in packages, "KDE Plasma デスクトップが必要です"
-
-    def test_user_data_installs_sddm(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        packages = data.get("packages", [])
-        assert "sddm" in packages, "KDE用ディスプレイマネージャ sddm が必要です"
-
-    def test_user_data_installs_automation_tools(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        packages = data.get("packages", [])
-        assert "xdotool" in packages, "ウィンドウ操作用に xdotool が必要です"
-        assert "wmctrl" in packages, "ウィンドウ情報取得に wmctrl が必要です"
-
-    def test_user_data_creates_agent_user(self):
-        path = VM_DIR / "cloud-init" / "user-data"
-        data = yaml.safe_load(path.read_text())
-        users = data.get("users", [])
-        user_names = [u.get("name") for u in users if isinstance(u, dict)]
-        assert "agent" in user_names, "エージェント用ユーザー 'agent' が必要です"
-
-    def test_user_data_configures_sddm_autologin(self):
-        content = (VM_DIR / "cloud-init" / "user-data").read_text()
-        assert "User=agent" in content, "SDDM の自動ログイン設定 (User=agent) が必要です"
-        assert "Session=plasma" in content, "Plasma セッション設定が必要です"
-
-    def test_meta_data_has_instance_id(self):
-        path = VM_DIR / "cloud-init" / "meta-data"
-        data = yaml.safe_load(path.read_text())
-        assert "instance-id" in data, "meta-data に instance-id が必要です"
-
-    def test_meta_data_has_hostname(self):
-        path = VM_DIR / "cloud-init" / "meta-data"
-        data = yaml.safe_load(path.read_text())
-        assert "local-hostname" in data, "meta-data に local-hostname が必要です"
+    def test_creates_qcow2(self):
+        content = (VM_DIR / "prepare-image.sh").read_text()
+        assert "qemu-img convert" in content, (
+            "prepare-image.sh で qemu-img convert を実行する必要があります"
+        )
 
 
 # ── docker-compose.yml ────────────────────────────────
