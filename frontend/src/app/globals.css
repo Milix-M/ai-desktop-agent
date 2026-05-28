@@ -1,0 +1,300 @@
+:root {
+  --bg: #1a1a2e;
+  --panel: #16213e;
+  --border: #2a3a5c;
+  --text: #e0e0e0;
+  --accent: #4fc3f7;
+  --success: #66bb6a;
+  --error: #ef5350;
+  --warning: #ffa726;
+  --dim: #78909c;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Layout ── */
+.main-layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── VNC Panel ── */
+.vnc-panel {
+  flex: 1;
+  min-width: 0;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  border-right: 2px solid var(--border);
+}
+
+.vnc-screen {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vnc-screen > canvas {
+  display: block;
+}
+
+.vnc-placeholder {
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.vnc-status {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.vnc-status.connected {
+  color: var(--success);
+}
+
+/* ── Sidebar ── */
+.sidebar {
+  width: 380px;
+  min-width: 380px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar h1 {
+  font-size: 18px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: #0f3460;
+}
+
+/* ── Sections ── */
+.section {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section h2 {
+  font-size: 13px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+
+/* ── Instruction ── */
+.instruction-input {
+  width: 100%;
+  height: 80px;
+  background: #0d1b2a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px;
+  font-size: 14px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.instruction-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.instruction-input:disabled {
+  opacity: 0.6;
+}
+
+.submit-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.submit-btn:hover {
+  background: #81d4fa;
+}
+
+.submit-btn:disabled {
+  background: var(--dim);
+  cursor: not-allowed;
+}
+
+/* ── Status ── */
+.status-row {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.state-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.state-idle {
+  background: var(--dim);
+  color: #fff;
+}
+
+.state-executing {
+  background: var(--accent);
+  color: #000;
+}
+
+.state-completed {
+  background: var(--success);
+  color: #000;
+}
+
+.state-failed {
+  background: var(--error);
+  color: #fff;
+}
+
+.state-paused {
+  background: var(--warning);
+  color: #000;
+}
+
+.subtask-info {
+  font-size: 12px;
+  color: var(--dim);
+  margin-left: 8px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.stat {
+  background: #0d1b2a;
+  padding: 8px;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.stat .val {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.stat .lbl {
+  font-size: 10px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+
+/* ── Controls ── */
+.controls {
+  display: flex;
+  gap: 8px;
+}
+
+.controls button {
+  flex: 1;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1b2a;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.controls button:hover:not(:disabled) {
+  background: #1a3a5c;
+}
+
+.controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Log ── */
+.log-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.log {
+  flex: 1;
+  min-height: 150px;
+  max-height: 300px;
+  overflow-y: auto;
+  font-size: 12px;
+  font-family: "SF Mono", "Consolas", monospace;
+  background: #0d1b2a;
+  border-radius: 6px;
+  padding: 8px;
+  margin-top: 8px;
+}
+
+.log .entry {
+  padding: 3px 6px;
+  border-radius: 3px;
+  margin-bottom: 2px;
+}
+
+.log .entry.action {
+  border-left: 2px solid var(--accent);
+}
+
+.log .entry.error {
+  border-left: 2px solid var(--error);
+  color: var(--error);
+}
+
+.log .entry.state {
+  border-left: 2px solid var(--dim);
+  color: var(--dim);
+}
+
+.log .entry.complete {
+  border-left: 2px solid var(--success);
+  color: var(--success);
+}
+
+.log .time {
+  color: var(--dim);
+  margin-right: 6px;
+}
