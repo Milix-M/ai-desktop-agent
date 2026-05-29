@@ -6,6 +6,7 @@ WebSocket でフロントエンドと通信し、TaskSession を管理する。
 
 import contextlib
 import logging
+from collections.abc import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,14 @@ _active_session: TaskSession | None = None
 
 # テスト用のセッションファクトリ。テストから差し替え可能。
 _create_session = TaskSession  # type: ignore[var-annotated]
+
+# WebSocket コールバックのグローバルレジストリ
+# セッションより長生きする WebSocket 接続のコールバックを保持し、
+# 新セッション作成時に引き継ぐ。
+_ws_state_cbs: list[Callable] = []
+_ws_action_cbs: list[Callable] = []
+_ws_error_cbs: list[Callable] = []
+_ws_complete_cbs: list[Callable] = []
 
 
 class CreateTaskRequest(BaseModel):
@@ -64,12 +73,15 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
 
     session = _create_session()
 
-    # WebSocket が古いセッションに登録したコールバックを新セッションに引き継ぐ
-    if _active_session is not None:
-        session._on_state_change = _active_session._on_state_change
-        session._on_action = _active_session._on_action
-        session._on_error = _active_session._on_error
-        session._on_complete = _active_session._on_complete
+    # 全 WebSocket 接続のコールバックを新セッションに登録
+    for cb in _ws_state_cbs:
+        session.on_state_change(cb)
+    for cb in _ws_action_cbs:
+        session.on_action(cb)
+    for cb in _ws_error_cbs:
+        session.on_error(cb)
+    for cb in _ws_complete_cbs:
+        session.on_complete(cb)
 
     _active_session = session
 
@@ -124,6 +136,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     """WebSocket エンドポイント。
 
     フロントエンドが接続し、リアルタイムでエージェントの状態を受け取る。
+    コールバックはグローバルレジストリに登録し、セッション生死をまたいで存続する。
     """
     global _active_session
     await ws.accept()
@@ -164,6 +177,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "complete", "success": success})
 
+    # グローバルレジストリに登録（常に）
+    _ws_state_cbs.append(on_state)
+    _ws_action_cbs.append(on_action)
+    _ws_error_cbs.append(on_error)
+    _ws_complete_cbs.append(on_complete)
+
+    # 現在アクティブなセッションにも登録
     if _active_session:
         _active_session.on_state_change(on_state)
         _active_session.on_action(on_action)
@@ -179,6 +199,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         logger.info("WebSocket 切断")
     except Exception:
         pass
+    finally:
+        # 切断時にグローバルレジストリから除去
+        with contextlib.suppress(ValueError):
+            _ws_state_cbs.remove(on_state)
+        with contextlib.suppress(ValueError):
+            _ws_action_cbs.remove(on_action)
+        with contextlib.suppress(ValueError):
+            _ws_error_cbs.remove(on_error)
+        with contextlib.suppress(ValueError):
+            _ws_complete_cbs.remove(on_complete)
 
 
 # ── ヘルパー ──────────────────────────────────────────
