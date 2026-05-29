@@ -22,7 +22,7 @@ export default function LogPanel({ entries }: Props) {
 
   return (
     <div className="section log-section">
-      <h2>📜 ログ</h2>
+      <h2>ログ</h2>
       <div className="log">
         {entries.length === 0 && (
           <div className="entry state">

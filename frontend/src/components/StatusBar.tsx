@@ -1,41 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getVncWsUrl } from "@/lib/api";
 
 interface StatusBarProps {
   vncConnected: boolean;
   agentState: string;
   vmResolution?: string;
-}
-
-interface TimeInfo {
-  time: string;
-  uptime: string;
-}
-
-function useClock(startedAt: number): TimeInfo {
-  const [info, setInfo] = useState<TimeInfo>({ time: "", uptime: "" });
-
-  useEffect(() => {
-    const tick = () => {
-      const now = Date.now();
-      const elapsed = Math.floor((now - startedAt) / 1000);
-      const h = Math.floor(elapsed / 3600);
-      const m = Math.floor((elapsed % 3600) / 60);
-      const s = elapsed % 60;
-      setInfo({
-        time: new Date().toLocaleTimeString("ja-JP"),
-        uptime:
-          h > 0 ? `${h}h${m}m${s}s` : m > 0 ? `${m}m${s}s` : `${s}s`,
-      });
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [startedAt]);
-
-  return info;
 }
 
 function useBackendHealth(): boolean {
@@ -65,8 +35,6 @@ export default function StatusBar({
   agentState,
   vmResolution,
 }: StatusBarProps) {
-  const [startedAt] = useState(() => Date.now());
-  const { time, uptime } = useClock(startedAt);
   const backendAlive = useBackendHealth();
 
   const vmLabel =
@@ -74,7 +42,7 @@ export default function StatusBar({
       ? "Provisioning..."
       : vmResolution
         ? `Desktop ${vmResolution}`
-        : "—";
+        : "\u2014";
 
   const stateLabel: Record<string, string> = {
     idle: "待機中",
@@ -109,16 +77,6 @@ export default function StatusBar({
       <div className="sb-item">
         <span className="sb-dot yellow" />
         <span>Agent {stateLabel[agentState] || agentState}</span>
-      </div>
-
-      <div className="sb-spacer" />
-
-      <div className="sb-item sb-right">
-        <span>🕐 {time}</span>
-      </div>
-
-      <div className="sb-item sb-right">
-        <span>⏱ {uptime}</span>
       </div>
     </div>
   );

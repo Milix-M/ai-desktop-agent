@@ -82,9 +82,9 @@ describe("API client", () => {
   });
 
   describe("getWsUrl", () => {
-    it("returns ws URL with port 8080", () => {
+    it("returns ws URL with port 8081", () => {
       const url = getWsUrl();
-      expect(url).toContain(":8080/ws");
+      expect(url).toContain(":8081/ws");
     });
   });
 

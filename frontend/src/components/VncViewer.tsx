@@ -33,7 +33,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
 
         (rfb as any).addEventListener("connect", () => {
           if (cancelled) return;
-          setStatus("VNC接続中");
+          setStatus("接続中");
           setConnected(true);
           const w = (rfb as any).fbWidth;
           const h = (rfb as any).fbHeight;
@@ -45,9 +45,9 @@ export default function VncViewer({ onConnectionChange }: Props) {
           setConnected(false);
           onConnectionChange?.(false);
           if (e.detail.clean) {
-            setStatus("VNC切断 (正常)");
+            setStatus("切断");
           } else {
-            setStatus("VNC切断 (再接続中...)");
+            setStatus("再接続中...");
             setTimeout(() => {
               if (!cancelled && rfbRef.current) {
                 (rfbRef.current as any).connect();
@@ -57,7 +57,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
         });
       } catch (e) {
         if (!cancelled) {
-          setStatus("noVNC読み込み失敗");
+          setStatus("接続エラー");
           console.error("noVNC:", e);
         }
       }
@@ -79,17 +79,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
 
   return (
     <div className="vnc-panel">
-      <div ref={containerRef} className="vnc-screen">
-        {!connected && (
-          <span className="vnc-placeholder">
-            {status.includes("接続中") ? "VMに接続中..." : status}
-          </span>
-        )}
-      </div>
-      <div className={`vnc-status ${connected ? "connected" : ""}`}>
-        {connected ? "✅ " : "⏳ "}
-        {status}
-      </div>
+      <div ref={containerRef} className="vnc-screen" />
     </div>
   );
 }
