@@ -43,4 +43,5 @@ exec qemu-system-x86_64 \
     -vnc "0.0.0.0:$VNC_DISPLAY" \
     -device virtio-net,netdev=net0 \
     -netdev user,id=net0 \
+    -serial stdio \
     -display none
