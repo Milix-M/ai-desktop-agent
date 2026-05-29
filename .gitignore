@@ -20,7 +20,11 @@ venv/
 # VM
 *.qcow2
 *.img
+*.raw
 vm_images/
+vm/vmlinuz
+vm/initrd.img
+vm/cmdline.txt
 
 # OS
 .DS_Store
