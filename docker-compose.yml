@@ -5,19 +5,23 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5900:5900"
-    volumes:
-      - vm_data:/vm
     environment:
-      - VM_IMAGE=/vm/desktop.qcow2
       - VM_MEMORY=2048
       - VM_VNC_PORT=5900
+      - VM_IMAGE=/vm/desktop.qcow2
+      - CMDLINE_FILE=/vm/cmdline.txt
       - USE_KVM=${USE_KVM:-false}
+    volumes:
+      - ./vm/desktop.qcow2:/vm/desktop.qcow2
+      - ./vm/vmlinuz:/vm/vmlinuz:ro
+      - ./vm/initrd.img:/vm/initrd.img:ro
+      - ./vm/cmdline.txt:/vm/cmdline.txt:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo | nc -z localhost 5900"]
+      test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
       interval: 10s
-      retries: 5
-      start_period: 900s
+      retries: 10
+      start_period: 60s
 
   backend:
     build:
@@ -54,6 +58,3 @@ services:
     ports:
       - "6080:6080"
     restart: unless-stopped
-
-volumes:
-  vm_data:
