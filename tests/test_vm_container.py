@@ -212,10 +212,12 @@ class TestBuildVmImage:
 
     def test_configures_sddm_autologin(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
-        assert "sddm.conf.d" in content, "SDDM 設定ディレクトリを作成する必要があります"
+        assert "sddm.conf" in content, "SDDM 設定ファイルを作成する必要があります"
         assert "[Autologin]" in content, "SDDM Autologin セクションが必要です"
         assert "User=agent" in content, "agent ユーザーの自動ログインを設定する必要があります"
-        assert "Session=plasma-x11" in content, "Plasma X11 セッションを指定する必要があります"
+        assert "Session=" in content, "セッション名を指定する必要があります"
+        # セッション名はビルド時に自動検出（plasma / plasma-x11 / kde-plasma）
+        assert "plasma.desktop" in content, "plasma.desktop を検出する必要があります"
 
     def test_creates_agent_user(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
