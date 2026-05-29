@@ -249,6 +249,21 @@ class TestBuildVmImage:
             "ARM64→AMD64 用に qemu-user-static を参照する必要があります"
         )
 
+    def test_systemd_symlinks_correct(self):
+        content = _read_cmdline(VM_DIR / "build-vm-image.sh")
+        # default.target → graphical.target
+        assert "default.target" in content, "デフォルトターゲットを設定する必要があります"
+        # display-manager.service → sddm.service（Alias）
+        assert "display-manager.service" in content, "display-manager エイリアスが必要です"
+        # graphical.target.wants/sddm.service（正しい起動トリガー）
+        assert "graphical.target.wants" in content, (
+            "graphical.target.wants/sddm.service で SDDM を起動する必要があります"
+        )
+        # display-manager.service.wants は循環参照のバグなので存在してはいけない
+        assert "display-manager.service.wants" not in content, (
+            "display-manager.service.wants/sddm.service は循環参照です"
+        )
+
     def test_cleanup_on_exit(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
         assert "trap" in content, "ビルド失敗時に後片付けする trap が必要です"

@@ -98,8 +98,9 @@ printf '[Autologin]\nUser=agent\nSession=plasma-x11\n' > "$TARGET/etc/sddm.conf.
 # ── systemd ──
 ln -sf /lib/systemd/system/graphical.target "$TARGET/etc/systemd/system/default.target"
 ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/display-manager.service"
-mkdir -p "$TARGET/etc/systemd/system/display-manager.service.wants"
-ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/display-manager.service.wants/sddm.service"
+# SDDM を graphical.target で起動させる（display-manager.service.wants は誤り）
+mkdir -p "$TARGET/etc/systemd/system/graphical.target.wants"
+ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/graphical.target.wants/sddm.service"
 mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
 ln -sf /lib/systemd/system/NetworkManager.service "$TARGET/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
 
