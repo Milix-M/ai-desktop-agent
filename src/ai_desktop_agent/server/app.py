@@ -63,6 +63,14 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
         _active_session.stop()
 
     session = _create_session()
+
+    # WebSocket が古いセッションに登録したコールバックを新セッションに引き継ぐ
+    if _active_session is not None:
+        session._on_state_change = _active_session._on_state_change
+        session._on_action = _active_session._on_action
+        session._on_error = _active_session._on_error
+        session._on_complete = _active_session._on_complete
+
     _active_session = session
 
     await session.start_async(req.instruction)
