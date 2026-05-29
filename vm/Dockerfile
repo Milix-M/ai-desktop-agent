@@ -19,7 +19,7 @@ ENV VM_IMAGE=/vm/desktop.qcow2 \
     CMDLINE_FILE=/vm/cmdline.txt
 
 EXPOSE 5900
-HEALTHCHECK --interval=10s --retries=5 --timeout=3s \
-    CMD echo | nc -z localhost 5900 || exit 1
+HEALTHCHECK --interval=10s --retries=10 --timeout=3s --start-period=60s \
+    CMD nc -z localhost 5900 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
