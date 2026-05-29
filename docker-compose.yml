@@ -18,10 +18,10 @@ services:
       - ./vm/cmdline.txt:/vm/cmdline.txt:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "timeout 2 bash -c 'echo > /dev/tcp/localhost/5900' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
       interval: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 60s
 
   backend:
     build:
