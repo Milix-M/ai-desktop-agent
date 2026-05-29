@@ -1,6 +1,6 @@
 """VMコンテナ関連ファイルのバリデーションテスト。
 
-Dockerfile / entrypoint.sh / prepare-image.sh の構文と
+Dockerfile / entrypoint.sh / build-vm-image.sh の構文と
 必須項目が正しいことを確認する。Dockerビルドは行わない。
 """
 
@@ -45,11 +45,11 @@ class TestDockerfile:
             "Dockerfile で qemu-system-x86 をインストールする必要があります"
         )
 
-    def test_has_builder_stage(self):
-        """プリビルド方式: マルチステージビルドで builder ステージがあること。"""
+    def test_no_builder_stage(self):
+        """ホスト事前ビルド方式: Dockerfile はシングルステージで builder 不要。"""
         content = (VM_DIR / "Dockerfile").read_text()
-        assert "AS builder" in content, (
-            "Dockerfile にマルチステージビルドの builder ステージが必要です"
+        assert "AS builder" not in content, (
+            "Dockerfile に builder ステージは不要です（ホスト上で build-vm-image.sh でビルド）"
         )
 
     def test_healthcheck_present(self):
@@ -101,50 +101,49 @@ class TestEntrypoint:
         assert "-initrd" in content, "entrypoint.sh で -initrd を指定する必要があります"
 
 
-# ── prepare-image.sh ──────────────────────────────────
+# ── build-vm-image.sh ──────────────────────────────────
 
 
-class TestPrepareImage:
-    """vm/prepare-image.sh の構文と内容を検証する。"""
+class TestBuildVmImage:
+    """vm/build-vm-image.sh の構文と内容を検証する。"""
 
     def test_exists(self):
-        assert (VM_DIR / "prepare-image.sh").is_file(), "vm/prepare-image.sh が存在しません"
+        assert (VM_DIR / "build-vm-image.sh").is_file(), "vm/build-vm-image.sh が存在しません"
 
     def test_is_executable(self):
-        path = VM_DIR / "prepare-image.sh"
-        assert path.stat().st_mode & 0o111, "prepare-image.sh に実行権限が必要です"
+        path = VM_DIR / "build-vm-image.sh"
+        assert path.stat().st_mode & 0o111, "build-vm-image.sh に実行権限が必要です"
 
     def test_bash_syntax_valid(self):
-        path = VM_DIR / "prepare-image.sh"
+        path = VM_DIR / "build-vm-image.sh"
         result = subprocess.run(
             ["bash", "-n", str(path)],
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, f"prepare-image.sh に構文エラーがあります:\n{result.stderr}"
+        assert result.returncode == 0, f"build-vm-image.sh に構文エラーがあります:\n{result.stderr}"
 
     def test_uses_debootstrap(self):
-        content = (VM_DIR / "prepare-image.sh").read_text()
-        assert "debootstrap" in content, (
-            "prepare-image.sh で debootstrap を使う必要があります"
-        )
+        content = (VM_DIR / "build-vm-image.sh").read_text()
+        assert "debootstrap" in content, "build-vm-image.sh で debootstrap を使う必要があります"
 
     def test_installs_kde(self):
-        content = (VM_DIR / "prepare-image.sh").read_text()
-        assert "kde-plasma-desktop" in content, (
-            "prepare-image.sh で KDE Plasma をインストールする必要があります"
+        content = (VM_DIR / "build-vm-image.sh").read_text()
+        assert "plasma-desktop" in content, (
+            "build-vm-image.sh で KDE Plasma をインストールする必要があります"
         )
 
-    def test_configures_getty_autologin(self):
-        content = (VM_DIR / "prepare-image.sh").read_text()
-        assert "agetty --autologin agent" in content, (
-            "prepare-image.sh で agent の getty 自動ログインを設定する必要があります"
+    def test_configures_sddm_autologin(self):
+        content = (VM_DIR / "build-vm-image.sh").read_text()
+        assert "sddm" in content, "build-vm-image.sh で SDDM を設定する必要があります"
+        assert "Autologin" in content, (
+            "build-vm-image.sh で SDDM 自動ログインを設定する必要があります"
         )
 
     def test_creates_qcow2(self):
-        content = (VM_DIR / "prepare-image.sh").read_text()
+        content = (VM_DIR / "build-vm-image.sh").read_text()
         assert "qemu-img convert" in content, (
-            "prepare-image.sh で qemu-img convert を実行する必要があります"
+            "build-vm-image.sh で qemu-img convert を実行する必要があります"
         )
 
 
