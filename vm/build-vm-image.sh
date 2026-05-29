@@ -92,6 +92,25 @@ log "Configuring user + autologin..."
 chroot "$TARGET" useradd -m -s /bin/bash -G sudo agent
 echo "agent:agent" | chroot "$TARGET" chpasswd
 echo "agent ALL=(ALL) NOPASSWD:ALL" > "$TARGET/etc/sudoers.d/agent"
+
+# スクリーンロック無効化（AIエージェント操作用）
+mkdir -p "$TARGET/home/agent/.config"
+cat > "$TARGET/home/agent/.config/kscreenlockerrc" <<'KSCREENLOCKER_EOF'
+[Daemon]
+Autolock=false
+LockOnResume=false
+KSCREENLOCKER_EOF
+
+cat > "$TARGET/home/agent/.config/powermanagementprofilesrc" <<'POWER_EOF'
+[AC][Display]
+TurnOffWhenIdle=false
+[AC][SuspendAndShutdown]
+SuspendWhenIdle=false
+AutoSuspend=false
+POWER_EOF
+
+chroot "$TARGET" chown -R agent:agent /home/agent/.config
+
 mkdir -p "$TARGET/etc/sddm.conf.d"
 printf '[Autologin]\nUser=agent\nSession=plasma-x11\n' > "$TARGET/etc/sddm.conf.d/autologin.conf"
 
