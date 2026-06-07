@@ -14,6 +14,12 @@ from pydantic import BaseModel
 
 from ai_desktop_agent.server.session import TaskSession
 
+# Docker 起動時 (uvicorn 直指定) でもアプリログが出力されるように設定
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0")
