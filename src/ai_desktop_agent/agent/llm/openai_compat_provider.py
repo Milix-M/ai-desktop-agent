@@ -5,6 +5,12 @@ OpenAI Chat Completions 互換エンドポイント全般に対応する。
 
 Structured Output (response_format) で LLM の出力を強制し、
 JSON パースエラーを根本的に防止する。
+
+座標精度を向上させるため、スクリーンショットには以下の視覚的ヒントが
+重畳されている（VNCClient.capture_screen にて自動付与）：
+  - 50px 間隔のグリッド線（100px ごとに太線）
+  - 上端・左端の座標マーカー数字
+  - 緑色のカーソル位置十字（現在のマウス位置）
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from ai_desktop_agent.agent.llm.types import (
     DecompositionResult,
     ErrorContext,
     RecoveryPlan,
+    RecoveryStrategy,
     UnderstandingResult,
     VerificationResult,
 )
@@ -32,29 +39,75 @@ from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
-あなたはLinuxデスクトップ（KDE Plasma）を操作するAIエージェントです。
-ユーザーの指示に従い、GUI操作を自動実行します。
+# ========================================================================
+# システムプロンプト — 画面の見方と操作のルール
+# ========================================================================
 
-操作可能なアクション:
-- mouse_move: カーソル移動 {x, y}
-- left_click: 左クリック {x, y}
-- right_click: 右クリック {x, y}
-- double_click: ダブルクリック {x, y}
-- drag: ドラッグ {start_x, start_y, end_x, end_y}
-- scroll: スクロール {direction: "up"|"down", amount: int}
-- type: テキスト入力 {text: str}
-- key_press: キー押下 {key: str}
-- key_combo: 複合キー {keys: [str]}
-- wait: 待機 {seconds: float}
-- screenshot: スクリーンショット取得 {}
-- subtask_complete: サブタスク完了宣言 {}
+_SYSTEM_PROMPT = """あなたは Linux デスクトップ（KDE Plasma, 1024x768）を遠隔操作する AI エージェントです。
+ユーザーの指示に従い、GUI 操作を自律実行します。
+
+# 画面の見方
+
+スクリーンショットには以下の視覚的補助が描画されています：
+- **赤いグリッド線**: 50px 間隔の細線（100px ごとにやや太い線）
+- **座標マーカー**: 上端に X 座標、左端に Y 座標の数字（100px 間隔）
+  - 例: 上端に「300」、左端に「200」とあれば、その交点付近が (300, 200)
+- **緑の十字**: 現在のマウスカーソル位置
+- **赤枠**: 画面の外周
+
+# 座標の読み取り方
+
+1. まず画面上端の数字を見て、ターゲットの X 座標を読む
+2. 左端の数字を見て、ターゲットの Y 座標を読む
+3. グリッド線を基準に、マーカーの間を比例補間する
+4. 精度を上げたい場合は region_select で拡大表示を要求する
+
+座標は左上が (0, 0)、右方向が +x、下方向が +y です。
+
+# 2段階精密クリック戦略（重要）
+
+ボタンや小さな UI をクリックする際は、以下の 2 段階を使い分けてください：
+
+**【直接クリック】（確信度 0.8 以上の場合のみ）**
+- 大きなボタン、ウィンドウタイトルバー、デスクトップアイコンなど
+- 座標マーカーから自信を持って位置が特定できる場合
+- 例: 上端「400」付近、左端「300」付近のボタン → left_click {x: 400, y: 300}
+
+**【region_select → 精密クリック】（確信度が低い場合）**
+- 小さいボタン、テキスト入力欄、チェックボックス、メニュー項目
+- 座標マーカーだけでは自信がない場合
+- ターゲット周辺を含む領域（100〜300px 四方）を region_select で要求
+- 返される拡大画像で正確な座標を読んでから left_click する
+
+# 操作可能なアクション
+
+- mouse_move: {x: int, y: int} — カーソル移動
+- left_click: {x: int, y: int} — 左クリック
+- right_click: {x: int, y: int} — 右クリック
+- double_click: {x: int, y: int} — ダブルクリック
+- drag: {start_x: int, start_y: int, end_x: int, end_y: int} — ドラッグ
+- scroll: {direction: "up"|"down", amount: int} — スクロール
+- type: {text: str} — テキスト入力
+- key_press: {key: str} — キー押下（enter, escape, tab 等）
+- key_combo: {keys: [str]} — 複合キー（["ctrl", "c"] 等）
+- wait: {seconds: float} — 待機
+- screenshot: {} — 画面再撮影
+- region_select: {x: int, y: int, width: int, height: int} — 領域拡大を要求
+- subtask_complete: {} — 現在のサブタスク完了
+
+# 重要なルール
+
+1. **画面を見てから判断する**：推測でクリックしない。必ず座標マーカーを確認する。
+2. **小さいターゲットは region_select を使う**：確信度 0.7 未満なら拡大表示を要求する。
+3. **アクション後は画面変化を待つ**：クリック後は 0.5〜1.0 秒 wait する。
+4. **失敗したら別の方法を試す**：同じ座標を連続クリックしない。
+5. **confidence は正直に**：自信がないのに 0.9 以上を付けない。
 
 画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
 
-# ── Structured Output JSON Schemas ─────────────────────
-# OpenAI の response_format で出力を強制し、JSON パースエラーを防止する。
-# ref: https://platform.openai.com/docs/guides/structured-outputs
+# ========================================================================
+# Structured Output JSON Schemas
+# ========================================================================
 
 _ACTION_TYPES = [
     "mouse_move",
@@ -68,8 +121,32 @@ _ACTION_TYPES = [
     "key_combo",
     "wait",
     "screenshot",
+    "region_select",
     "subtask_complete",
 ]
+
+_SCHEMA_ACTION = {
+    "name": "action_decision",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action_type": {"type": "string", "enum": _ACTION_TYPES},
+            "params": {"type": "object"},
+            "expected_effect": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reasoning": {"type": "string"},
+        },
+        "required": [
+            "action_type",
+            "params",
+            "expected_effect",
+            "confidence",
+            "reasoning",
+        ],
+        "additionalProperties": False,
+    },
+}
 
 _SCHEMA_UNDERSTAND = {
     "name": "understand_instruction",
@@ -80,11 +157,13 @@ _SCHEMA_UNDERSTAND = {
             "intent": {
                 "type": "string",
                 "enum": [
-                    "spreadsheet_creation",
-                    "file_management",
+                    "open_application",
+                    "close_application",
                     "web_browsing",
                     "text_editing",
+                    "file_management",
                     "system_operation",
+                    "spreadsheet_creation",
                     "unknown",
                 ],
             },
@@ -124,29 +203,6 @@ _SCHEMA_DECOMPOSE = {
             "reasoning": {"type": "string"},
         },
         "required": ["subtasks", "reasoning"],
-        "additionalProperties": False,
-    },
-}
-
-_SCHEMA_ACTION = {
-    "name": "action_decision",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "action_type": {"type": "string", "enum": _ACTION_TYPES},
-            "params": {"type": "object"},
-            "expected_effect": {"type": "string"},
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "reasoning": {"type": "string"},
-        },
-        "required": [
-            "action_type",
-            "params",
-            "expected_effect",
-            "confidence",
-            "reasoning",
-        ],
         "additionalProperties": False,
     },
 }
@@ -236,7 +292,7 @@ class OpenAICompatProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    # ── 指示理解 ───────────────────────────────────────
+    # ── 指示理解 ─────────────────────────────────
 
     async def understand_instruction(self, goal: Goal) -> UnderstandingResult:
         prompt = f"""ユーザー指示を解析し、意図・対象アプリ・制約を抽出してください。
@@ -251,9 +307,11 @@ class OpenAICompatProvider(LLMProvider):
             reasoning=data.get("reasoning", ""),
         )
 
-    # ── タスク分解 ─────────────────────────────────────
+    # ── タスク分解 ───────────────────────────────
 
     async def decompose_task(self, goal: Goal, subtask_count: int) -> DecompositionResult:
+        from ai_desktop_agent.agent.state import Subtask
+
         constraints_text = ", ".join(goal.constraints) if goal.constraints else "なし"
         prompt = (
             "タスクをサブタスクに分解してください。"
@@ -277,7 +335,7 @@ class OpenAICompatProvider(LLMProvider):
         ]
         return DecompositionResult(subtasks=subtasks, reasoning=data.get("reasoning", ""))
 
-    # ── アクション決定 ─────────────────────────────────
+    # ── アクション決定（コア！）───────────────────
 
     async def decide_next_action(
         self,
@@ -286,8 +344,23 @@ class OpenAICompatProvider(LLMProvider):
         action_history: list[ActionRecord],
         screenshot: Screenshot,
         error_context: ErrorContext | None = None,
+        *,
+        is_zoomed: bool = False,
+        zoom_origin: tuple[int, int] | None = None,
     ) -> ActionDecision:
+        """現在の画面とコンテキストから次に実行すべきアクションを決定する。
+
+        Args:
+            goal: ユーザーのゴール。
+            current_subtask: 現在のサブタスク。
+            action_history: 操作履歴。
+            screenshot: 現在の画面（オーバーレイ付き）。
+            error_context: エラー回復中の場合のエラー情報。
+            is_zoomed: このスクリーンショットが拡大表示かどうか。
+            zoom_origin: 拡大表示の場合、元画面での左上座標 (x, y)。
+        """
         history_text = self._format_action_history(action_history[-10:])
+
         error_block = ""
         if error_context:
             error_block = f"""
@@ -296,8 +369,20 @@ class OpenAICompatProvider(LLMProvider):
 エラーメッセージ: {error_context.error_message}
 再試行回数: {error_context.retry_count}
 """
-        prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 
+        zoom_block = ""
+        if is_zoomed and zoom_origin:
+            zx, zy = zoom_origin
+            zoom_block = f"""
+【拡大表示モード】
+この画像は元の画面の領域 ({zx}, {zy}) を起点とする拡大表示です。
+画像内の座標は領域内の相対座標です。
+たとえば画像内の (50, 30) は元画面の ({zx + 50}, {zy + 30}) に相当します。
+精密なクリック座標を画像から直接読み取ってください。
+"""
+
+        prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
+{zoom_block}
 【ゴール】{goal.description}
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}
@@ -307,8 +392,9 @@ ID: {current_subtask.id}
 説明: {current_subtask.description}
 期待結果: {current_subtask.expected_outcome}
 {error_block}
-【直近の操作履歴】
+【直前の操作履歴】
 {history_text}"""
+
         image_bytes = screenshot.image_bytes
         data = await self._call(prompt, _SCHEMA_ACTION, image_bytes=image_bytes)
         action_type_str = data.get("action_type", "subtask_complete")
@@ -323,7 +409,7 @@ ID: {current_subtask.id}
             reasoning=data.get("reasoning", ""),
         )
 
-    # ── 結果検証 ───────────────────────────────────────
+    # ── 結果検証 ─────────────────────────────────
 
     async def verify_result(
         self, action: ActionDecision, expected_effect: str
@@ -346,7 +432,7 @@ ID: {current_subtask.id}
             evidence=data.get("evidence", ""),
         )
 
-    # ── エラー回復 ─────────────────────────────────────
+    # ── エラー回復 ───────────────────────────────
 
     async def recover_from_error(
         self,
@@ -367,7 +453,7 @@ ID: {subtask.id}
 エラーメッセージ: {error.error_message}
 再試行回数: {error.retry_count} / 最大 {subtask.max_retries}
 
-【直近の操作履歴】
+【直前の操作履歴】
 {history_text}"""
         data = await self._call(prompt, _SCHEMA_RECOVER)
         raw_actions = data.get("actions", [])
@@ -379,13 +465,13 @@ ID: {subtask.id}
             for a in raw_actions
         ]
         return RecoveryPlan(
-            strategy=data.get("strategy", "wait_and_retry"),
+            strategy=RecoveryStrategy(data.get("strategy", "wait_and_retry")),
             actions=recovery_actions,
             reasoning=data.get("reasoning", ""),
             recoverable=bool(data.get("recoverable", True)),
         )
 
-    # ── 内部 ──────────────────────────────────────────
+    # ── 内部 ──────────────────────────────────────
 
     async def _call(
         self,
@@ -393,11 +479,7 @@ ID: {subtask.id}
         json_schema: dict[str, Any] | None = None,
         image_bytes: bytes | None = None,
     ) -> dict[str, Any]:
-        """OpenAI API を呼び出し、JSON 応答を返す。
-
-        json_schema 指定時は Structured Output で出力を強制。
-        image_bytes 指定時は Vision API でマルチモーダルリクエスト。
-        """
+        """OpenAI API を呼び出し、JSON 応答を返す。"""
         # メッセージ構築
         if image_bytes:
             b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -434,7 +516,6 @@ ID: {subtask.id}
                 if not text:
                     raise ValueError("応答が空です")
 
-                # Structured Output 使用時は API が有効な JSON を保証する
                 if json_schema:
                     return json.loads(text)  # type: ignore[no-any-return]
                 return self._parse_json(text)
@@ -470,7 +551,7 @@ ID: {subtask.id}
 
     @staticmethod
     def _format_action_history(history: list[ActionRecord]) -> str:
-        """アクション履歴をLLM向けテキストに整形。"""
+        """操作履歴をLLM向けテキストに整形。"""
         if not history:
             return "（履歴なし）"
         lines = []

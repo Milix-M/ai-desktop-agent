@@ -10,6 +10,7 @@ from ai_desktop_agent.agent.llm.types import (
     DecompositionResult,
     ErrorContext,
     RecoveryPlan,
+    RecoveryStrategy,
     UnderstandingResult,
     VerificationResult,
 )
@@ -52,7 +53,12 @@ class MockLLMProvider(LLMProvider):
     async def understand_instruction(self, goal: Goal) -> UnderstandingResult:
         if self._understand_result:
             return self._understand_result
-        return UnderstandingResult(intent="unknown", reasoning="mock")
+        return UnderstandingResult(
+            intent="unknown",
+            target_application=None,
+            constraints=[],
+            reasoning="mock",
+        )
 
     async def decompose_task(self, goal: Goal, subtask_count: int) -> DecompositionResult:
         if self._decompose_result:
@@ -69,12 +75,17 @@ class MockLLMProvider(LLMProvider):
         action_history: list[ActionRecord],
         screenshot: Screenshot,
         error_context: ErrorContext | None = None,
+        *,
+        is_zoomed: bool = False,
+        zoom_origin: tuple[int, int] | None = None,
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))
         if self._decide_result:
             return self._decide_result
         return ActionDecision(
             action=Action(action_type=ActionType.SUBTASK_COMPLETE),
+            expected_effect="mock: サブタスク完了",
+            confidence=1.0,
             reasoning="mock: サブタスク完了",
         )
 
@@ -85,7 +96,11 @@ class MockLLMProvider(LLMProvider):
     ) -> VerificationResult:
         if self._verify_result:
             return self._verify_result
-        return VerificationResult(success=True, reasoning="mock: 検証成功")
+        return VerificationResult(
+            success=True,
+            reasoning="mock: 検証成功",
+            evidence="mock evidence",
+        )
 
     async def recover_from_error(
         self,
@@ -96,9 +111,10 @@ class MockLLMProvider(LLMProvider):
         if self._recover_result:
             return self._recover_result
         return RecoveryPlan(
-            strategy="wait_and_retry",
+            strategy=RecoveryStrategy.WAIT_AND_RETRY,
             actions=[Action(action_type=ActionType.WAIT, params={"seconds": 1.0})],
             reasoning="mock: 再試行します",
+            recoverable=True,
         )
 
     @property

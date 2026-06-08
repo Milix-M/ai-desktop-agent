@@ -2,6 +2,7 @@
 
 DisplayBackend インターフェースの具象クラス。
 vncdotool の ThreadedVNCClientProxy をラップして同期的に操作する。
+カーソル位置を内部追跡し、オーバーレイ付きスクリーンショットを生成できる。
 """
 
 import io
@@ -86,12 +87,23 @@ class VNCClient(DisplayBackend):
         self._frame_count = 0
         self._width = 0
         self._height = 0
+        # カーソル位置を内部追跡（vncdotool は取得APIを持たないため）
+        self._cursor_x = 0
+        self._cursor_y = 0
 
     @property
     def is_connected(self) -> bool:
         return self._connected
 
-    # ── 接続管理 ───────────────────────────────────────
+    @property
+    def cursor_x(self) -> int:
+        return self._cursor_x
+
+    @property
+    def cursor_y(self) -> int:
+        return self._cursor_y
+
+    # ── 接続管理 ─────────────────────────────────────────
 
     def connect(self, host: str, port: int = 5900, password: str | None = None) -> None:
         """VNCサーバーに接続する。"""
@@ -120,10 +132,13 @@ class VNCClient(DisplayBackend):
         self._connected = False
         self._frame_count = 0
 
-    # ── 画面キャプチャ ─────────────────────────────────
+    # ── 画面キャプチャ ────────────────────────────────────
 
-    def capture_screen(self) -> Screenshot:
-        """画面全体をキャプチャ。"""
+    def capture_screen(self, *, with_overlay: bool = True) -> Screenshot:
+        """画面全体をキャプチャする。
+
+        with_overlay=True の場合、座標グリッド＋カーソル位置を重畳する。
+        """
         self._ensure_connected()
 
         buf = io.BytesIO()
@@ -131,7 +146,7 @@ class VNCClient(DisplayBackend):
         data = buf.getvalue()
         self._frame_count += 1
 
-        return Screenshot(
+        ss = Screenshot(
             image_bytes=data,
             width=self._width or 1024,
             height=self._height or 768,
@@ -139,8 +154,25 @@ class VNCClient(DisplayBackend):
             frame_number=self._frame_count,
         )
 
-    def capture_region(self, x: int, y: int, width: int, height: int) -> Screenshot:
-        """指定領域をキャプチャ。"""
+        if with_overlay:
+            return ss.with_overlay(
+                cursor_x=self._cursor_x,
+                cursor_y=self._cursor_y,
+            )
+        return ss
+
+    def capture_raw(self) -> Screenshot:
+        """オーバーレイなしの生スクリーンショットを取得する。"""
+        return self.capture_screen(with_overlay=False)
+
+    def capture_region(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> Screenshot:
+        """指定領域をキャプチャする（オーバーレイなし）。"""
         self._ensure_connected()
 
         buf = io.BytesIO()
@@ -156,11 +188,13 @@ class VNCClient(DisplayBackend):
             frame_number=self._frame_count,
         )
 
-    # ── マウス操作 ─────────────────────────────────────
+    # ── マウス操作（カーソル追跡つき） ────────────────────
 
     def mouse_move(self, x: int, y: int) -> None:
         self._ensure_connected()
         self._client.mouseMove(x, y)
+        self._cursor_x = x
+        self._cursor_y = y
 
     def mouse_down(self, button: int = 1) -> None:
         self._ensure_connected()
@@ -193,15 +227,18 @@ class VNCClient(DisplayBackend):
         self._client.mouseDown(button)
         self._client.mouseDrag(end_x, end_y, step=10)
         self._client.mouseUp(button)
+        self._cursor_x = end_x
+        self._cursor_y = end_y
 
     def mouse_scroll(self, direction: str, amount: int = 1) -> None:
+        """スクロール。"""
         self._ensure_connected()
         btn = _BUTTON_SCROLL_UP if direction == "up" else _BUTTON_SCROLL_DOWN
         for _ in range(abs(amount)):
             self._client.mouseDown(btn)
             self._client.mouseUp(btn)
 
-    # ── キーボード操作 ─────────────────────────────────
+    # ── キーボード操作 ────────────────────────────────────
 
     def key_press(self, key: str) -> None:
         """キーを押して離す。"""
@@ -237,7 +274,7 @@ class VNCClient(DisplayBackend):
         self._ensure_connected()
         self._client.paste(text)
 
-    # ── 内部 ──────────────────────────────────────────
+    # ── 内部 ──────────────────────────────────────────────
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._client is None:

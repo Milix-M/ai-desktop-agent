@@ -1,51 +1,53 @@
-"""アクション型定義 — エージェントがVMに対して実行する基本操作。
+"""アクションの基本データ型。
 
-すべてのアクションはこのモジュールで定義された型を使う。
-LLMの出力もこの型にパースされる。
+エージェントループと LLM がやりとりするアクション定義。
 """
 
-from dataclasses import dataclass, field
-from enum import StrEnum
-from typing import Any
+from __future__ import annotations
+
+import dataclasses
+from enum import Enum
 
 
-class ActionType(StrEnum):
-    """エージェントが実行可能なアクションの種類。"""
+class ActionType(Enum):
+    """エージェントが実行可能な操作の種類。"""
 
-    # === マウス操作 ===
+    # マウス操作（直接座標指定）
     MOUSE_MOVE = "mouse_move"
     LEFT_CLICK = "left_click"
     RIGHT_CLICK = "right_click"
-    DOUBLE_CLICK = "double_click"
     MIDDLE_CLICK = "middle_click"
+    DOUBLE_CLICK = "double_click"
     DRAG = "drag"
     SCROLL = "scroll"
 
-    # === キーボード操作 ===
+    # キーボード操作
     TYPE = "type"
     KEY_PRESS = "key_press"
     KEY_COMBO = "key_combo"
     KEY_HOLD = "key_hold"
 
-    # === 待機 ===
+    # 制御
     WAIT = "wait"
     WAIT_FOR_TEXT = "wait_for_text"
     WAIT_FOR_STILL = "wait_for_still"
-
-    # === 観測 ===
     SCREENSHOT = "screenshot"
-
-    # === メタ ===
     SUBTASK_COMPLETE = "subtask_complete"
 
+    # ズームワークフロー（新設）
+    REGION_SELECT = "region_select"  # 精密クリックの前に領域を拡大表示
 
-# アクション種別ごとの必須パラメータ定義
+
+# 全アクション種別リスト（テスト用）
+ALL_ACTION_TYPES = list(ActionType)
+
+# アクション種別ごとの必須パラメータ
 _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.MOUSE_MOVE: {"x", "y"},
-    ActionType.LEFT_CLICK: set(),  # x, y はオプション（省略時は現在位置）
+    ActionType.LEFT_CLICK: set(),
     ActionType.RIGHT_CLICK: set(),
-    ActionType.DOUBLE_CLICK: set(),
     ActionType.MIDDLE_CLICK: set(),
+    ActionType.DOUBLE_CLICK: set(),
     ActionType.DRAG: {"start_x", "start_y", "end_x", "end_y"},
     ActionType.SCROLL: {"direction", "amount"},
     ActionType.TYPE: {"text"},
@@ -57,102 +59,121 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.WAIT_FOR_STILL: {"timeout"},
     ActionType.SCREENSHOT: set(),
     ActionType.SUBTASK_COMPLETE: set(),
+    ActionType.REGION_SELECT: {"x", "y", "width", "height"},
 }
 
-# オプショナルなパラメータ（バリデーションでエラーにしない）
+# アクション種別ごとの任意パラメータ
 _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
     ActionType.LEFT_CLICK: {"x", "y"},
     ActionType.RIGHT_CLICK: {"x", "y"},
-    ActionType.DOUBLE_CLICK: {"x", "y"},
     ActionType.MIDDLE_CLICK: {"x", "y"},
+    ActionType.DOUBLE_CLICK: {"x", "y"},
+    ActionType.MOUSE_MOVE: set(),
+    ActionType.DRAG: set(),
+    ActionType.SCROLL: set(),
+    ActionType.TYPE: set(),
+    ActionType.KEY_PRESS: set(),
+    ActionType.KEY_COMBO: set(),
+    ActionType.KEY_HOLD: set(),
+    ActionType.WAIT: set(),
+    ActionType.WAIT_FOR_TEXT: set(),
+    ActionType.WAIT_FOR_STILL: set(),
+    ActionType.SCREENSHOT: set(),
+    ActionType.SUBTASK_COMPLETE: set(),
+    ActionType.REGION_SELECT: set(),
+}
+
+# 日本語のアクション名（説明文自動生成用）
+_ACTION_NAMES: dict[ActionType, str] = {
+    ActionType.MOUSE_MOVE: "マウス移動",
+    ActionType.LEFT_CLICK: "左クリック",
+    ActionType.RIGHT_CLICK: "右クリック",
+    ActionType.MIDDLE_CLICK: "中クリック",
+    ActionType.DOUBLE_CLICK: "ダブルクリック",
+    ActionType.DRAG: "ドラッグ",
+    ActionType.SCROLL: "スクロール",
+    ActionType.TYPE: "テキスト入力",
+    ActionType.KEY_PRESS: "キー押下",
+    ActionType.KEY_COMBO: "キーコンボ",
+    ActionType.KEY_HOLD: "キー長押し",
+    ActionType.WAIT: "待機",
+    ActionType.WAIT_FOR_TEXT: "テキスト待機",
+    ActionType.WAIT_FOR_STILL: "画面安定待機",
+    ActionType.SCREENSHOT: "スクリーンショット",
+    ActionType.SUBTASK_COMPLETE: "サブタスク完了",
+    ActionType.REGION_SELECT: "領域拡大要求",
 }
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Action:
-    """エージェントがVMに対して実行する1つの操作。
-
-    Attributes:
-        action_type: アクションの種類。
-        params: アクション種別に応じたパラメータ。
-        description: 人間向けの説明（ログ表示用）。省略時は自動生成。
-    """
+    """単一の操作指示。"""
 
     action_type: ActionType
-    params: dict[str, Any] = field(default_factory=dict)
+    params: dict | None = None
     description: str = ""
 
     def __post_init__(self) -> None:
-        """バリデーション: 必須パラメータのチェック。"""
-        if self.action_type not in _REQUIRED_PARAMS:
-            raise ValueError(f"不明なアクション種別: {self.action_type}")
+        params = self.params or {}
 
-        required = _REQUIRED_PARAMS[self.action_type]
-        optional = _OPTIONAL_PARAMS.get(self.action_type, set())
-        valid_keys = required | optional
-        provided = set(self.params.keys())
-
-        missing = required - provided
+        # 必須パラメータ検証
+        required = _REQUIRED_PARAMS.get(self.action_type, set())
+        missing = required - set(params.keys())
         if missing:
-            raise ValueError(f"{self.action_type.value} に必須パラメータが不足: {missing}")
+            raise ValueError(
+                f"必須パラメータが不足しています: {missing} (action_type={self.action_type.value})"
+            )
 
-        unknown = provided - valid_keys
+        # 不明パラメータ検証
+        optional = _OPTIONAL_PARAMS.get(self.action_type, set())
+        allowed = required | optional
+        unknown = set(params.keys()) - allowed
         if unknown:
-            raise ValueError(f"{self.action_type.value} に不明なパラメータ: {unknown}")
+            raise ValueError(
+                f"不明なパラメータです: {unknown} (action_type={self.action_type.value})"
+            )
 
-        # description が空なら自動生成
+        # 説明文の自動生成
         if not self.description:
-            object.__setattr__(self, "description", self._generate_description())
-
-    def _generate_description(self) -> str:
-        """アクションの人間向け説明を自動生成。"""
-        match self.action_type:
-            case ActionType.MOUSE_MOVE:
-                return f"カーソルを ({self.params['x']}, {self.params['y']}) に移動"
-            case ActionType.LEFT_CLICK:
-                if "x" in self.params:
-                    return f"座標 ({self.params['x']}, {self.params['y']}) を左クリック"
-                return "現在位置を左クリック"
-            case ActionType.RIGHT_CLICK:
-                if "x" in self.params:
-                    return f"座標 ({self.params['x']}, {self.params['y']}) を右クリック"
-                return "現在位置を右クリック"
-            case ActionType.DOUBLE_CLICK:
-                if "x" in self.params:
-                    return f"座標 ({self.params['x']}, {self.params['y']}) をダブルクリック"
-                return "現在位置をダブルクリック"
-            case ActionType.MIDDLE_CLICK:
-                if "x" in self.params:
-                    return f"座標 ({self.params['x']}, {self.params['y']}) を中クリック"
-                return "現在位置を中クリック"
-            case ActionType.DRAG:
-                return (
-                    f"ドラッグ: ({self.params['start_x']}, {self.params['start_y']}) → "
-                    f"({self.params['end_x']}, {self.params['end_y']})"
-                )
-            case ActionType.SCROLL:
-                return f"{self.params['direction']}方向に {self.params['amount']}px スクロール"
-            case ActionType.TYPE:
-                text = self.params["text"]
-                display = text[:30] + "..." if len(text) > 30 else text
-                return f"「{display}」と入力"
-            case ActionType.KEY_PRESS:
-                return f"キー押下: {self.params['key']}"
-            case ActionType.KEY_COMBO:
-                return f"キーコンボ: {'+'.join(self.params['keys'])}"
-            case ActionType.KEY_HOLD:
-                return f"キー長押し: {self.params['key']} ({self.params['duration_ms']}ms)"
-            case ActionType.WAIT:
-                return f"{self.params['seconds']}秒待機"
-            case ActionType.WAIT_FOR_TEXT:
-                timeout_s = self.params["timeout"]
-                return f"「{self.params['text']}」が表示されるまで待機 (timeout={timeout_s}s)"
-            case ActionType.WAIT_FOR_STILL:
-                return f"画面変化が収まるまで待機 (timeout={self.params['timeout']}s)"
-            case ActionType.SCREENSHOT:
-                return "スクリーンショット取得"
-            case ActionType.SUBTASK_COMPLETE:
-                return "サブタスク完了"
+            object.__setattr__(self, "description", _generate_description(self.action_type, params))
 
 
-ALL_ACTION_TYPES: frozenset[ActionType] = frozenset(ActionType)
+def _generate_description(action_type: ActionType, params: dict) -> str:
+    """アクション種別とパラメータから人が読める説明文を生成する。"""
+    name = _ACTION_NAMES.get(action_type, action_type.value)
+
+    if action_type == ActionType.MOUSE_MOVE:
+        return f"{name} ({params.get('x')}, {params.get('y')})"
+    elif action_type in (
+        ActionType.LEFT_CLICK,
+        ActionType.RIGHT_CLICK,
+        ActionType.MIDDLE_CLICK,
+        ActionType.DOUBLE_CLICK,
+    ):
+        if "x" in params and "y" in params:
+            return f"{name} ({params['x']}, {params['y']})"
+        return f"{name}（現在位置）"
+    elif action_type == ActionType.TYPE:
+        text = str(params.get("text", ""))
+        if len(text) > 30:
+            text = text[:27] + "..."
+        return f'{name}: "{text}"'
+    elif action_type == ActionType.KEY_PRESS:
+        return f"{name}: {params.get('key', '')}"
+    elif action_type == ActionType.KEY_COMBO:
+        keys = params.get("keys", [])
+        return f"{name}: {'+'.join(keys)}"
+    elif action_type == ActionType.DRAG:
+        return (
+            f"{name} "
+            f"({params.get('start_x')},{params.get('start_y')})"
+            f"→({params.get('end_x')},{params.get('end_y')})"
+        )
+    elif action_type == ActionType.REGION_SELECT:
+        return (
+            f"{name} "
+            f"領域({params.get('x')},{params.get('y')}) "
+            f"{params.get('width')}x{params.get('height')}"
+        )
+    else:
+        return name

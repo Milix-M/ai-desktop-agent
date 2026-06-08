@@ -175,7 +175,12 @@ class TestOpenAICompatProvider:
                 {"success": True, "reasoning": "OK", "evidence": "画面に表示"}
             )
         )
-        decision = ActionDecision(action=Action(action_type=ActionType.LEFT_CLICK))
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.LEFT_CLICK),
+            expected_effect="クリックされる",
+            confidence=1.0,
+            reasoning="ボタンをクリック",
+        )
         result = await provider.verify_result(decision, "クリックされる")
         assert result.success is True
 
@@ -188,7 +193,12 @@ class TestOpenAICompatProvider:
                 {"success": False, "reasoning": "NG", "evidence": "変化なし"}
             )
         )
-        decision = ActionDecision(action=Action(action_type=ActionType.LEFT_CLICK))
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.LEFT_CLICK),
+            expected_effect="クリックで失敗",
+            confidence=0.5,
+            reasoning="クリックするが失敗する想定",
+        )
         result = await provider.verify_result(decision, "ダイアログ")
         assert result.success is False
 
