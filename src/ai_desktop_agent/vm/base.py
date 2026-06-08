@@ -43,12 +43,20 @@ class DisplayBackend(ABC):
         """画面全体のスクリーンショットを取得する。"""
         ...
 
+    def capture_raw(self) -> Screenshot:
+        """オーバーレイなしの生スクリーンショットを取得する。
+
+        デフォルト実装は capture_screen() を呼ぶ。
+        オーバーレイ対応のサブクラスはオーバーライドすること。
+        """
+        return self.capture_screen()
+
     @abstractmethod
     def capture_region(self, x: int, y: int, width: int, height: int) -> Screenshot:
         """指定領域のスクリーンショットを取得する。"""
         ...
 
-    # ── マウス操作 ─────────────────────────────────────
+    # ── マウス操作 ──────────────────────────────
 
     @abstractmethod
     def mouse_move(self, x: int, y: int) -> None:
@@ -98,7 +106,7 @@ class DisplayBackend(ABC):
         self.mouse_move(end_x, end_y)
         self.mouse_up(button)
 
-    # ── キーボード操作 ─────────────────────────────────
+    # ── キーボード操作 ──────────────────────────
 
     @abstractmethod
     def key_press(self, key: str) -> None:

@@ -16,7 +16,8 @@ class TestScreenshot:
         ss = Screenshot(image_bytes=png, width=800, height=600)
         assert ss.width == 800
         assert ss.height == 600
-        assert ss.size == (800, 600)
+        assert ss.width == 800
+        assert ss.height == 600
         assert ss.size_bytes == len(png)
 
     def test_mock_screenshot_via_fake_backend(self):

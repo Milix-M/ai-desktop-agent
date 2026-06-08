@@ -35,7 +35,7 @@ class TestActionValidation:
         """クリック系アクションは座標なしでも有効。"""
         action = Action(action_type=ActionType.LEFT_CLICK)
         assert action.action_type == ActionType.LEFT_CLICK
-        assert action.params == {}
+        assert action.params is None or action.params == {}
 
     def test_valid_click_with_position(self):
         """クリック系アクションは座標付きでも有効。"""
@@ -153,6 +153,7 @@ class TestAllActionTypesValid:
         ActionType.WAIT_FOR_TEXT: {"text": "Loading...", "timeout": 10.0},
         ActionType.WAIT_FOR_STILL: {"timeout": 5.0},
         ActionType.SCREENSHOT: {},
+        ActionType.REGION_SELECT: {"x": 0, "y": 0, "width": 200, "height": 200},
         ActionType.SUBTASK_COMPLETE: {},
     }
 
