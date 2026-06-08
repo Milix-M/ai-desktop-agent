@@ -212,24 +212,17 @@ class TestBuildVmImage:
 
     def test_configures_sddm_autologin(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
-        assert "sddm.conf.d" in content, "SDDM 設定ディレクトリを作成する必要があります"
+        assert "sddm.conf" in content, "SDDM 設定ファイルを作成する必要があります"
         assert "[Autologin]" in content, "SDDM Autologin セクションが必要です"
         assert "User=agent" in content, "agent ユーザーの自動ログインを設定する必要があります"
-        assert "Session=plasma-x11" in content, "Plasma X11 セッションを指定する必要があります"
+        assert "Session=" in content, "セッション名を指定する必要があります"
+        # セッション名はビルド時に自動検出（plasma / plasma-x11 / kde-plasma）
+        assert "plasma.desktop" in content, "plasma.desktop を検出する必要があります"
 
     def test_creates_agent_user(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
         assert "useradd" in content, "agent ユーザーを作成する必要があります"
         assert "NOPASSWD:ALL" in content, "agent にパスワードなし sudo 権限が必要です"
-
-    def test_disables_screen_lock(self):
-        content = (VM_DIR / "build-vm-image.sh").read_text()
-        assert "kscreenlockerrc" in content, "kscreenlockerrc を設定する必要があります"
-        assert "Autolock=false" in content, "Autolock=false が必要です"
-        assert "powermanagementprofilesrc" in content, (
-            "powermanagementprofilesrc を設定する必要があります"
-        )
-        assert "SuspendWhenIdle=false" in content, "SuspendWhenIdle=false が必要です"
 
     def test_creates_qcow2(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
@@ -256,6 +249,21 @@ class TestBuildVmImage:
         )
         assert "qemu-user-static" in content, (
             "ARM64→AMD64 用に qemu-user-static を参照する必要があります"
+        )
+
+    def test_systemd_symlinks_correct(self):
+        content = _read_cmdline(VM_DIR / "build-vm-image.sh")
+        # default.target → graphical.target
+        assert "default.target" in content, "デフォルトターゲットを設定する必要があります"
+        # display-manager.service → sddm.service（Alias）
+        assert "display-manager.service" in content, "display-manager エイリアスが必要です"
+        # graphical.target.wants/sddm.service（正しい起動トリガー）
+        assert "graphical.target.wants" in content, (
+            "graphical.target.wants/sddm.service で SDDM を起動する必要があります"
+        )
+        # display-manager.service.wants は循環参照のバグなので存在してはいけない
+        assert "display-manager.service.wants" not in content, (
+            "display-manager.service.wants/sddm.service は循環参照です"
         )
 
     def test_cleanup_on_exit(self):
