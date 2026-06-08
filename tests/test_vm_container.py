@@ -226,7 +226,9 @@ class TestBuildVmImage:
         content = (VM_DIR / "build-vm-image.sh").read_text()
         assert "kscreenlockerrc" in content, "kscreenlockerrc を設定する必要があります"
         assert "Autolock=false" in content, "Autolock=false が必要です"
-        assert "powermanagementprofilesrc" in content, "powermanagementprofilesrc を設定する必要があります"
+        assert "powermanagementprofilesrc" in content, (
+            "powermanagementprofilesrc を設定する必要があります"
+        )
         assert "SuspendWhenIdle=false" in content, "SuspendWhenIdle=false が必要です"
 
     def test_creates_qcow2(self):
