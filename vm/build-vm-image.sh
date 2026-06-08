@@ -111,14 +111,36 @@ POWER_EOF
 
 chroot "$TARGET" chown -R agent:agent /home/agent/.config
 
-mkdir -p "$TARGET/etc/sddm.conf.d"
-printf '[Autologin]\nUser=agent\nSession=plasma-x11\n' > "$TARGET/etc/sddm.conf.d/autologin.conf"
+# SDDM 自動ログイン: 実際にインストールされたセッションを検出
+SESSION_NAME=""
+if [ -f "$TARGET/usr/share/xsessions/plasma.desktop" ]; then
+    SESSION_NAME="plasma"
+elif [ -f "$TARGET/usr/share/xsessions/plasma-x11.desktop" ]; then
+    SESSION_NAME="plasma-x11"
+elif [ -f "$TARGET/usr/share/xsessions/kde-plasma.desktop" ]; then
+    SESSION_NAME="kde-plasma"
+else
+    # フォールバック: 最初の .desktop を使用
+    SESSION_NAME=$(ls "$TARGET/usr/share/xsessions/"*.desktop 2>/dev/null | head -1 | xargs basename | sed 's/\.desktop$//')
+fi
+log "Detected session: $SESSION_NAME"
+
+# /etc/sddm.conf に直接書き込み（.d/ より優先される）
+cat > "$TARGET/etc/sddm.conf" <<SDDM_EOF
+[Autologin]
+User=agent
+Session=$SESSION_NAME
+
+[Theme]
+Current=breeze
+SDDM_EOF
 
 # ── systemd ──
 ln -sf /lib/systemd/system/graphical.target "$TARGET/etc/systemd/system/default.target"
 ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/display-manager.service"
-mkdir -p "$TARGET/etc/systemd/system/display-manager.service.wants"
-ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/display-manager.service.wants/sddm.service"
+# SDDM を graphical.target で起動させる（display-manager.service.wants は誤り）
+mkdir -p "$TARGET/etc/systemd/system/graphical.target.wants"
+ln -sf /lib/systemd/system/sddm.service "$TARGET/etc/systemd/system/graphical.target.wants/sddm.service"
 mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
 ln -sf /lib/systemd/system/NetworkManager.service "$TARGET/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
 
