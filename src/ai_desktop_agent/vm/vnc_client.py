@@ -205,17 +205,19 @@ class VNCClient(DisplayBackend):
         self._client.mouseUp(button)
 
     def mouse_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
-        """指定座標をクリック（move → press → release）。"""
+        """指定座標をクリック（move → press → 50ms → release）。"""
         if x is not None and y is not None:
             self.mouse_move(x, y)
         self.mouse_down(button)
+        time.sleep(0.05)  # 押下時間を確保（短すぎるとOSがクリックを認識しない）
         self.mouse_up(button)
 
     def mouse_double_click(
         self, x: int | None = None, y: int | None = None, button: int = 1
     ) -> None:
-        """ダブルクリック。"""
+        """ダブルクリック。クリック間に100msの間隔を入れる。"""
         self.mouse_click(x, y, button)
+        time.sleep(0.1)  # OSのダブルクリック検出間隔（50ms押下 + 100ms間隔 = OS仕様内）
         self.mouse_click(button=button)
 
     def mouse_drag(
@@ -241,10 +243,12 @@ class VNCClient(DisplayBackend):
     # ── キーボード操作 ────────────────────────────────────
 
     def key_press(self, key: str) -> None:
-        """キーを押して離す。"""
+        """キーを押して離す（50ms押下）。"""
         self._ensure_connected()
         mapped = self._map_key(key)
-        self._client.keyPress(mapped)
+        self._client.keyDown(mapped)
+        time.sleep(0.05)  # 押下時間を確保
+        self._client.keyUp(mapped)
 
     def key_down(self, key: str) -> None:
         """キーを押し続ける。"""
