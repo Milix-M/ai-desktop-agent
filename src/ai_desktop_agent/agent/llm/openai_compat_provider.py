@@ -892,6 +892,45 @@ ID: {subtask.id}
 
     # ── 内部 ──────────────────────────────────────
 
+    @staticmethod
+    def _validate_response(data: dict[str, Any], json_schema: dict[str, Any]) -> None:
+        """APIレスポンスをスキーマに対して簡易検証する。
+
+        OpenRouter 経由の Gemini など structured output 非保証のモデル向け。
+        必須パラメータの欠落を検出して ValueError を投げる。
+        """
+        schema = json_schema.get("schema", json_schema)
+        if "oneOf" not in schema:
+            return  # oneOf がないスキーマは検証スキップ
+
+        action_type = data.get("action_type", "")
+        params = data.get("params", {})
+
+        for variant in schema["oneOf"]:
+            props = variant.get("properties", {})
+            at_prop = props.get("action_type", {})
+            if at_prop.get("const") == action_type:
+                # Check top-level required fields (action_type, params, etc.)
+                top_required = variant.get("required", [])
+                top_missing = [k for k in top_required if k not in data or data[k] is None]
+                if top_missing:
+                    raise ValueError(
+                        f"LLM response for '{action_type}' missing top-level fields: {top_missing}"
+                    )
+
+                # Check params-level required fields (x, y, etc.)
+                params_schema = props.get("params", {})
+                params_required = params_schema.get("required", [])
+                params_missing = [k for k in params_required if k not in params or params.get(k) is None]
+                if params_missing:
+                    raise ValueError(
+                        f"LLM response for '{action_type}' missing required params: {params_missing}. "
+                        f"Got params: {params}"
+                    )
+                return
+
+        # action_type not found in oneOf variants — allow through (will be caught downstream)
+
     async def _call(
         self,
         prompt: str,
@@ -936,7 +975,9 @@ ID: {subtask.id}
                     raise ValueError("応答が空です")
 
                 if json_schema:
-                    return json.loads(text)  # type: ignore[no-any-return]
+                    data = json.loads(text)
+                    self._validate_response(data, json_schema)
+                    return data  # type: ignore[no-any-return]
                 return self._parse_json(text)
 
             except (json.JSONDecodeError, ValueError) as e:
