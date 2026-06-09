@@ -921,10 +921,13 @@ ID: {subtask.id}
                 # Check params-level required fields (x, y, etc.)
                 params_schema = props.get("params", {})
                 params_required = params_schema.get("required", [])
-                params_missing = [k for k in params_required if k not in params or params.get(k) is None]
+                params_missing = [
+                    k for k in params_required if k not in params or params.get(k) is None
+                ]
                 if params_missing:
                     raise ValueError(
-                        f"LLM response for '{action_type}' missing required params: {params_missing}. "
+                        f"LLM response for '{action_type}' "
+                        f"missing required params: {params_missing}. "
                         f"Got params: {params}"
                     )
                 return

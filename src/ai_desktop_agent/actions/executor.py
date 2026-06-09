@@ -74,36 +74,28 @@ class ActionExecutor:
                 if x is not None and y is not None:
                     self._backend.mouse_click(x, y, button=1)
                 else:
-                    raise ValueError(
-                        f"LEFT_CLICK requires x, y params. Got: {p}"
-                    )
+                    raise ValueError(f"LEFT_CLICK requires x, y params. Got: {p}")
             case ActionType.RIGHT_CLICK:
                 x = p.get("x")
                 y = p.get("y")
                 if x is not None and y is not None:
                     self._backend.mouse_click(x, y, button=3)
                 else:
-                    raise ValueError(
-                        f"RIGHT_CLICK requires x, y params. Got: {p}"
-                    )
+                    raise ValueError(f"RIGHT_CLICK requires x, y params. Got: {p}")
             case ActionType.DOUBLE_CLICK:
                 x = p.get("x")
                 y = p.get("y")
                 if x is not None and y is not None:
                     self._backend.mouse_double_click(x, y)
                 else:
-                    raise ValueError(
-                        f"DOUBLE_CLICK requires x, y params. Got: {p}"
-                    )
+                    raise ValueError(f"DOUBLE_CLICK requires x, y params. Got: {p}")
             case ActionType.MIDDLE_CLICK:
                 x = p.get("x")
                 y = p.get("y")
                 if x is not None and y is not None:
                     self._backend.mouse_click(x, y, button=2)
                 else:
-                    raise ValueError(
-                        f"MIDDLE_CLICK requires x, y params. Got: {p}"
-                    )
+                    raise ValueError(f"MIDDLE_CLICK requires x, y params. Got: {p}")
             case ActionType.DRAG:
                 self._backend.mouse_drag(
                     p["start_x"],
