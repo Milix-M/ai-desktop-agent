@@ -133,551 +133,239 @@ _SCHEMA_ACTION = {
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "left_click"
-                    },
+                    "action_type": {"const": "left_click"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "x": {
-                                "type": "integer"
-                            },
-                            "y": {
-                                "type": "integer"
-                            }
-                        },
-                        "required": [
-                            "x",
-                            "y"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                        "required": ["x", "y"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "right_click"
-                    },
+                    "action_type": {"const": "right_click"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "x": {
-                                "type": "integer"
-                            },
-                            "y": {
-                                "type": "integer"
-                            }
-                        },
-                        "required": [
-                            "x",
-                            "y"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                        "required": ["x", "y"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "double_click"
-                    },
+                    "action_type": {"const": "double_click"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "x": {
-                                "type": "integer"
-                            },
-                            "y": {
-                                "type": "integer"
-                            }
-                        },
-                        "required": [
-                            "x",
-                            "y"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                        "required": ["x", "y"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "mouse_move"
-                    },
+                    "action_type": {"const": "mouse_move"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "x": {
-                                "type": "integer"
-                            },
-                            "y": {
-                                "type": "integer"
-                            }
-                        },
-                        "required": [
-                            "x",
-                            "y"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                        "required": ["x", "y"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "drag"
-                    },
+                    "action_type": {"const": "drag"},
                     "params": {
                         "type": "object",
                         "properties": {
-                            "start_x": {
-                                "type": "integer"
-                            },
-                            "start_y": {
-                                "type": "integer"
-                            },
-                            "end_x": {
-                                "type": "integer"
-                            },
-                            "end_y": {
-                                "type": "integer"
-                            }
+                            "start_x": {"type": "integer"},
+                            "start_y": {"type": "integer"},
+                            "end_x": {"type": "integer"},
+                            "end_y": {"type": "integer"},
                         },
-                        "required": [
-                            "start_x",
-                            "start_y",
-                            "end_x",
-                            "end_y"
-                        ],
-                        "additionalProperties": False
+                        "required": ["start_x", "start_y", "end_x", "end_y"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "scroll"
-                    },
+                    "action_type": {"const": "scroll"},
                     "params": {
                         "type": "object",
                         "properties": {
-                            "direction": {
-                                "type": "string",
-                                "enum": [
-                                    "up",
-                                    "down"
-                                ]
-                            },
-                            "amount": {
-                                "type": "integer"
-                            }
+                            "direction": {"type": "string", "enum": ["up", "down"]},
+                            "amount": {"type": "integer"},
                         },
-                        "required": [
-                            "direction",
-                            "amount"
-                        ],
-                        "additionalProperties": False
+                        "required": ["direction", "amount"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "type"
-                    },
+                    "action_type": {"const": "type"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "text": {
-                                "type": "string"
-                            }
-                        },
-                        "required": [
-                            "text"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "key_press"
-                    },
+                    "action_type": {"const": "key_press"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "key": {
-                                "type": "string"
-                            }
-                        },
-                        "required": [
-                            "key"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"key": {"type": "string"}},
+                        "required": ["key"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "key_combo"
-                    },
+                    "action_type": {"const": "key_combo"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "keys": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                }
-                            }
-                        },
-                        "required": [
-                            "keys"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
+                        "required": ["keys"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "wait"
-                    },
+                    "action_type": {"const": "wait"},
                     "params": {
                         "type": "object",
-                        "properties": {
-                            "seconds": {
-                                "type": "number"
-                            }
-                        },
-                        "required": [
-                            "seconds"
-                        ],
-                        "additionalProperties": False
+                        "properties": {"seconds": {"type": "number"}},
+                        "required": ["seconds"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "region_select"
-                    },
+                    "action_type": {"const": "region_select"},
                     "params": {
                         "type": "object",
                         "properties": {
-                            "x": {
-                                "type": "integer"
-                            },
-                            "y": {
-                                "type": "integer"
-                            },
-                            "width": {
-                                "type": "integer"
-                            },
-                            "height": {
-                                "type": "integer"
-                            }
+                            "x": {"type": "integer"},
+                            "y": {"type": "integer"},
+                            "width": {"type": "integer"},
+                            "height": {"type": "integer"},
                         },
-                        "required": [
-                            "x",
-                            "y",
-                            "width",
-                            "height"
-                        ],
-                        "additionalProperties": False
+                        "required": ["x", "y", "width", "height"],
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "screenshot"
-                    },
+                    "action_type": {"const": "screenshot"},
                     "params": {
                         "type": "object",
                         "properties": {},
                         "required": [],
-                        "additionalProperties": False
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
             },
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {
-                        "const": "subtask_complete"
-                    },
+                    "action_type": {"const": "subtask_complete"},
                     "params": {
                         "type": "object",
                         "properties": {},
                         "required": [],
-                        "additionalProperties": False
+                        "additionalProperties": False,
                     },
-                    "expected_effect": {
-                        "type": "string"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "reasoning": {
-                        "type": "string"
-                    }
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
                 },
-                "required": [
-                    "action_type",
-                    "params",
-                    "expected_effect",
-                    "confidence",
-                    "reasoning"
-                ],
-                "additionalProperties": False
-            }
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
+            },
         ]
-    }
+    },
 }
 
 
@@ -762,12 +450,7 @@ _SCHEMA_RECOVER = {
         "properties": {
             "strategy": {
                 "type": "string",
-                "enum": [
-                    "wait_and_retry",
-                    "alternative_approach",
-                    "replan_subtask",
-                    "give_up"
-                ]
+                "enum": ["wait_and_retry", "alternative_approach", "replan_subtask", "give_up"],
             },
             "actions": {
                 "type": "array",
@@ -776,387 +459,222 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "left_click"
-                                },
+                                "action_type": {"const": "left_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "x": {
-                                            "type": "integer"
-                                        },
-                                        "y": {
-                                            "type": "integer"
-                                        }
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "x",
-                                        "y"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["x", "y"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "right_click"
-                                },
+                                "action_type": {"const": "right_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "x": {
-                                            "type": "integer"
-                                        },
-                                        "y": {
-                                            "type": "integer"
-                                        }
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "x",
-                                        "y"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["x", "y"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "double_click"
-                                },
+                                "action_type": {"const": "double_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "x": {
-                                            "type": "integer"
-                                        },
-                                        "y": {
-                                            "type": "integer"
-                                        }
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "x",
-                                        "y"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["x", "y"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "mouse_move"
-                                },
+                                "action_type": {"const": "mouse_move"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "x": {
-                                            "type": "integer"
-                                        },
-                                        "y": {
-                                            "type": "integer"
-                                        }
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "x",
-                                        "y"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["x", "y"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "drag"
-                                },
+                                "action_type": {"const": "drag"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "start_x": {
-                                            "type": "integer"
-                                        },
-                                        "start_y": {
-                                            "type": "integer"
-                                        },
-                                        "end_x": {
-                                            "type": "integer"
-                                        },
-                                        "end_y": {
-                                            "type": "integer"
-                                        }
+                                        "start_x": {"type": "integer"},
+                                        "start_y": {"type": "integer"},
+                                        "end_x": {"type": "integer"},
+                                        "end_y": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "start_x",
-                                        "start_y",
-                                        "end_x",
-                                        "end_y"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["start_x", "start_y", "end_x", "end_y"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "scroll"
-                                },
+                                "action_type": {"const": "scroll"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "direction": {
-                                            "type": "string",
-                                            "enum": [
-                                                "up",
-                                                "down"
-                                            ]
-                                        },
-                                        "amount": {
-                                            "type": "integer"
-                                        }
+                                        "direction": {"type": "string", "enum": ["up", "down"]},
+                                        "amount": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "direction",
-                                        "amount"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["direction", "amount"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "type"
-                                },
+                                "action_type": {"const": "type"},
                                 "params": {
                                     "type": "object",
-                                    "properties": {
-                                        "text": {
-                                            "type": "string"
-                                        }
-                                    },
-                                    "required": [
-                                        "text"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "properties": {"text": {"type": "string"}},
+                                    "required": ["text"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "key_press"
-                                },
+                                "action_type": {"const": "key_press"},
                                 "params": {
                                     "type": "object",
-                                    "properties": {
-                                        "key": {
-                                            "type": "string"
-                                        }
-                                    },
-                                    "required": [
-                                        "key"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "properties": {"key": {"type": "string"}},
+                                    "required": ["key"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "key_combo"
-                                },
+                                "action_type": {"const": "key_combo"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "keys": {
-                                            "type": "array",
-                                            "items": {
-                                                "type": "string"
-                                            }
-                                        }
+                                        "keys": {"type": "array", "items": {"type": "string"}}
                                     },
-                                    "required": [
-                                        "keys"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["keys"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "wait"
-                                },
+                                "action_type": {"const": "wait"},
                                 "params": {
                                     "type": "object",
-                                    "properties": {
-                                        "seconds": {
-                                            "type": "number"
-                                        }
-                                    },
-                                    "required": [
-                                        "seconds"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "properties": {"seconds": {"type": "number"}},
+                                    "required": ["seconds"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "region_select"
-                                },
+                                "action_type": {"const": "region_select"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
-                                        "x": {
-                                            "type": "integer"
-                                        },
-                                        "y": {
-                                            "type": "integer"
-                                        },
-                                        "width": {
-                                            "type": "integer"
-                                        },
-                                        "height": {
-                                            "type": "integer"
-                                        }
+                                        "x": {"type": "integer"},
+                                        "y": {"type": "integer"},
+                                        "width": {"type": "integer"},
+                                        "height": {"type": "integer"},
                                     },
-                                    "required": [
-                                        "x",
-                                        "y",
-                                        "width",
-                                        "height"
-                                    ],
-                                    "additionalProperties": False
-                                }
+                                    "required": ["x", "y", "width", "height"],
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "screenshot"
-                                },
+                                "action_type": {"const": "screenshot"},
                                 "params": {
                                     "type": "object",
                                     "properties": {},
                                     "required": [],
-                                    "additionalProperties": False
-                                }
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
                         },
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {
-                                    "const": "subtask_complete"
-                                },
+                                "action_type": {"const": "subtask_complete"},
                                 "params": {
                                     "type": "object",
                                     "properties": {},
                                     "required": [],
-                                    "additionalProperties": False
-                                }
+                                    "additionalProperties": False,
+                                },
                             },
-                            "required": [
-                                "action_type",
-                                "params"
-                            ],
-                            "additionalProperties": False
-                        }
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
+                        },
                     ]
-                }
+                },
             },
-            "reasoning": {
-                "type": "string"
-            },
-            "recoverable": {
-                "type": "boolean"
-            }
+            "reasoning": {"type": "string"},
+            "recoverable": {"type": "boolean"},
         },
-        "required": [
-            "strategy",
-            "actions",
-            "reasoning",
-            "recoverable"
-        ],
-        "additionalProperties": False
-    }
+        "required": ["strategy", "actions", "reasoning", "recoverable"],
+        "additionalProperties": False,
+    },
 }
-
 
 
 class OpenAICompatProvider(LLMProvider):
