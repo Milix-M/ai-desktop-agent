@@ -500,6 +500,34 @@ class TestLLMProviderFactory:
             p = create_llm_provider(provider="opencode", api_key="sk-test", model="qwen3.8-max")
         assert p.model_name == "qwen3.8-max"
 
+    # ── opencode-go ────────────────────────────────
+
+    def test_opencode_go_with_api_key(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            p = create_llm_provider(provider="opencode-go", api_key="sk-go-test")
+        assert p.provider_name == "openai_compat"
+        assert p.model_name == "deepseek-v4.1-flash"
+        _, kwargs = mock_client.call_args
+        assert kwargs["base_url"] == "https://opencode.ai/zen/go/v1"
+        assert kwargs["default_headers"]["User-Agent"] == "ai-desktop-agent/0.1.0"
+
+    def test_opencode_go_requires_key(self):
+        with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
+            with pytest.raises(ValueError, match="OPENCODE_GO_API_KEY"):
+                create_llm_provider(provider="opencode-go")
+
+    def test_opencode_sends_user_agent(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            create_llm_provider(provider="opencode", api_key="sk-test")
+        _, kwargs = mock_client.call_args
+        assert kwargs["default_headers"]["User-Agent"] == "ai-desktop-agent/0.1.0"
+
     # ── ollama ───────────────────────────────────────
 
     def test_ollama(self):

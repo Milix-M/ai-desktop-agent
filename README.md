@@ -88,6 +88,7 @@
 | ローカル (Ollama) | Llama, Qwen 等 |
 | OpenAI互換 (vLLM) | 任意 |
 | OpenCode Zen | DeepSeek / GPT / Claude / Gemini 等（`chat/completions`互換モデル） |
+| OpenCode Go | 月額制のopenモデル群（`chat/completions`互換モデル。独自UA付き） |
 
 ### フロントエンド
 
