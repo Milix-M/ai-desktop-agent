@@ -113,17 +113,26 @@ body {
 
 .sidebar-resizer {
   flex-shrink: 0;
-  width: 8px;
-  margin-left: -4px;
-  margin-right: -4px;
-  z-index: 5;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
   background: transparent;
+  border-left: 1px solid var(--border);
 }
 
 .sidebar-resizer:hover {
-  background: var(--accent, #4da3ff);
-  opacity: 0.5;
+  background: rgba(77, 163, 255, 0.25);
+}
+
+.sidebar-grip {
+  color: var(--dim);
+  font-size: 14px;
+  letter-spacing: -2px;
+  pointer-events: none;
 }
 
 .sidebar h1 {
@@ -541,6 +550,16 @@ body {
   margin-top: 8px;
 }
 
+.vm-subsection h3 {
+  font-size: 13px;
+  color: var(--text);
+  margin: 12px 0 8px;
+}
+
+.vm-subsection:first-child h3 {
+  margin-top: 0;
+}
+
 /* ── Log ── */
 .log-section {
   flex: 1;
@@ -622,6 +641,16 @@ body {
 .sb-dot.red { background: var(--error); }
 .sb-dot.blue { background: var(--accent); }
 .sb-dot.yellow { background: var(--warning); }
+.sb-dot.gray { background: var(--dim); }
+
+.sb-dot.pulse {
+  animation: sb-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes sb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 
 .log .time {
   color: var(--dim);

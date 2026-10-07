@@ -132,7 +132,8 @@ class VmPool:
         image = self._vm_image_ref(docker)
         network = self._backend_network(docker)
         use_kvm = os.environ.get("USE_KVM", "false")
-        memory = os.environ.get("VM_MEMORY", "2048")
+        memory = os.environ.get("VM_MEMORY", "4096")
+        cpus = os.environ.get("VM_CPUS", "4")
 
         common_labels = {LABEL_VM_ID: vm_id}
         vm_name = f"ai-desktop-agent-{vm_id}"
@@ -150,6 +151,7 @@ class VmPool:
             ports={"5900/tcp": vnc_port},
             environment={
                 "VM_MEMORY": memory,
+                "VM_CPUS": cpus,
                 "VM_VNC_PORT": "5900",
                 "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
                 "CMDLINE_FILE": "/vm/cmdline.txt",

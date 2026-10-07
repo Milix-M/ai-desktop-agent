@@ -7,11 +7,16 @@ import {
 } from "@/hooks/useSidebarWidth";
 
 function Harness() {
-  const { width, onResizeStart } = useSidebarWidth();
+  const { width, onResizeStart, onResizeMove, onResizeEnd } = useSidebarWidth();
   return (
     <div>
       <div data-testid="w">{width}</div>
-      <div data-testid="handle" onMouseDown={onResizeStart} />
+      <div
+        data-testid="handle"
+        onPointerDown={onResizeStart}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeEnd}
+      />
     </div>
   );
 }
@@ -29,23 +34,23 @@ describe("useSidebarWidth", () => {
   it("drags to resize within limits", () => {
     render(<Harness />);
     const handle = screen.getByTestId("handle");
-    fireEvent.mouseDown(handle, { clientX: 1000 });
-    fireEvent.mouseMove(window, { clientX: 900 });
+    fireEvent.pointerDown(handle, { clientX: 1000, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 900, pointerId: 1 });
     // 右パネルなので左へ動かすと広がる
     expect(screen.getByTestId("w")).toHaveTextContent("480");
-    fireEvent.mouseUp(window);
+    fireEvent.pointerUp(handle, { pointerId: 1 });
     expect(window.localStorage.getItem("sidebar-width")).toBe("480");
   });
 
   it("clamps to min and max", () => {
     render(<Harness />);
     const handle = screen.getByTestId("handle");
-    fireEvent.mouseDown(handle, { clientX: 1000 });
-    fireEvent.mouseMove(window, { clientX: 10000 });
+    fireEvent.pointerDown(handle, { clientX: 1000, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 10000, pointerId: 1 });
     expect(screen.getByTestId("w")).toHaveTextContent(String(SIDEBAR_MIN_WIDTH));
-    fireEvent.mouseMove(window, { clientX: -10000 });
+    fireEvent.pointerMove(handle, { clientX: -10000, pointerId: 1 });
     expect(screen.getByTestId("w")).toHaveTextContent(String(SIDEBAR_MAX_WIDTH));
-    fireEvent.mouseUp(window);
+    fireEvent.pointerUp(handle, { pointerId: 1 });
   });
 
   it("restores saved width", () => {

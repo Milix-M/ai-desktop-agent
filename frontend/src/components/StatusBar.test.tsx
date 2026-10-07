@@ -14,25 +14,32 @@ describe("StatusBar", () => {
   it("shows backend, vnc, vm and agent status", async () => {
     render(<StatusBar vncConnected={true} agentState="executing" vmResolution="1280x800" />);
     await waitFor(() => {
-      expect(screen.getByText("Backend OK")).toBeInTheDocument();
+      expect(screen.getByText("バックエンド OK")).toBeInTheDocument();
     });
     expect(screen.getByText("VNC 接続中")).toBeInTheDocument();
     expect(screen.getByText("VM Desktop 1280x800")).toBeInTheDocument();
-    expect(screen.getByText("Agent 実行中")).toBeInTheDocument();
+    expect(screen.getByText("エージェント 実行中")).toBeInTheDocument();
   });
 
   it("shows raw resolution without special-casing", async () => {
-    render(<StatusBar vncConnected={false} agentState="idle" vmResolution="720x400" />);
+    render(<StatusBar vncConnected={true} agentState="idle" vmResolution="720x400" />);
     await waitFor(() => {
       expect(screen.getByText("VM Desktop 720x400")).toBeInTheDocument();
     });
-    expect(screen.getByText("VNC 未接続")).toBeInTheDocument();
+    expect(screen.getByText("VNC 接続中")).toBeInTheDocument();
+  });
+
+  it("shows unconnected VM label when VNC is down", async () => {
+    render(<StatusBar vncConnected={false} agentState="idle" />);
+    await waitFor(() => {
+      expect(screen.getByText("VM 未接続")).toBeInTheDocument();
+    });
   });
 
   it("labels interrupted state", async () => {
     render(<StatusBar vncConnected={true} agentState="interrupted" />);
     await waitFor(() => {
-      expect(screen.getByText("Agent 中断")).toBeInTheDocument();
+      expect(screen.getByText("エージェント 中断")).toBeInTheDocument();
     });
   });
 
@@ -40,7 +47,7 @@ describe("StatusBar", () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error("down"));
     render(<StatusBar vncConnected={false} agentState="idle" />);
     await waitFor(() => {
-      expect(screen.getByText("Backend DOWN")).toBeInTheDocument();
+      expect(screen.getByText("バックエンド NG")).toBeInTheDocument();
     });
   });
 });

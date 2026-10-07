@@ -76,6 +76,8 @@ class TestDockerfile:
         assert "VM_IMAGE=" in content, "Dockerfile に VM_IMAGE 環境変数が必要です"
         assert "CMDLINE_FILE=" in content, "Dockerfile に CMDLINE_FILE 環境変数が必要です"
         assert "VM_VNC_PORT=" in content, "Dockerfile に VM_VNC_PORT 環境変数が必要です"
+        assert "VM_MEMORY=" in content, "Dockerfile に VM_MEMORY 環境変数が必要です"
+        assert "VM_CPUS=" in content, "Dockerfile に VM_CPUS 環境変数が必要です"
 
     def test_copies_entrypoint(self):
         content = (VM_DIR / "Dockerfile").read_text()
@@ -130,6 +132,13 @@ class TestEntrypoint:
     def test_passes_enable_kvm(self):
         content = (VM_DIR / "entrypoint.sh").read_text()
         assert "-enable-kvm" in content, "entrypoint.sh で -enable-kvm を指定する必要があります"
+
+    def test_uses_configurable_cpus(self):
+        content = (VM_DIR / "entrypoint.sh").read_text()
+        assert "VM_CPUS" in content, "entrypoint.sh で VM_CPUS を参照する必要があります"
+        assert '-smp "$VM_CPUS"' in content or "-smp $VM_CPUS" in content or '"$VM_CPUS"' in content, (
+            "KVM 時に可変 CPU 数で起動する必要があります"
+        )
 
     def test_vnc_flag_present(self):
         content = (VM_DIR / "entrypoint.sh").read_text()

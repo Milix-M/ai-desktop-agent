@@ -4,7 +4,8 @@
 set -euo pipefail
 
 VM_IMAGE="${VM_IMAGE:-/vm/desktop.qcow2}"
-VM_MEMORY="${VM_MEMORY:-2048}"
+VM_MEMORY="${VM_MEMORY:-4096}"
+VM_CPUS="${VM_CPUS:-4}"
 VM_VNC_PORT="${VM_VNC_PORT:-5900}"
 CMDLINE_FILE="${CMDLINE_FILE:-/vm/cmdline.txt}"
 VNC_DISPLAY=$((VM_VNC_PORT - 5900))
@@ -17,7 +18,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 QEMU_ACCEL=()
 if [ "$USE_KVM" = "true" ] && [ -e /dev/kvm ]; then
     log "KVM acceleration enabled"
-    QEMU_ACCEL=(-enable-kvm -cpu host -smp 2)
+    QEMU_ACCEL=(-enable-kvm -cpu host -smp "$VM_CPUS")
 else
     log "Using TCG software emulation (no KVM)"
     QEMU_ACCEL=(-cpu qemu64 -smp 1)
@@ -29,7 +30,7 @@ if [ -f "$CMDLINE_FILE" ]; then
     CMDLINE=$(cat "$CMDLINE_FILE")
 fi
 
-log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB, KVM=$USE_KVM)"
+log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB, CPUs:${VM_CPUS}, KVM=$USE_KVM)"
 log "Kernel: /vm/vmlinuz, Initrd: /vm/initrd.img"
 log "Command line: $CMDLINE"
 

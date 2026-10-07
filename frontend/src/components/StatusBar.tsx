@@ -37,7 +37,11 @@ export default function StatusBar({
 }: StatusBarProps) {
   const backendAlive = useBackendHealth();
 
-  const vmLabel = vmResolution ? `Desktop ${vmResolution}` : "—";
+  const vmLabel = !vncConnected
+    ? "未接続"
+    : vmResolution
+      ? `Desktop ${vmResolution}`
+      : "取得中";
 
   const stateLabel: Record<string, string> = {
     idle: "待機中",
@@ -51,13 +55,32 @@ export default function StatusBar({
     failed: "失敗",
     interrupted: "中断",
     paused: "一時停止",
+    no_session: "なし",
   };
+
+  const RUNNING = [
+    "understanding",
+    "planning",
+    "executing",
+    "waiting",
+    "verifying",
+    "recovering",
+  ];
+  const agentDot = RUNNING.includes(agentState)
+    ? "green pulse"
+    : agentState === "failed" || agentState === "interrupted"
+      ? "red"
+      : agentState === "completed"
+        ? "blue"
+        : agentState === "paused"
+          ? "yellow"
+          : "gray";
 
   return (
     <div className="status-bar">
       <div className="sb-item">
         <span className={`sb-dot ${backendAlive ? "green" : "red"}`} />
-        <span>Backend {backendAlive ? "OK" : "DOWN"}</span>
+        <span>バックエンド {backendAlive ? "OK" : "NG"}</span>
       </div>
 
       <div className="sb-item">
@@ -66,13 +89,13 @@ export default function StatusBar({
       </div>
 
       <div className="sb-item">
-        <span className="sb-dot blue" />
+        <span className={`sb-dot ${vncConnected ? "blue" : "gray"}`} />
         <span>VM {vmLabel}</span>
       </div>
 
       <div className="sb-item">
-        <span className="sb-dot yellow" />
-        <span>Agent {stateLabel[agentState] || agentState}</span>
+        <span className={`sb-dot ${agentDot}`} />
+        <span>エージェント {stateLabel[agentState] || agentState}</span>
       </div>
     </div>
   );

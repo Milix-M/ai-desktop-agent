@@ -16,36 +16,45 @@ function loadWidth(): number {
   return DEFAULT_WIDTH;
 }
 
+function clampWidth(v: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, v));
+}
+
 /** 右サイドバーの幅をドラッグで変更する。設定はlocalStorageに保存。 */
 export function useSidebarWidth() {
   const [width, setWidth] = useState<number>(loadWidth);
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
   const widthRef = useRef(width);
   widthRef.current = width;
-  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
 
-  const onResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
+  const onResizeStart = useCallback((e: React.PointerEvent<HTMLElement>) => {
+    const el = e.currentTarget;
     dragRef.current = { startX: e.clientX, startW: widthRef.current };
-    const onMove = (ev: MouseEvent) => {
-      if (!dragRef.current) return;
-      const next = dragRef.current.startW + (dragRef.current.startX - ev.clientX);
-      const clamped = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, next));
-      widthRef.current = clamped;
-      setWidth(clamped);
-    };
-    const onUp = () => {
-      dragRef.current = null;
-      try {
-        window.localStorage.setItem(STORAGE_KEY, String(widthRef.current));
-      } catch {
-        // ignore
-      }
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    try {
+      el.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore (jsdom等)
+    }
   }, []);
 
-  return { width, onResizeStart };
+  const onResizeMove = useCallback((e: React.PointerEvent<HTMLElement>) => {
+    if (!dragRef.current) return;
+    // 右パネルなので左へ動かすと広がる
+    const next = dragRef.current.startW + (dragRef.current.startX - e.clientX);
+    const clamped = clampWidth(next);
+    widthRef.current = clamped;
+    setWidth(clamped);
+  }, []);
+
+  const onResizeEnd = useCallback(() => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    try {
+      window.localStorage.setItem(STORAGE_KEY, String(widthRef.current));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  return { width, onResizeStart, onResizeMove, onResizeEnd };
 }
