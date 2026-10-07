@@ -91,6 +91,8 @@ class TaskStatus(BaseModel):
     action_count: int
     success_count: int
     failure_count: int
+    subtasks: list[dict] = []
+    current_subtask_index: int = 0
 
 
 class VmStatus(BaseModel):
@@ -126,6 +128,7 @@ class TaskSummary(BaseModel):
 class TaskDetail(TaskSummary):
     actions: list[StoredActionItem] = []
     subtasks: list[dict] = []
+    current_subtask_index: int = 0
     goal: dict = {}
     created_at: float = 0.0
 
@@ -200,6 +203,8 @@ async def get_current_task() -> TaskStatus:
             action_count=d.get("action_count", 0),
             success_count=d.get("success_count", 0),
             failure_count=d.get("failure_count", 0),
+            subtasks=d.get("subtasks", []),
+            current_subtask_index=d.get("current_subtask_index", 0),
         )
     return TaskStatus(
         session_id=None,
@@ -231,9 +236,26 @@ async def get_task(task_id: str) -> TaskDetail:
         **summary.model_dump(),
         actions=[StoredActionItem(**a) for a in d.get("actions", [])],
         subtasks=d.get("subtasks", []),
+        current_subtask_index=d.get("current_subtask_index", 0),
         goal=d.get("goal", {}),
         created_at=d.get("created_at", 0.0),
     )
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: str) -> dict[str, str]:
+    """タスク履歴を1件削除する。実行中なら先に停止する。"""
+    from fastapi import HTTPException
+
+    global _active_session
+
+    if _active_session and _active_session.id == task_id:
+        _active_session.stop()
+        _active_session = None
+
+    if not get_store().delete(task_id):
+        raise HTTPException(status_code=404, detail="task not found")
+    return {"status": "deleted"}
 
 
 @app.post("/tasks/current/pause")
@@ -324,6 +346,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     "subtask_index": ctx.current_subtask_index,
                     "subtask_count": len(ctx.subtasks),
                     "action_count": len(ctx.action_history),
+                    "subtasks": _subtask_list(ctx),
                 }
             )
 
@@ -392,4 +415,11 @@ def _make_status(session: TaskSession) -> TaskStatus:
         action_count=len(ctx.action_history),
         success_count=ctx.success_count,
         failure_count=ctx.failure_count,
+        subtasks=[{"id": s.id, "description": s.description} for s in ctx.subtasks],
+        current_subtask_index=ctx.current_subtask_index,
     )
+
+
+def _subtask_list(ctx) -> list[dict]:
+    """WS配信用のサブタスク一覧。"""
+    return [{"id": s.id, "description": s.description} for s in ctx.subtasks]

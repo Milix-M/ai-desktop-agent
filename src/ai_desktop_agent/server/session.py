@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 BLACK_SCREEN_THRESHOLD = 2.0
 
 
+def _image_hash(image_bytes: bytes) -> str:
+    """画像のSHA256ハッシュを返す（変化検出用）。"""
+    import hashlib
+
+    return hashlib.sha256(image_bytes).hexdigest()
+
+
+def _params_key(params: dict | None) -> tuple:
+    """アクション比較用の正規化キー。"""
+    return tuple(sorted((params or {}).items()))
+
+
 def _is_black_screen(screenshot: Screenshot, threshold: float = BLACK_SCREEN_THRESHOLD) -> bool:
     """スクリーンショットがほぼ真っ黒かどうかを返す。"""
     try:
@@ -58,6 +70,25 @@ ZOOM_MIN_SIZE = 50
 ZOOM_MAX_SIZE = 500
 MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
+STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
+STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
+SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
+
+# 画面を変える可能性のあるアクション（実行後に安定待ちする）
+VISUAL_ACTIONS: frozenset = frozenset(
+    {
+        ActionType.LEFT_CLICK,
+        ActionType.RIGHT_CLICK,
+        ActionType.MIDDLE_CLICK,
+        ActionType.DOUBLE_CLICK,
+        ActionType.DRAG,
+        ActionType.SCROLL,
+        ActionType.TYPE,
+        ActionType.KEY_PRESS,
+        ActionType.KEY_COMBO,
+        ActionType.KEY_HOLD,
+    }
+)
 
 
 class TaskSession:
@@ -105,6 +136,8 @@ class TaskSession:
         self._verify_failures: dict[str, int] = {}
         # 回復・再決定に引き継ぐエラー情報
         self._pending_error: ErrorContext | None = None
+        # 前ターンの画面ハッシュ（無変化検出用）
+        self._prev_turn_hash: str | None = None
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
@@ -267,6 +300,7 @@ class TaskSession:
                 }
                 for s in ctx.subtasks
             ],
+            current_subtask_index=ctx.current_subtask_index,
             goal=(
                 {
                     "description": goal.description,
@@ -316,9 +350,21 @@ class TaskSession:
 
         # LLM に判断させる（手抜き完了は最大2回まで却下して再問い合わせ）。
         # 回復フローからのエラー情報があれば引き継ぐ。
+        # 前ターンから画面が無変化なら、その旨も伝える（低速VM対策）。
         error_ctx = self._pending_error
         self._pending_error = None
+        if error_ctx is None and self._is_screen_unchanged(screenshot):
+            error_ctx = ErrorContext(
+                action=self.loop.context.action_history[-1].action,
+                error_message=(
+                    "前回の操作後も画面に変化がありません。"
+                    "アプリの起動には時間がかかる場合があります。"
+                    "同じ操作の連打は避け、wait で待機するか、別の手段を試してください。"
+                ),
+                retry_count=0,
+            )
         decision = await self._decide_action(subtask, screenshot, error_ctx)
+        self._prev_turn_hash = _image_hash(screenshot.image_bytes)
         for _ in range(MAX_EMPTY_COMPLETE_REFUSALS):
             if not self._is_empty_complete(decision):
                 break
@@ -389,6 +435,16 @@ class TaskSession:
         # 画面内にクランプ（範囲外座標のズレを防ぐ）
         decision = self._clamp_decision(decision, screenshot)
 
+        # 同一アクションの足踏みは待機に置換する（低速VM対策）
+        if self._is_stuck_repeat(decision.action):
+            logger.info("同一操作の連続を検出、待機に置換します: %s", decision.action.params)
+            decision = ActionDecision(
+                action=Action(action_type=ActionType.WAIT, params={"seconds": STUCK_WAIT_SECONDS}),
+                expected_effect="画面変化の待機",
+                confidence=decision.confidence,
+                reasoning="同一操作の連続検出による待機: " + decision.reasoning,
+            )
+
         # 一時停止中は再開まで待つ（遷移エラーを防ぐ）
         await self._wait_if_paused()
 
@@ -414,8 +470,12 @@ class TaskSession:
             confidence=decision.confidence,
         )
 
-        # 画面変化を待つ
-        await asyncio.sleep(0.5)
+        # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
+        # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
+        if action.action_type in VISUAL_ACTIONS:
+            await self.executor.wait_for_still(SETTLE_TIMEOUT)
+        else:
+            await asyncio.sleep(0.5)
 
         # 一時停止中は再開まで待つ（遷移エラーを防ぐ）
         await self._wait_if_paused()
@@ -655,6 +715,25 @@ class TaskSession:
             if history[i].action.action_type == ActionType.SUBTASK_COMPLETE:
                 return history[i + 1 :]
         return list(history)
+
+    def _is_screen_unchanged(self, screenshot: Screenshot) -> bool:
+        """前ターンの画面と同一かどうか（低速VMの無変化検出用）。"""
+        if self._prev_turn_hash is None or not self.loop.context.action_history:
+            return False
+        return _image_hash(screenshot.image_bytes) == self._prev_turn_hash
+
+    def _is_stuck_repeat(self, action: Action) -> bool:
+        """同一アクションが連続しているか（SUBTASK_COMPLETE除く）。"""
+        if action.action_type == ActionType.SUBTASK_COMPLETE:
+            return False
+        history = self.loop.context.action_history
+        if len(history) < STUCK_REPEAT_COUNT - 1:
+            return False
+        key = (action.action_type, _params_key(action.params))
+        recent = history[-(STUCK_REPEAT_COUNT - 1) :]
+        return all(
+            (r.action.action_type, _params_key(r.action.params or {})) == key for r in recent
+        )
 
     def _is_repeat_click(self, action: Action) -> bool:
         """直前と同じクリックの繰り返しかを判定する。"""

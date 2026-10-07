@@ -158,3 +158,67 @@ class TestHistoryEndpoints:
         rec = session.snapshot()
         assert rec.actions[0].action_type == "left_click"
         assert rec.subtasks[0]["id"] == "s1"
+
+
+class TestDeleteTask:
+    def test_delete_removes_file(self, tmp_path):
+        from ai_desktop_agent.server.store import TaskStore
+
+        store = TaskStore(root=tmp_path / "data")
+        store.save(_record("del1"))
+        assert store.delete("del1") is True
+        assert store.load("del1") is None
+        assert store.delete("del1") is False
+
+    @pytest.mark.asyncio
+    async def test_delete_endpoint(self, _hist_app):
+        transport = ASGITransport(app=server_app.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/tasks", json={"instruction": "消す"})
+            session = server_app._active_session
+            assert session is not None
+            await session._task
+            task_id = session.id
+            server_app._active_session = None
+            resp = await client.delete(f"/tasks/{task_id}")
+            assert resp.status_code == 200
+            assert (await client.get("/tasks")).json() == []
+            resp2 = await client.delete(f"/tasks/{task_id}")
+            assert resp2.status_code == 404
+
+
+class TestSubtaskProgress:
+    def test_snapshot_carries_index(self, tmp_path):
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.agent.state import Goal, Subtask
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.server.store import TaskStore
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        store = TaskStore(root=tmp_path / "data")
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend(), store=store)
+        session.loop.start(Goal(description="g"))
+        session.loop.understanding_done()
+        session.loop.plan_ready(
+            [Subtask(id="s1", description="a"), Subtask(id="s2", description="b")]
+        )
+        rec = session.snapshot()
+        assert rec.current_subtask_index == 0
+        assert [s["id"] for s in rec.subtasks] == ["s1", "s2"]
+        store.save(rec)
+        d = store.load(rec.id).to_dict()
+        assert d["current_subtask_index"] == 0
+        assert len(d["subtasks"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_current_includes_subtasks(self, _hist_app):
+        transport = ASGITransport(app=server_app.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/tasks", json={"instruction": "進捗テスト"})
+            session = server_app._active_session
+            assert session is not None
+            await session._task
+            resp = await client.get("/tasks/current")
+            data = resp.json()
+            assert data["subtasks"][0]["description"] == "進捗テスト"
+            assert data["current_subtask_index"] >= 0

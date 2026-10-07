@@ -408,3 +408,91 @@ class TestWakeOnBlack:
 
         mean = sum(Image.open(io.BytesIO(ss.image_bytes)).convert("L").tobytes()) / (16 * 12)
         assert mean > 100
+
+
+class _CaptureLLM(MockLLMProvider):
+    """error_context を記録するモック。"""
+
+    def __init__(self, decision):
+        super().__init__(decide_result=decision)
+        self.seen_errors = []
+
+    async def decide_next_action(self, *args, **kwargs):
+        self._decide_calls.append(args)
+        self.seen_errors.append(kwargs.get("error_context"))
+        return self._decide_result
+
+
+def _executing_session(llm, store=None):
+    from ai_desktop_agent.agent.state import Goal, Subtask
+    from ai_desktop_agent.server.session import TaskSession
+    from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+    s = TaskSession(llm=llm, display=FakeDisplayBackend(), store=store)
+    s.loop.start(Goal(description="g"))
+    s.loop.understanding_done()
+    s.loop.plan_ready([Subtask(id="s1", description="d")])
+    return s
+
+
+def _type_decision(text="hello"):
+    from ai_desktop_agent.actions.primitives import Action, ActionType
+    from ai_desktop_agent.agent.llm.types import ActionDecision
+
+    return ActionDecision(
+        action=Action(action_type=ActionType.TYPE, params={"text": text}),
+        expected_effect="input",
+        confidence=0.9,
+        reasoning="type",
+    )
+
+
+class TestSlowVmGuards:
+    def test_is_stuck_repeat(self):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+
+        s = _executing_session(MockLLMProvider())
+        assert s._is_stuck_repeat(_type_decision().action) is False
+        for _ in range(2):
+            s.loop.record_action(
+                Action(action_type=ActionType.TYPE, params={"text": "hello"}), True
+            )
+        assert s._is_stuck_repeat(_type_decision().action) is True
+        assert s._is_stuck_repeat(_type_decision("other").action) is False
+
+    @pytest.mark.asyncio
+    async def test_stuck_repeat_becomes_wait(self):
+        from ai_desktop_agent.actions.primitives import ActionType
+
+        llm = _CaptureLLM(_type_decision())
+        s = _executing_session(llm)
+        # 履歴に同一TYPEを2件入れてから実行
+        from ai_desktop_agent.actions.primitives import Action
+
+        s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
+        s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
+        await s._execute_phase()
+        last = s.loop.context.action_history[-1]
+        assert last.action.action_type == ActionType.WAIT
+
+    @pytest.mark.asyncio
+    async def test_unchanged_screen_hints_next_decide(self):
+
+        llm = _CaptureLLM(_type_decision())
+        s = _executing_session(llm)
+        await s._execute_phase()  # 1ターン目（ヒントなし）
+        s.loop.verify_success()  # VERIFYING → EXECUTING
+        await s._execute_phase()  # 2ターン目（同一画像→ヒント付き）
+        hints = [e for e in llm.seen_errors if e is not None]
+        assert hints, "無変化ヒントが渡されること"
+        assert "変化がありません" in hints[-1].error_message
+
+    @pytest.mark.asyncio
+    async def test_wait_for_still_public(self):
+        import asyncio
+
+        from ai_desktop_agent.actions.executor import ActionExecutor
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        ex = ActionExecutor(FakeDisplayBackend())
+        await asyncio.wait_for(ex.wait_for_still(timeout=5.0), timeout=10)

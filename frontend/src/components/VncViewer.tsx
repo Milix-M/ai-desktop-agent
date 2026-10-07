@@ -13,7 +13,6 @@ export default function VncViewer({ onConnectionChange }: Props) {
   const cancelledRef = useRef(false);
   const onChangeRef = useRef(onConnectionChange);
   onChangeRef.current = onConnectionChange;
-  const [status, setStatus] = useState("未接続");
   const [connected, setConnected] = useState(false);
 
   const connectRfb = useCallback(async () => {
@@ -22,7 +21,6 @@ export default function VncViewer({ onConnectionChange }: Props) {
       ({ default: RFB } = await import("@novnc/novnc"));
     } catch (e) {
       if (!cancelledRef.current) {
-        setStatus("接続エラー");
         console.error("noVNC:", e);
       }
       return;
@@ -36,7 +34,6 @@ export default function VncViewer({ onConnectionChange }: Props) {
     }
     rfbRef.current = null;
     setConnected(false);
-    setStatus("接続中...");
 
     const rfb = new RFB(containerRef.current, getVncWsUrl(), {
       credentials: { password: "" },
@@ -50,7 +47,6 @@ export default function VncViewer({ onConnectionChange }: Props) {
 
     rfb.addEventListener("connect", () => {
       if (cancelledRef.current) return;
-      setStatus("接続済み");
       setConnected(true);
       const w = rfb.fbWidth;
       const h = rfb.fbHeight;
@@ -61,10 +57,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
       if (cancelledRef.current) return;
       setConnected(false);
       onChangeRef.current?.(false);
-      if (e.detail.clean) {
-        setStatus("切断");
-      } else {
-        setStatus("再接続中...");
+      if (!e.detail.clean) {
         setTimeout(() => {
           if (!cancelledRef.current && rfbRef.current) {
             rfbRef.current.connect();
@@ -92,12 +85,6 @@ export default function VncViewer({ onConnectionChange }: Props) {
   return (
     <div className="vnc-panel">
       <div ref={containerRef} className="vnc-screen" />
-      <div
-        className={`vnc-status${connected ? " connected" : ""}`}
-        data-testid="vnc-status"
-      >
-        {status}
-      </div>
       {!connected && (
         <button
           className="vnc-reconnect"

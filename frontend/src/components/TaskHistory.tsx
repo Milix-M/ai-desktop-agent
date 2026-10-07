@@ -6,6 +6,7 @@ interface Props {
   items: TaskHistoryItem[];
   selectedId: string | null;
   onSelect: (taskId: string) => void;
+  onDelete: (taskId: string) => void;
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -26,7 +27,7 @@ function timeStr(epochSec: number): string {
   });
 }
 
-export default function TaskHistory({ items, selectedId, onSelect }: Props) {
+export default function TaskHistory({ items, selectedId, onSelect, onDelete }: Props) {
   if (items.length === 0) return null;
 
   return (
@@ -34,21 +35,29 @@ export default function TaskHistory({ items, selectedId, onSelect }: Props) {
       <h2>履歴</h2>
       <div className="history-list">
         {items.map((item) => (
-          <button
+          <div
             key={item.id}
             className={`history-item${item.id === selectedId ? " selected" : ""}`}
-            onClick={() => onSelect(item.id)}
           >
-            <span className="history-state">
-              {STATE_LABEL[item.state] ?? item.state}
-            </span>
-            <span className="history-instruction">
-              {item.instruction || "(指示なし)"}
-            </span>
-            <span className="history-meta">
-              {item.action_count}操作・{timeStr(item.updated_at)}
-            </span>
-          </button>
+            <button className="history-main" onClick={() => onSelect(item.id)}>
+              <span className="history-state">
+                {STATE_LABEL[item.state] ?? item.state}
+              </span>
+              <span className="history-instruction">
+                {item.instruction || "(指示なし)"}
+              </span>
+              <span className="history-meta">
+                {item.action_count}操作・{timeStr(item.updated_at)}
+              </span>
+            </button>
+            <button
+              className="history-delete"
+              aria-label={`${item.instruction || item.id}を削除`}
+              onClick={() => onDelete(item.id)}
+            >
+              ×
+            </button>
+          </div>
         ))}
       </div>
     </div>

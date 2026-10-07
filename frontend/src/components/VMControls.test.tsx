@@ -75,6 +75,33 @@ describe("VMControls", () => {
     expect(onLog).toHaveBeenCalledWith("VM作り直し開始", "action");
   });
 
+  it("tracks restart until healthy", async () => {
+    let calls = 0;
+    vi.mocked(api.getVmStatus).mockImplementation(async () => {
+      calls += 1;
+      if (calls <= 3) {
+        return { running: true, status: "restarting", health: "starting", name: "vm-1" };
+      }
+      return { running: true, status: "running", health: "healthy", name: "vm-1" };
+    });
+    let resolveRestart!: (v: import("@/lib/types").VmStatus) => void;
+    vi.mocked(api.restartVm).mockImplementation(
+      () => new Promise((resolve) => { resolveRestart = resolve; })
+    );
+    render(<VMControls pollIntervalMs={10} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    // 指示応答待ちの間は作り直し中表示
+    await waitFor(() => {
+      expect(screen.getByTestId("vm-status")).toHaveTextContent("作り直し中");
+    });
+    resolveRestart({ running: true, status: "restarting", health: null, name: "vm-1" });
+    // healthy 検出で通常表示に戻ること
+    await waitFor(() => {
+      expect(screen.getByTestId("vm-status")).toHaveTextContent("起動中");
+    });
+  });
+
   it("does nothing when confirm is cancelled", async () => {
     stubConfirm(false);
     render(<VMControls pollIntervalMs={60000} />);

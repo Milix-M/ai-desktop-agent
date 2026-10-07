@@ -10,8 +10,8 @@ import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import StatusBar from "@/components/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory } from "@/lib/api";
-import type { WsMessage, LogEntry, TaskHistoryItem } from "@/lib/types";
+import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask } from "@/lib/api";
+import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo } from "@/lib/types";
 
 let logIdCounter = 0;
 
@@ -45,6 +45,7 @@ export default function Home() {
   const [vmResolution, setVmResolution] = useState<string | undefined>();
   const [history, setHistory] = useState<TaskHistoryItem[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [subtasks, setSubtasks] = useState<SubtaskInfo[]>([]);
   const mountedRef = useRef(false);
 
   const addLog = useCallback(
@@ -67,7 +68,10 @@ export default function Home() {
         setSelectedTaskId(taskId);
         setState(detail.state);
         setSubtaskCount(detail.subtasks.length);
-        setSubtaskIndex(detail.subtasks.length);
+        setSubtaskIndex(detail.current_subtask_index);
+        setSubtasks(
+          detail.subtasks.map((s) => ({ id: s.id, description: s.description }))
+        );
         const entries: LogEntry[] = [
           {
             id: logIdCounter++,
@@ -132,6 +136,9 @@ export default function Home() {
           await showTaskDetail(current.session_id);
         } else if (current.session_id && current.is_running) {
           setState(current.state);
+          setSubtaskIndex(current.current_subtask_index);
+          setSubtaskCount(current.subtasks.length);
+          setSubtasks(current.subtasks);
           addLog("実行中のタスクに再接続", "state");
         }
       } catch {
@@ -148,6 +155,7 @@ export default function Home() {
           setState(data.state);
           setSubtaskIndex(data.subtask_index);
           setSubtaskCount(data.subtask_count);
+          if (data.subtasks) setSubtasks(data.subtasks);
           addLog(data.state, "state");
           break;
 
@@ -199,6 +207,9 @@ export default function Home() {
   const handleSubmit = useCallback(
     async (instruction: string) => {
       setSelectedTaskId(null);
+      setSubtasks([]);
+      setSubtaskIndex(0);
+      setSubtaskCount(0);
       addLog(`${instruction}`, "action");
       const result = await createTask(instruction);
       setState(result.state);
@@ -235,6 +246,7 @@ export default function Home() {
             state={state}
             subtaskIndex={subtaskIndex}
             subtaskCount={subtaskCount}
+            subtasks={subtasks}
           />
 
           <ControlPanel onControl={handleControl} state={state} />
@@ -245,6 +257,20 @@ export default function Home() {
             items={history}
             selectedId={selectedTaskId}
             onSelect={showTaskDetail}
+            onDelete={async (taskId) => {
+              try {
+                await deleteTask(taskId);
+                setHistory((prev) => prev.filter((t) => t.id !== taskId));
+                if (selectedTaskId === taskId) {
+                  setSelectedTaskId(null);
+                  setLogs([]);
+                  setState("idle");
+                }
+                addLog("履歴を削除", "state");
+              } catch {
+                addLog("履歴削除に失敗", "error");
+              }
+            }}
           />
 
           <LogPanel entries={logs} />

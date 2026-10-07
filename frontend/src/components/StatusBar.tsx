@@ -37,12 +37,7 @@ export default function StatusBar({
 }: StatusBarProps) {
   const backendAlive = useBackendHealth();
 
-  const vmLabel =
-    vmResolution === "720x400"
-      ? "Provisioning..."
-      : vmResolution
-        ? `Desktop ${vmResolution}`
-        : "\u2014";
+  const vmLabel = vmResolution ? `Desktop ${vmResolution}` : "—";
 
   const stateLabel: Record<string, string> = {
     idle: "待機中",
@@ -54,6 +49,7 @@ export default function StatusBar({
     recovering: "回復中",
     completed: "完了",
     failed: "失敗",
+    interrupted: "中断",
     paused: "一時停止",
   };
 

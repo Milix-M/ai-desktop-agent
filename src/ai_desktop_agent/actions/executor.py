@@ -61,6 +61,10 @@ class ActionExecutor:
             logger.error("[FAIL] %s: %s (%.0fms)", action.description, e, duration)
             return False
 
+    async def wait_for_still(self, timeout: float = 5.0) -> None:
+        """画面変化が収まるまで待機する（公開API）。"""
+        await self._wait_for_still(timeout)
+
     async def _dispatch(self, action: Action) -> None:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
         p = action.params or {}

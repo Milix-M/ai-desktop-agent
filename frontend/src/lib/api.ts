@@ -69,3 +69,9 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
 }
+
+export async function deleteTask(taskId: string): Promise<{ status: string }> {
+  const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}

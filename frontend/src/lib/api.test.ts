@@ -7,6 +7,7 @@ import {
   restartVm,
   getTaskHistory,
   getTaskDetail,
+  deleteTask,
   getWsUrl,
   getVncWsUrl,
 } from "@/lib/api";
@@ -210,6 +211,22 @@ describe("API client", () => {
       } as Response);
 
       await expect(getTaskDetail("nope")).rejects.toThrow("HTTP 404");
+    });
+  });
+
+  describe("deleteTask", () => {
+    it("DELETEs /tasks/{id}", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: "deleted" }),
+      } as Response);
+
+      const result = await deleteTask("a1");
+      expect(result.status).toBe("deleted");
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/tasks/a1"),
+        expect.objectContaining({ method: "DELETE" })
+      );
     });
   });
 });
