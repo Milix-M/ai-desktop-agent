@@ -48,6 +48,7 @@ def _is_black_screen(screenshot: Screenshot, threshold: float = BLACK_SCREEN_THR
         logger.debug("黒画面判定に失敗", exc_info=True)
         return False
 
+
 MAX_REGION_ZOOM_DEPTH = 1  # region_select の入れ子上限（深追い防止）
 LOW_CONFIDENCE_THRESHOLD = 0.7  # これ未満のクリックは拡大へ回す
 REPEAT_RADIUS_PX = 8  # 同一座標とみなす半径（連続クリック防止用）
