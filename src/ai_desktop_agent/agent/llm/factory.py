@@ -22,6 +22,11 @@ _PROVIDER_CONFIGS: dict[str, tuple[str, str, str | None]] = {
         "anthropic/claude-sonnet-4",
         "https://openrouter.ai/api/v1",
     ),
+    "opencode": (
+        "OPENCODE_API_KEY",
+        "deepseek-v4.1-flash",
+        "https://opencode.ai/zen/v1",
+    ),
     "ollama": ("OLLAMA_API_KEY", "llama3.2", "http://localhost:11434/v1"),
 }
 
@@ -37,7 +42,7 @@ def create_llm_provider(
     provider 未指定時は LLM_PROVIDER 環境変数を参照。
     全プロバイダは OpenAICompatProvider で統一される。
 
-    対応プロバイダ: openai, anthropic, openrouter, ollama, mock
+    対応プロバイダ: openai, anthropic, openrouter, opencode, ollama, mock
     """
     provider = provider or os.environ.get("LLM_PROVIDER", "openai")
 

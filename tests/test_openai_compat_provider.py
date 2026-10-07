@@ -469,6 +469,37 @@ class TestLLMProviderFactory:
             p = create_llm_provider(provider="openrouter")
         assert p.provider_name == "openai_compat"
 
+    # ── opencode (OpenCode Zen) ──────────────────────
+
+    def test_opencode_with_api_key(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            p = create_llm_provider(provider="opencode", api_key="sk-opencode-test")
+        assert p.provider_name == "openai_compat"
+        assert p.model_name == "deepseek-v4.1-flash"
+        _, kwargs = mock_client.call_args
+        assert kwargs["base_url"] == "https://opencode.ai/zen/v1"
+
+    def test_opencode_requires_key(self):
+        with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
+            with pytest.raises(ValueError, match="OPENCODE_API_KEY"):
+                create_llm_provider(provider="opencode")
+
+    def test_opencode_from_env(self):
+        with (
+            patch("openai.AsyncOpenAI", autospec=True),
+            patch.dict("os.environ", {"OPENCODE_API_KEY": "sk-env"}),
+        ):
+            p = create_llm_provider(provider="opencode")
+        assert p.provider_name == "openai_compat"
+
+    def test_opencode_custom_model(self):
+        with patch("openai.AsyncOpenAI", autospec=True):
+            p = create_llm_provider(provider="opencode", api_key="sk-test", model="qwen3.8-max")
+        assert p.model_name == "qwen3.8-max"
+
     # ── ollama ───────────────────────────────────────
 
     def test_ollama(self):
