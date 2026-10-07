@@ -181,6 +181,13 @@ class AgentLoop:
         """回復不能: RECOVERING → FAILED。"""
         self._transition(AgentState.FAILED)
 
+    def fail_now(self) -> None:
+        """実行を即時失敗させる: EXECUTING/VERIFYING → FAILED。
+
+        ステップ上限到達など、回復フローを経ずに打ち切る場合に使う。
+        """
+        self._transition(AgentState.FAILED)
+
     # ── 割り込み遷移 ──────────────────────────────────
 
     def pause(self) -> None:
@@ -204,7 +211,13 @@ class AgentLoop:
     # ── アクション記録の委譲 ──────────────────────────
 
     def record_action(
-        self, action: Action, success: bool, error: str = "", duration_ms: float = 0.0
+        self,
+        action: Action,
+        success: bool,
+        error: str = "",
+        duration_ms: float = 0.0,
+        reasoning: str = "",
+        confidence: float = 1.0,
     ) -> None:
         """アクションの実行結果をコンテキストに記録。"""
-        self.context.record_action(action, success, error, duration_ms)
+        self.context.record_action(action, success, error, duration_ms, reasoning, confidence)

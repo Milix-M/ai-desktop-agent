@@ -174,7 +174,7 @@ class TestAgentContext:
 
     def test_record_action(self):
         ctx = AgentContext()
-        action = Action(action_type=ActionType.LEFT_CLICK)
+        action = Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20})
         ctx.record_action(action, success=True, duration_ms=150.0)
         ctx.record_action(
             Action(action_type=ActionType.TYPE, params={"text": "hello"}),

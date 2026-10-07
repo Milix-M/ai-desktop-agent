@@ -26,6 +26,7 @@ CURSOR_COLOR = (0, 255, 0, 220)  # カーソル位置の色
 CURSOR_SIZE = 20  # カーソル十字の長さ
 GRID_SPACING = 50  # グリッド間隔（px）
 MAJOR_GRID_EVERY = 2  # 何本ごとに太線にするか（50px x 2 = 100px）
+ZOOM_FONT_SIZE = 12  # 拡大画像用フォント（VLMのダウンサンプルに負けないよう大きめ）
 
 
 def add_coordinate_overlay(
@@ -35,6 +36,7 @@ def add_coordinate_overlay(
     *,
     grid_spacing: int = GRID_SPACING,
     show_grid: bool = True,
+    font_size: int = ZOOM_FONT_SIZE,
 ) -> Screenshot:
     """スクリーンショットに座標グリッド＋マーカー＋カーソルを重畳する。
 
@@ -43,6 +45,8 @@ def add_coordinate_overlay(
         cursor_x, cursor_y: 現在のマウスカーソル位置（わかれば）。
         grid_spacing: グリッド線の間隔（px）。
         show_grid: False ならグリッド線を描かない（マーカーのみ）。
+        font_size: 座標マーカーのフォントサイズ。VLMのダウンサンプル後も
+            読めるようデフォルトは12pt。
 
     Returns:
         重畳後の Screenshot（新しいインスタンス）。
@@ -55,7 +59,7 @@ def add_coordinate_overlay(
     draw = ImageDraw.Draw(overlay)
 
     # ── フォント（できるだけ小さい等幅） ──
-    font = _load_font(size=10)
+    font = _load_font(size=font_size)
 
     # ── グリッド線 ──
     if show_grid:
@@ -115,6 +119,9 @@ def crop_region(
 ) -> Screenshot:
     """指定領域を切り出して拡大する（ズームイン用）。
 
+    後方互換のためのラッパー。実際に適用された倍率が必要な場合は
+    :func:`crop_region_with_meta` を使うこと（座標逆変換に必須）。
+
     Args:
         screenshot: 元のスクリーンショット。
         x, y: 領域の左上座標。
@@ -125,6 +132,37 @@ def crop_region(
     Returns:
         切り出し＋拡大後の Screenshot。
     """
+    zoomed, _ = crop_region_with_meta(
+        screenshot, x, y, region_w, region_h, scale=scale, max_dim=max_dim
+    )
+    return zoomed
+
+
+def crop_region_with_meta(
+    screenshot: Screenshot,
+    x: int,
+    y: int,
+    region_w: int,
+    region_h: int,
+    *,
+    scale: float = 2.0,
+    max_dim: int = 1024,
+) -> tuple[Screenshot, float]:
+    """指定領域を切り出して拡大し、実際に適用された倍率も返す。
+
+    ``session._handle_region_zoom`` での座標逆変換
+    ``absolute = origin + zoomed_coord / actual_scale`` に必須。
+
+    Args:
+        screenshot: 元のスクリーンショット。
+        x, y: 領域の左上座標（元画像座標系）。
+        region_w, region_h: 領域の幅・高さ。
+        scale: 希望拡大率。
+        max_dim: 拡大後の最大サイズ（長辺がこれを超えたら倍率を下げる）。
+
+    Returns:
+        (拡大後の Screenshot, 実際に適用された倍率) のタプル。
+    """
     from ai_desktop_agent.vm.screenshot import Screenshot
 
     img = Image.open(io.BytesIO(screenshot.image_bytes))
@@ -133,31 +171,36 @@ def crop_region(
     # クリップ
     x = max(0, min(x, w - 1))
     y = max(0, min(y, h - 1))
-    rw = min(region_w, w - x)
-    rh = min(region_h, h - y)
+    rw = max(1, min(region_w, w - x))
+    rh = max(1, min(region_h, h - y))
 
     cropped = img.crop((x, y, x + rw, y + rh))
 
-    # 拡大
+    # 拡大（max_dim を考慮して実倍率を決定）
     new_w = int(rw * scale)
     new_h = int(rh * scale)
+    actual_scale = scale
 
     # 長辺でリミット
     if max(new_w, new_h) > max_dim:
         ratio = max_dim / max(new_w, new_h)
         new_w = int(new_w * ratio)
         new_h = int(new_h * ratio)
+        actual_scale = new_w / rw if rw else scale
 
     zoomed = cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     buf = io.BytesIO()
     zoomed.save(buf, format="PNG")
-    return Screenshot(
-        image_bytes=buf.getvalue(),
-        width=new_w,
-        height=new_h,
-        timestamp=screenshot.timestamp,
-        frame_number=screenshot.frame_number,
+    return (
+        Screenshot(
+            image_bytes=buf.getvalue(),
+            width=new_w,
+            height=new_h,
+            timestamp=screenshot.timestamp,
+            frame_number=screenshot.frame_number,
+        ),
+        actual_scale,
     )
 
 

@@ -22,7 +22,7 @@ def _fake_screenshot() -> Screenshot:
 
 
 def _fake_action() -> Action:
-    return Action(action_type=ActionType.LEFT_CLICK)
+    return Action(action_type=ActionType.LEFT_CLICK, params={"x": 100, "y": 200})
 
 
 class TestActionDecision:

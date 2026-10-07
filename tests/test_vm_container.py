@@ -279,6 +279,17 @@ class TestBuildVmImage:
         content = (VM_DIR / "build-vm-image.sh").read_text()
         assert "trap" in content, "ビルド失敗時に後片付けする trap が必要です"
 
+    def test_configures_guest_networking(self):
+        content = (VM_DIR / "build-vm-image.sh").read_text()
+        assert "99-ens3" in content, "ens3 用の netplan 設定が必要です"
+        assert "dhcp4" in content, "DHCPv4 を有効にする必要があります"
+        assert "10.0.2.3" in content, "QEMU 内蔵DNS を指定する必要があります"
+
+    def test_disables_dpms_on_login(self):
+        content = (VM_DIR / "build-vm-image.sh").read_text()
+        assert "disable-dpms.desktop" in content, "DPMS無効化の自動起動が必要です"
+        assert "xset -dpms" in content, "xset で DPMS を切る必要があります"
+
 
 # ── docker-compose.yml ────────────────────────────────
 
@@ -377,6 +388,14 @@ class TestDockerCompose:
         assert hc, "vm サービスに healthcheck 設定が必要です"
         assert "test" in hc, "healthcheck に test が必要です"
         assert hc.get("retries", 0) >= 5, "healthcheck の retries は最低5回必要です"
+
+    def test_vm_mounts_kvm_device(self):
+        """USE_KVM=true 時に機能するよう /dev/kvm をマウントすること。"""
+        vm = self._vm_service()
+        devices = vm.get("devices", [])
+        assert any("/dev/kvm" in str(d) for d in devices), (
+            "vm サービスは /dev/kvm をマウントする必要があります"
+        )
 
     def test_websockify_command(self):
         data = self._compose_data()

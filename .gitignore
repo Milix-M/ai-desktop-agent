@@ -10,6 +10,10 @@ venv/
 # Environment
 .env
 .env.local
+docker-compose.override.yml
+
+# Runtime data (task history JSON)
+data/
 
 # IDE
 .vscode/

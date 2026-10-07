@@ -83,6 +83,24 @@ body {
   color: var(--success);
 }
 
+/* ── VNC reconnect ── */
+.vnc-reconnect {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnc-reconnect:hover {
+  background: #1a3a5c;
+}
+
 /* ── Sidebar ── */
 .sidebar {
   width: 380px;
@@ -255,6 +273,62 @@ body {
 .controls button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ── VM status / History ── */
+.vm-status {
+  font-size: 13px;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history-item:hover {
+  background: #1a3a5c;
+}
+
+.history-item.selected {
+  border-color: var(--accent, #4da3ff);
+}
+
+.history-state {
+  flex-shrink: 0;
+  color: var(--dim);
+}
+
+.history-instruction {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  flex-shrink: 0;
+  color: var(--dim);
+  font-size: 11px;
 }
 
 /* ── Log ── */

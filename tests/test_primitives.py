@@ -31,11 +31,12 @@ class TestActionType:
 class TestActionValidation:
     """Action のバリデーションテスト。"""
 
-    def test_valid_click_no_position(self):
-        """クリック系アクションは座標なしでも有効。"""
-        action = Action(action_type=ActionType.LEFT_CLICK)
-        assert action.action_type == ActionType.LEFT_CLICK
-        assert action.params is None or action.params == {}
+    def test_click_requires_position(self):
+        """クリック系アクションは座標必須（空打ち防止）。"""
+        with pytest.raises(ValueError, match="必須パラメータが不足"):
+            Action(action_type=ActionType.LEFT_CLICK)
+        with pytest.raises(ValueError, match="必須パラメータが不足"):
+            Action(action_type=ActionType.RIGHT_CLICK, params={"x": 100})
 
     def test_valid_click_with_position(self):
         """クリック系アクションは座標付きでも有効。"""
@@ -102,6 +103,7 @@ class TestActionDescription:
         """明示的に与えた description はそのまま保持される。"""
         action = Action(
             action_type=ActionType.LEFT_CLICK,
+            params={"x": 10, "y": 20},
             description="ファイルメニューをクリック",
         )
         assert action.description == "ファイルメニューをクリック"
@@ -123,13 +125,13 @@ class TestActionImmutability:
 
     def test_cannot_reassign_action_type(self):
         """action_type 再代入で FrozenInstanceError。"""
-        action = Action(action_type=ActionType.LEFT_CLICK)
+        action = Action(action_type=ActionType.LEFT_CLICK, params={"x": 0, "y": 0})
         with pytest.raises(Exception):  # noqa: B017
             action.action_type = ActionType.RIGHT_CLICK  # type: ignore
 
     def test_cannot_reassign_params(self):
         """params フィールドの再代入で FrozenInstanceError。"""
-        action = Action(action_type=ActionType.LEFT_CLICK)
+        action = Action(action_type=ActionType.LEFT_CLICK, params={"x": 0, "y": 0})
         with pytest.raises(Exception):  # noqa: B017
             action.params = {"x": 100}  # type: ignore
 
@@ -139,10 +141,10 @@ class TestAllActionTypesValid:
 
     VALID_PARAMS_MAP = {
         ActionType.MOUSE_MOVE: {"x": 0, "y": 0},
-        ActionType.LEFT_CLICK: {},
-        ActionType.RIGHT_CLICK: {},
-        ActionType.DOUBLE_CLICK: {},
-        ActionType.MIDDLE_CLICK: {},
+        ActionType.LEFT_CLICK: {"x": 0, "y": 0},
+        ActionType.RIGHT_CLICK: {"x": 0, "y": 0},
+        ActionType.DOUBLE_CLICK: {"x": 0, "y": 0},
+        ActionType.MIDDLE_CLICK: {"x": 0, "y": 0},
         ActionType.DRAG: {"start_x": 0, "start_y": 0, "end_x": 100, "end_y": 100},
         ActionType.SCROLL: {"direction": "down", "amount": 100},
         ActionType.TYPE: {"text": "hello"},

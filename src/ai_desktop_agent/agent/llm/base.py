@@ -99,6 +99,8 @@ class LLMProvider(ABC):
         self,
         action: ActionDecision,
         expected_effect: str,
+        screenshot: Screenshot | None = None,
+        expected_outcome: str | None = None,
     ) -> VerificationResult:
         """アクションの実行結果を検証する。
 
@@ -107,6 +109,9 @@ class LLMProvider(ABC):
         Args:
             action: 実行したアクションの決定内容。
             expected_effect: アクション決定時に期待された効果。
+            screenshot: 現在の画面。渡された場合は画像を見て検証する。
+            expected_outcome: サブタスクの期待結果。渡された場合は
+                その達成有無を画像で判定する。
 
         Returns:
             検証結果。

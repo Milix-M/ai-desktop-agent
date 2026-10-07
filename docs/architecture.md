@@ -623,9 +623,9 @@ class RateLimiter:
 │  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │  frontend      │  │  backend      │  │  websockify  │ │
 │  │  Next.js       │──│  FastAPI      │  │  VNC→WS中継  │ │
-│  │  :3000         │  │  :8080        │  │  :6080       │ │
+│  │  :3000         │  │  :8081        │  │  :6080       │ │
 │  │  (Static →     │  │               │──│       │      │ │
-│  │   backend:8080)│  │               │  │       │      │ │
+│  │   backend:8081)│  │               │  │       │      │ │
 │  └────────────────┘  └──────┬────────┘  └───────┼──────┘ │
 │                             │                   │         │
 │                             │ Docker内部ネットワーク        │
@@ -669,7 +669,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "8081:8081"
     environment:
       - VNC_HOST=vm                 # Docker内部ネットワーク
       - VNC_PORT=5900
@@ -692,7 +692,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8081
       - NEXT_PUBLIC_WEBSOCKIFY_URL=http://localhost:6080
     depends_on:
       - backend
@@ -731,7 +731,7 @@ wsl docker compose up -d
 
 | From | To | 経路 |
 |------|-----|------|
-| frontend (ブラウザ) | backend API | `localhost:8080` |
+| frontend (ブラウザ) | backend API | `localhost:8081` |
 | frontend (ブラウザ) | websockify | `localhost:6080` |
 | backend | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
 | websockify | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
@@ -784,7 +784,7 @@ RUN pip install uv && uv sync --frozen
 
 COPY src/ ./src/
 
-EXPOSE 8080
+EXPOSE 8081
 CMD ["uv", "run", "python", "-m", "ai_desktop_agent"]
 ```
 

@@ -17,6 +17,7 @@ const STATE_CLASSES: Record<string, string> = {
   paused: "state-paused",
   completed: "state-completed",
   failed: "state-failed",
+  interrupted: "state-failed",
 };
 
 export default function StatusPanel({
