@@ -121,6 +121,11 @@ class ActionExecutor:
                 # 直接 executor に来た場合は何もしない（誤って成功扱いしないよう明示）。
                 logger.warning("REGION_SELECT が executor に到達（sessionで処理されるべき）")
 
+            # ── VM操作（ユーザー許可制） ──
+            case ActionType.VM_RESTART:
+                # 本来は TaskSession が横取りして許可確認の上で実行する。
+                logger.warning("VM_RESTART が executor に到達（sessionで処理されるべき）")
+
             # ── メタ ──
             case ActionType.SUBTASK_COMPLETE:
                 pass  # 何もしない（状態機械へのシグナル）

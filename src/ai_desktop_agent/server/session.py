@@ -71,6 +71,7 @@ ZOOM_MIN_SIZE = 50
 ZOOM_MAX_SIZE = 500
 MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
+RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
 SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
@@ -118,6 +119,8 @@ class TaskSession:
         self._created_at = time.time()
         # 実行対象VMのID（複数VMの並列実行用）
         self.vm_id = vm_id
+        # ユーザー許可制：エージェント判断でのVM作り直しを許可するか
+        self.allow_vm_restart = False
 
         if display is not None:
             self.display = display
@@ -411,6 +414,10 @@ class TaskSession:
             # 3回連続で完了宣言なら受け入れる（本当に何もない場合の脱出）
             pass
 
+        # VM作り直しは専用フローで処理する
+        if decision.action.action_type == ActionType.VM_RESTART:
+            await self._execute_vm_restart(decision)
+            return
         # 低確信度クリックは拡大へ回す（いきなり撃たせない）
         if (
             decision.action.action_type
@@ -517,6 +524,67 @@ class TaskSession:
         """PAUSED の間は再開まで待機する。"""
         while self.loop.state == AgentState.PAUSED:
             await asyncio.sleep(0.5)
+
+    async def _execute_vm_restart(self, decision: ActionDecision) -> None:
+        """VM_RESTART を処理する：許可制で作り直し、後は回復フローへ。
+
+        許可なし → 却下して回復フロー（別手段へ）。
+        実行後 → 環境初期化として回復フローへ（新画面で再判断）。
+        """
+        from ai_desktop_agent.server.vm_pool import VmPool
+
+        action = decision.action
+        reason = (action.params or {}).get("reason", "")
+
+        if not self.allow_vm_restart:
+            logger.info("VM作り直しは許可されていないため却下: %s", reason)
+            self.loop.record_action(action, False, "VM作り直しは許可されていません")
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=(
+                    "VM作り直しはこのタスクでは許可されていません。"
+                    "VMを作り直さずに別の方法で進めてください。"
+                ),
+                retry_count=0,
+            )
+            self.loop.action_executed()
+            self.loop.wait_complete()
+            self.loop.verify_failed()
+            await self._emit_action(action, False)
+            await self._emit_state_change()
+            return
+
+        try:
+            pool = VmPool()
+            info = pool.restart_vm(self.vm_id or "vm")
+            logger.info("VM作り直しを実行: %s (%s)", info.id, reason)
+            await asyncio.sleep(RESTART_SETTLE_SECONDS)
+            ok, error = True, ""
+        except Exception as e:
+            logger.exception("VM作り直しに失敗")
+            ok, error = False, f"VM作り直しに失敗しました: {e}"
+
+        self.loop.record_action(action, ok, error)
+        if ok:
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=(
+                    "VMを作り直しました。環境は初期状態に戻っています。"
+                    "最初からやり直すつもりで計画してください。"
+                ),
+                retry_count=0,
+            )
+        else:
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=error,
+                retry_count=0,
+            )
+        self.loop.action_executed()
+        self.loop.wait_complete()
+        self.loop.verify_failed()
+        await self._emit_action(action, ok)
+        await self._emit_state_change()
 
     async def _handle_region_zoom(
         self, subtask: Subtask, decision: ActionDecision, depth: int = 0

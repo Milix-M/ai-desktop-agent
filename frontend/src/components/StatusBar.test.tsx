@@ -14,7 +14,7 @@ describe("StatusBar", () => {
   it("shows backend, vnc, vm and agent status", async () => {
     render(<StatusBar vncConnected={true} agentState="executing" vmResolution="1280x800" />);
     await waitFor(() => {
-      expect(screen.getByText("バックエンド OK")).toBeInTheDocument();
+      expect(screen.getByText("バックエンド 接続中")).toBeInTheDocument();
     });
     expect(screen.getByText("VNC 接続中")).toBeInTheDocument();
     expect(screen.getByText("VM Desktop 1280x800")).toBeInTheDocument();
@@ -47,7 +47,7 @@ describe("StatusBar", () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error("down"));
     render(<StatusBar vncConnected={false} agentState="idle" />);
     await waitFor(() => {
-      expect(screen.getByText("バックエンド NG")).toBeInTheDocument();
+      expect(screen.getByText("バックエンド 未接続")).toBeInTheDocument();
     });
   });
 });

@@ -272,7 +272,7 @@ export default function Home() {
   const submitDisabled = isRunning || state === "paused";
 
   const handleSubmit = useCallback(
-    async (instruction: string) => {
+    async (instruction: string, allowVmRestart: boolean) => {
       const vmId = selectedVmId;
       setSelectedTaskId(null);
       updateView(vmId, {
@@ -284,7 +284,7 @@ export default function Home() {
       });
       addLog(`${instruction}`, "action", vmId);
       try {
-        const result = await createTask(instruction, vmId);
+        const result = await createTask(instruction, vmId, allowVmRestart);
         updateView(result.vm_id ?? vmId, { state: result.state });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -387,8 +387,13 @@ export default function Home() {
           />
 
           <CollapsibleSection title="VM管理（デバッグ）">
-            <ControlPanel onControl={handleControl} state={state} />
-            <VMControls onLog={(message, level) => addLog(message, level)} />
+            <div className="vm-subsection">
+              <h3>タスク操作</h3>
+              <ControlPanel onControl={handleControl} state={state} />
+            </div>
+            <div className="vm-subsection vm-status-block">
+              <VMControls onLog={(message, level) => addLog(message, level)} />
+            </div>
           </CollapsibleSection>
 
           <TaskHistory

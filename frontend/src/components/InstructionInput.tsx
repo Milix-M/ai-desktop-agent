@@ -3,19 +3,20 @@
 import { useState, type KeyboardEvent } from "react";
 
 interface Props {
-  onSubmit: (instruction: string) => Promise<void>;
+  onSubmit: (instruction: string, allowVmRestart: boolean) => Promise<void>;
   disabled: boolean;
 }
 
 export default function InstructionInput({ onSubmit, disabled }: Props) {
   const [value, setValue] = useState("");
+  const [allowVmRestart, setAllowVmRestart] = useState(false);
 
   async function handleSubmit() {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;
     setValue("");
     try {
-      await onSubmit(trimmed);
+      await onSubmit(trimmed, allowVmRestart);
     } catch {
       // handled by parent
     }
@@ -48,6 +49,15 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
       >
         {disabled ? "処理中..." : "実行"}
       </button>
+      <label className="allow-restart">
+        <input
+          type="checkbox"
+          checked={allowVmRestart}
+          onChange={(e) => setAllowVmRestart(e.target.checked)}
+          disabled={disabled}
+        />
+        VM作り直しを許可する
+      </label>
     </div>
   );
 }

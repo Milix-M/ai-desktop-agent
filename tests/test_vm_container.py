@@ -136,9 +136,7 @@ class TestEntrypoint:
     def test_uses_configurable_cpus(self):
         content = (VM_DIR / "entrypoint.sh").read_text()
         assert "VM_CPUS" in content, "entrypoint.sh で VM_CPUS を参照する必要があります"
-        assert '-smp "$VM_CPUS"' in content or "-smp $VM_CPUS" in content or '"$VM_CPUS"' in content, (
-            "KVM 時に可変 CPU 数で起動する必要があります"
-        )
+        assert '-smp "$VM_CPUS"' in content, "KVM 時に可変 CPU 数で起動する必要があります"
 
     def test_vnc_flag_present(self):
         content = (VM_DIR / "entrypoint.sh").read_text()

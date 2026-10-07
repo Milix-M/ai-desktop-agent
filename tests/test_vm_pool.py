@@ -24,6 +24,10 @@ class _FakeContainer:
         self.stopped = True
         self.status = "exited"
 
+    def restart(self, timeout=30):
+        self.restarted = True
+        self.status = "running"
+
     def remove(self, force=False):
         self.removed = True
 
@@ -223,3 +227,40 @@ class TestVmEndpoints:
                 assert (await c.get("/vms")).status_code == 503
         finally:
             server_app._pool = None
+
+
+class TestRestartVm:
+    def test_restart_legacy(self, pool):
+        pool, client = pool
+        client.containers.items.append(
+            _FakeContainer(
+                name="ai-desktop-agent-vm-1",
+                labels={"com.docker.compose.service": "vm"},
+            )
+        )
+        info = pool.restart_vm("vm")
+        assert info.id == "vm"
+        assert client.containers.items[0].restarted is True
+
+    def test_restart_dynamic_skips_relay(self, pool):
+        pool, client = pool
+        vm_c = _FakeContainer(
+            name="ai-desktop-agent-vm-x1",
+            labels={"ai-desktop-agent.vm-id": "vm-x1"},
+        )
+        ws_c = _FakeContainer(
+            name="ai-desktop-agent-ws-vm-x1",
+            labels={
+                "ai-desktop-agent.vm-id": "vm-x1",
+                "ai-desktop-agent.ws-for": "vm-x1",
+            },
+        )
+        client.containers.items.extend([vm_c, ws_c])
+        pool.restart_vm("vm-x1")
+        # 中継は再起動しない
+        assert ws_c.status == "running"
+
+    def test_restart_missing_raises(self, pool):
+        pool, _ = pool
+        with __import__("pytest").raises(ValueError, match="見つかりません"):
+            pool.restart_vm("vm-nope")

@@ -35,7 +35,7 @@ describe("InstructionInput", () => {
     await userEvent.type(textarea, "テスト指示");
     await userEvent.click(screen.getByRole("button"));
 
-    expect(onSubmit).toHaveBeenCalledWith("テスト指示");
+    expect(onSubmit).toHaveBeenCalledWith("テスト指示", false);
     expect(textarea).toHaveValue("");
   });
 
@@ -47,7 +47,7 @@ describe("InstructionInput", () => {
     await userEvent.type(textarea, "テスト指示");
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
 
-    expect(onSubmit).toHaveBeenCalledWith("テスト指示");
+    expect(onSubmit).toHaveBeenCalledWith("テスト指示", false);
   });
 
   it("does NOT call onSubmit on Shift+Enter", async () => {
@@ -59,6 +59,17 @@ describe("InstructionInput", () => {
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
 
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("passes allowVmRestart flag when checked", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<InstructionInput onSubmit={onSubmit} disabled={false} />);
+
+    await userEvent.click(screen.getByRole("checkbox"));
+    const textarea = screen.getByPlaceholderText(/LibreOffice/);
+    await userEvent.type(textarea, "テスト指示");
+    await userEvent.click(screen.getByRole("button", { name: "実行" }));
+    expect(onSubmit).toHaveBeenCalledWith("テスト指示", true);
   });
 
   it("disables everything when disabled=true", () => {

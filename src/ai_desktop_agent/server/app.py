@@ -101,6 +101,7 @@ _ws_complete_cbs: list[Callable] = []
 class CreateTaskRequest(BaseModel):
     instruction: str
     vm_id: str | None = None  # 省略時は稼働中の既定VM
+    allow_vm_restart: bool = False  # エージェント判断でのVM作り直しを許可
 
 
 class TaskStatus(BaseModel):
@@ -211,6 +212,7 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
 
     session = _create_session()
     session.vm_id = vm.id
+    session.allow_vm_restart = req.allow_vm_restart
     session.set_display(display)
 
     # 全 WebSocket 接続にセッション情報を付与して配送する

@@ -80,7 +80,7 @@ export default function StatusBar({
     <div className="status-bar">
       <div className="sb-item">
         <span className={`sb-dot ${backendAlive ? "green" : "red"}`} />
-        <span>バックエンド {backendAlive ? "OK" : "NG"}</span>
+        <span>バックエンド {backendAlive ? "接続中" : "未接続"}</span>
       </div>
 
       <div className="sb-item">

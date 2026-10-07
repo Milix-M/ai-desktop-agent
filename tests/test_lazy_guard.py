@@ -496,6 +496,8 @@ class TestSlowVmGuards:
 
         ex = ActionExecutor(FakeDisplayBackend())
         await asyncio.wait_for(ex.wait_for_still(timeout=5.0), timeout=10)
+
+
 class TestSessionIdWiring:
     """TaskSession.id がLLMの会話単位IDになること。"""
 
@@ -524,3 +526,73 @@ class TestSessionIdWiring:
 
         session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
         assert session.id  # 属性がなくても生成できること
+
+
+class TestVmRestartAction:
+    """エージェント判断のVM作り直しテスト（許可制）。"""
+
+    @pytest.mark.asyncio
+    async def test_denied_without_permission(self):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import Goal, Subtask
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
+        session.loop.start(Goal(description="g"))
+        session.loop.understanding_done()
+        session.loop.plan_ready([Subtask(id="s1", description="d")])
+        assert session.allow_vm_restart is False
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.VM_RESTART, params={"reason": "test"}),
+            expected_effect="reboot",
+            confidence=0.9,
+            reasoning="test",
+        )
+        await session._execute_vm_restart(decision)
+        last = session.loop.context.action_history[-1]
+        assert last.action.action_type == ActionType.VM_RESTART
+        assert last.success is False
+        assert session._pending_error is not None
+        assert "許可" in session._pending_error.error_message
+
+    @pytest.mark.asyncio
+    async def test_allowed_restarts_and_replans(self, monkeypatch):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        restarted = []
+
+        class _FakePool:
+            def restart_vm(self, vm_id, timeout=30):
+                restarted.append(vm_id)
+                from ai_desktop_agent.server.vm_pool import VmInfo
+
+                return VmInfo(id=vm_id, name=vm_id, status="running")
+
+        monkeypatch.setattr("ai_desktop_agent.server.vm_pool.VmPool", _FakePool)
+        monkeypatch.setattr("ai_desktop_agent.server.session.RESTART_SETTLE_SECONDS", 0.0)
+
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
+        session.allow_vm_restart = True
+        session.vm_id = "vm-test"
+        session.loop.start(Goal(description="g"))
+        session.loop.understanding_done()
+        session.loop.plan_ready([Subtask(id="s1", description="d")])
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.VM_RESTART, params={"reason": "test"}),
+            expected_effect="reboot",
+            confidence=0.9,
+            reasoning="test",
+        )
+        await session._execute_vm_restart(decision)
+        assert restarted == ["vm-test"]
+        assert session.loop.state == AgentState.RECOVERING
+        assert session._pending_error is not None
+        assert "初期状態" in session._pending_error.error_message

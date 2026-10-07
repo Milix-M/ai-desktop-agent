@@ -7,12 +7,13 @@ const BACKEND_URL =
 
 export async function createTask(
   instruction: string,
-  vmId?: string | null
+  vmId?: string | null,
+  allowVmRestart?: boolean
 ): Promise<TaskStatus> {
   const resp = await fetch(`${BACKEND_URL}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction, vm_id: vmId ?? null }),
+    body: JSON.stringify({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();

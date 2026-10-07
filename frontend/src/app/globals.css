@@ -202,6 +202,22 @@ body {
   cursor: not-allowed;
 }
 
+.allow-restart {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.allow-restart input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 /* ── Status ── */
 .status-row {
   margin-bottom: 10px;
@@ -558,6 +574,12 @@ body {
 
 .vm-subsection:first-child h3 {
   margin-top: 0;
+}
+
+.vm-status-block {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 /* ── Log ── */

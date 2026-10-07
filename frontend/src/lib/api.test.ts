@@ -42,7 +42,7 @@ describe("API client", () => {
         expect.stringContaining("/tasks"),
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ instruction: "テスト指示", vm_id: null }),
+          body: JSON.stringify({ instruction: "テスト指示", vm_id: null, allow_vm_restart: false }),
         })
       );
     });

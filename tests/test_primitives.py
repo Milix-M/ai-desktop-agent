@@ -156,6 +156,7 @@ class TestAllActionTypesValid:
         ActionType.WAIT_FOR_STILL: {"timeout": 5.0},
         ActionType.SCREENSHOT: {},
         ActionType.REGION_SELECT: {"x": 0, "y": 0, "width": 200, "height": 200},
+        ActionType.VM_RESTART: {"reason": "stuck"},
         ActionType.SUBTASK_COMPLETE: {},
     }
 

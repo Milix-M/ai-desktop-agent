@@ -93,6 +93,9 @@ AI エージェントです。
 - key_combo: {keys: [str]} — 複合キー（["ctrl", "c"] 等）
 - wait: {seconds: float} — 待機（アプリ起動待ちには2〜5秒を使う）
 - region_select: {x: int, y: int, width: int, height: int} — 領域拡大を要求
+- vm_restart: {reason: str} — VM作り直し（事前にユーザーの許可が必要。
+  許可されていないタスクでは却下される。実行後は環境が初期化されるため、
+  計画の最初からやり直すつもりで使う）
 - subtask_complete: {} — 現在のサブタスク完了
 
 ※ 毎ターン最新の画面が自動で送られるため、画面再取得のためのアクションは不要。
@@ -136,6 +139,7 @@ _ACTION_TYPES = [
     "key_combo",
     "wait",
     "region_select",
+    "vm_restart",
     "subtask_complete",
 ]
 
@@ -334,6 +338,23 @@ _SCHEMA_ACTION = {
                             "height": {"type": "integer"},
                         },
                         "required": ["x", "y", "width", "height"],
+                        "additionalProperties": False,
+                    },
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"const": "vm_restart"},
+                    "params": {
+                        "type": "object",
+                        "properties": {"reason": {"type": "string"}},
+                        "required": ["reason"],
                         "additionalProperties": False,
                     },
                     "expected_effect": {"type": "string"},
@@ -627,6 +648,22 @@ _SCHEMA_RECOVER = {
                                         "height": {"type": "integer"},
                                     },
                                     "required": ["x", "y", "width", "height"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action_type": {"const": "vm_restart"},
+                                "params": {
+                                    "type": "object",
+                                    "properties": {
+                                        "reason": {"type": "string"},
+                                    },
+                                    "required": ["reason"],
                                     "additionalProperties": False,
                                 },
                             },

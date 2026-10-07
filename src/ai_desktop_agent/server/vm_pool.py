@@ -186,8 +186,33 @@ class VmPool:
             managed=True,
         )
 
+    def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
+        """VMコンテナを再起動する（ゲストOSごと作り直し）。中継は触らない。"""
+        docker = self._docker()
+        if vm_id == BASE_VM_SERVICE:
+            targets = docker.containers.list(
+                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
+            )
+        else:
+            targets = [
+                c
+                for c in docker.containers.list(
+                    all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
+                )
+                if LABEL_WS_FOR not in self._labels(c)
+            ]
+        if not targets:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        for c in targets:
+            c.restart(timeout=timeout)
+            logger.info("VM再起動: %s", c.name)
+        info = self.get_vm(vm_id)
+        if info is None:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        return info
+
     def remove_vm(self, vm_id: str) -> bool:
-        """VMと中継コンテナを削除し、overlayを消す。既定VMは不可。"""
+        """VMと中継コンテナを削除し、ディスクを消す。既定VMは不可。"""
         if vm_id == BASE_VM_SERVICE:
             raise ValueError("既定VMは削除できません")
         docker = self._docker()
@@ -288,10 +313,7 @@ class VmPool:
             image,
             # 注意: vmイメージのENTRYPOINTはQEMU起動のため上書きする
             entrypoint=["cp"],
-            command=(
-                "--sparse=always /vm/desktop.qcow2 "
-                f"/vm/overlays/{vm_id}.qcow2"
-            ),
+            command=(f"--sparse=always /vm/desktop.qcow2 /vm/overlays/{vm_id}.qcow2"),
             volumes={
                 overlay_host_dir: {"bind": "/vm/overlays", "mode": "rw"},
                 # 複製元（読取専用）
