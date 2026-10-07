@@ -8,6 +8,7 @@ region_select による2段階精密クリックをサポートする。
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -144,6 +145,18 @@ class TaskSession:
         self._on_action: list[Callable] = []
         self._on_error: list[Callable] = []
         self._on_complete: list[Callable] = []
+
+    def set_display(self, display: DisplayBackend) -> None:
+        """操作対象の表示バックエンドを差し替える（VM指定用）。"""
+        try:
+            old = self.display
+            if old is not None and old is not display:
+                with contextlib.suppress(Exception):
+                    old.disconnect()
+        except AttributeError:
+            pass
+        self.display = display
+        self.executor = ActionExecutor(self.display)
 
     # ── イベント ──────────────────────────────
 

@@ -342,14 +342,14 @@ body {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   text-align: left;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border: none;
   background: transparent;
   color: var(--text);
-  font-size: 12px;
   cursor: pointer;
 }
 
@@ -373,9 +373,19 @@ body {
   color: #fff;
 }
 
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .history-state {
   flex-shrink: 0;
+  font-size: 11px;
   color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 
 .history-instruction {
@@ -384,12 +394,39 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .history-meta {
   flex-shrink: 0;
   color: var(--dim);
   font-size: 11px;
+}
+
+/* ── Collapsible ── */
+.collapsible-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  text-align: left;
+}
+
+.collapsible-caret {
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.collapsible-body {
+  margin-top: 8px;
 }
 
 /* ── Log ── */

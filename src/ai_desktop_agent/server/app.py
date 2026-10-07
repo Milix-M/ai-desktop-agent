@@ -4,6 +4,7 @@ WebSocket でフロントエンドと通信し、TaskSession を管理する。
 フロントエンドは Next.js で別途配信される。
 """
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -19,6 +20,8 @@ from ai_desktop_agent.server.vm_control import (
     DockerUnavailableError,
     get_vm_controller,
 )
+from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logging.basicConfig(level=logging.INFO)
 
@@ -65,11 +68,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# アクティブなセッション（シングルトン運用）
+# アクティブなセッション（後方互換：最新の1件）
 _active_session: TaskSession | None = None
+
+# 全セッション（複数VMの並列実行用）： session_id -> TaskSession
+_sessions: dict[str, TaskSession] = {}
 
 # テスト用のセッションファクトリ。テストから差し替え可能。
 _create_session = _default_create_session  # type: ignore[var-annotated]
+
+# VMプール（遅延初期化：テスト時は差し替え可能）
+_pool: VmPool | None = None
+
+
+def get_pool() -> VmPool:
+    """VMプールを返す（初回利用時に初期化）。"""
+    global _pool
+    if _pool is None:
+        _pool = VmPool()
+    return _pool
+
 
 # WebSocket コールバックのグローバルレジストリ
 # セッションより長生きする WebSocket 接続のコールバックを保持し、
@@ -82,6 +100,7 @@ _ws_complete_cbs: list[Callable] = []
 
 class CreateTaskRequest(BaseModel):
     instruction: str
+    vm_id: str | None = None  # 省略時は稼働中の既定VM
 
 
 class TaskStatus(BaseModel):
@@ -93,12 +112,28 @@ class TaskStatus(BaseModel):
     failure_count: int
     subtasks: list[dict] = []
     current_subtask_index: int = 0
+    vm_id: str | None = None
 
 
 class VmStatus(BaseModel):
     running: bool
     status: str
     health: str | None = None
+    name: str | None = None
+
+
+class VmInfoModel(BaseModel):
+    id: str
+    name: str
+    status: str
+    health: str | None = None
+    vnc_port: int = 5900
+    ws_port: int = 6080
+    vnc_host: str = ""
+    managed: bool = True
+
+
+class CreateVmRequest(BaseModel):
     name: str | None = None
 
 
@@ -160,28 +195,110 @@ async def health() -> dict[str, str]:
 
 @app.post("/tasks", response_model=TaskStatus)
 async def create_task(req: CreateTaskRequest) -> TaskStatus:
-    """新しいタスクを作成し、バックグラウンドで実行開始する。"""
+    """新しいタスクを作成し、バックグラウンドで実行開始する。
+
+    vm_id 省略時は稼働中の既定VMを使う。複数VMで並列実行できる。
+    """
     global _active_session
 
-    if _active_session and _active_session.is_running:
+    vm = _resolve_vm(req.vm_id)
+    display = _connect_vm_display(vm)
+
+    if _active_session and _active_session.is_running and _active_session.vm_id == vm.id:
         _active_session.stop()
 
     session = _create_session()
+    session.vm_id = vm.id
+    session.set_display(display)
 
-    # 全 WebSocket 接続のコールバックを新セッションに登録
-    for cb in _ws_state_cbs:
-        session.on_state_change(cb)
-    for cb in _ws_action_cbs:
-        session.on_action(cb)
-    for cb in _ws_error_cbs:
-        session.on_error(cb)
-    for cb in _ws_complete_cbs:
-        session.on_complete(cb)
+    # 全 WebSocket 接続にセッション情報を付与して配送する
+    _forward_registrations(session)
 
     _active_session = session
+    _sessions[session.id] = session
 
     await session.start_async(req.instruction)
     return _make_status(session)
+
+
+def _resolve_vm(vm_id: str | None):
+    """タスク投入先のVMを解決する。"""
+    from fastapi import HTTPException
+
+    pool = get_pool()
+    if vm_id:
+        vm = pool.get_vm(vm_id)
+        if vm is None:
+            raise HTTPException(status_code=404, detail=f"vm not found: {vm_id}")
+        if vm.status != "running":
+            raise HTTPException(status_code=409, detail=f"vm not running: {vm_id}")
+        return vm
+    vm = pool.default_vm()
+    if vm is None:
+        raise HTTPException(status_code=409, detail="利用可能なVMがありません")
+    return vm
+
+
+def _connect_vm_display(vm):
+    """VMへのVNC接続を作る。"""
+    from fastapi import HTTPException
+
+    try:
+        display = VNCClient()
+        display.connect(vm.vnc_host or "vm", 5900)
+        return display
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"VMへのVNC接続に失敗: {e}") from e
+
+
+@app.get("/vms", response_model=list[VmInfoModel])
+async def list_vms() -> list[VmInfoModel]:
+    """VM一覧を返す。"""
+    from fastapi import HTTPException
+
+    try:
+        return [VmInfoModel(**v.to_dict()) for v in get_pool().list_vms()]
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.post("/vms", response_model=VmInfoModel)
+async def create_vm(req: CreateVmRequest) -> VmInfoModel:
+    """新しいVMを作成して起動する。"""
+    from fastapi import HTTPException
+
+    try:
+        info = get_pool().create_vm(name=req.name)
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return VmInfoModel(**info.to_dict())
+
+
+@app.delete("/vms/{vm_id}")
+async def delete_vm(vm_id: str) -> dict[str, str]:
+    """VMを削除する（上のタスクは停止する）。"""
+    from fastapi import HTTPException
+
+    global _active_session
+
+    for sid, sess in list(_sessions.items()):
+        if getattr(sess, "vm_id", None) == vm_id:
+            sess.stop()
+            del _sessions[sid]
+    if _active_session and getattr(_active_session, "vm_id", None) == vm_id:
+        _active_session = None
+
+    try:
+        ok = get_pool().remove_vm(vm_id)
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not ok:
+        raise HTTPException(status_code=404, detail="vm not found")
+    return {"status": "deleted"}
 
 
 @app.get("/tasks/current", response_model=TaskStatus)
@@ -336,12 +453,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     if _active_session is None:
         await ws.send_json({"type": "status", "state": "no_session"})
 
-    # セッションのイベントを WebSocket に転送する
-    async def on_state(state, ctx):
+    # セッションのイベントを WebSocket に転送する。
+    # 先頭引数にセッションを受け取り、送信先の選別用IDを付与する。
+    async def on_state(session, state, ctx):
         with contextlib.suppress(Exception):
             await ws.send_json(
                 {
                     "type": "state",
+                    "session_id": session.id,
+                    "vm_id": getattr(session, "vm_id", None),
                     "state": state.value,
                     "subtask_index": ctx.current_subtask_index,
                     "subtask_count": len(ctx.subtasks),
@@ -350,24 +470,40 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 }
             )
 
-    async def on_action(action, success):
+    async def on_action(session, action, success):
         with contextlib.suppress(Exception):
             await ws.send_json(
                 {
                     "type": "action",
+                    "session_id": session.id,
+                    "vm_id": getattr(session, "vm_id", None),
                     "action_type": action.action_type.value,
                     "description": action.description,
                     "success": success,
                 }
             )
 
-    async def on_error(error):
+    async def on_error(session, error):
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "error", "message": error})
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "session_id": session.id,
+                    "vm_id": getattr(session, "vm_id", None),
+                    "message": error,
+                }
+            )
 
-    async def on_complete(success):
+    async def on_complete(session, success):
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "complete", "success": success})
+            await ws.send_json(
+                {
+                    "type": "complete",
+                    "session_id": session.id,
+                    "vm_id": getattr(session, "vm_id", None),
+                    "success": success,
+                }
+            )
 
     # グローバルレジストリに登録（常に）
     _ws_state_cbs.append(on_state)
@@ -377,10 +513,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     # 現在アクティブなセッションにも登録
     if _active_session:
-        _active_session.on_state_change(on_state)
-        _active_session.on_action(on_action)
-        _active_session.on_error(on_error)
-        _active_session.on_complete(on_complete)
+        _forward_registrations(_active_session)
 
     try:
         while True:
@@ -406,6 +539,36 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 # ── ヘルパー ──────────────────────────────────────────
 
 
+async def _fanout(cbs: list, *args) -> None:
+    """WSレジストリの全コールバックに配送する。"""
+    for cb in list(cbs):
+        if asyncio.iscoroutinefunction(cb):
+            await cb(*args)
+        else:
+            cb(*args)
+
+
+def _forward_registrations(session: TaskSession) -> None:
+    """セッションのイベントをWSレジストリへ転送するラッパを登録する。"""
+
+    async def _st(st, cx):
+        await _fanout(_ws_state_cbs, session, st, cx)
+
+    async def _ac(a, ok):
+        await _fanout(_ws_action_cbs, session, a, ok)
+
+    async def _er(e):
+        await _fanout(_ws_error_cbs, session, e)
+
+    async def _co(ok):
+        await _fanout(_ws_complete_cbs, session, ok)
+
+    session.on_state_change(_st)
+    session.on_action(_ac)
+    session.on_error(_er)
+    session.on_complete(_co)
+
+
 def _make_status(session: TaskSession) -> TaskStatus:
     ctx = session.loop.context
     return TaskStatus(
@@ -417,6 +580,7 @@ def _make_status(session: TaskSession) -> TaskStatus:
         failure_count=ctx.failure_count,
         subtasks=[{"id": s.id, "description": s.description} for s in ctx.subtasks],
         current_subtask_index=ctx.current_subtask_index,
+        vm_id=getattr(session, "vm_id", None),
     )
 
 

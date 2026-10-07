@@ -57,8 +57,7 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
   }, [onLog, refresh]);
 
   return (
-    <div className="section">
-      <h2>VM管理（デバッグ）</h2>
+    <>
       <div className="vm-status" data-testid="vm-status">
         {restarting ? "作り直し中..." : status}
       </div>
@@ -67,6 +66,6 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
           VM作り直し
         </button>
       </div>
-    </div>
+    </>
   );
 }

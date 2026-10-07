@@ -40,14 +40,18 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete }: P
             className={`history-item${item.id === selectedId ? " selected" : ""}`}
           >
             <button className="history-main" onClick={() => onSelect(item.id)}>
-              <span className="history-state">
-                {STATE_LABEL[item.state] ?? item.state}
+              <span className="history-row">
+                <span className="history-state">
+                  {STATE_LABEL[item.state] ?? item.state}
+                </span>
+                <span className="history-instruction">
+                  {item.instruction || "(指示なし)"}
+                </span>
               </span>
-              <span className="history-instruction">
-                {item.instruction || "(指示なし)"}
-              </span>
-              <span className="history-meta">
-                {item.action_count}操作・{timeStr(item.updated_at)}
+              <span className="history-row">
+                <span className="history-meta">
+                  {item.action_count}操作・成功{item.success_count}・失敗{item.failure_count}・{timeStr(item.updated_at)}
+                </span>
               </span>
             </button>
             <button

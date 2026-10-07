@@ -88,16 +88,37 @@ class TestSessionPersistence:
 
 @pytest.fixture
 def _hist_app(tmp_path):
+    from ai_desktop_agent.server.vm_pool import VmInfo
+
     server_app._active_session = None
+    server_app._sessions = {}
     server_app._store = TaskStore(root=tmp_path / "data")
     orig = server_app._create_session
+
+    class _FakePool:
+        def get_vm(self, vm_id):
+            return (
+                VmInfo(id="vm", name="vm", status="running", vnc_host="vm", managed=False)
+                if vm_id == "vm"
+                else None
+            )
+
+        def default_vm(self):
+            return VmInfo(id="vm", name="vm", status="running", vnc_host="vm", managed=False)
+
+    server_app._pool = _FakePool()
+    orig_connect = server_app._connect_vm_display
+    server_app._connect_vm_display = lambda vm: FakeDisplayBackend()
     server_app._create_session = lambda: TaskSession(
         llm=MockLLMProvider(), display=FakeDisplayBackend(), store=server_app._store
     )
     yield
     server_app._active_session = None
+    server_app._sessions = {}
     server_app._create_session = orig
     server_app._store = None
+    server_app._pool = None
+    server_app._connect_vm_display = orig_connect
 
 
 @pytest.mark.asyncio

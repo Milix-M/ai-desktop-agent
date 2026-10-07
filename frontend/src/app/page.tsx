@@ -6,6 +6,7 @@ import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
 import ControlPanel from "@/components/ControlPanel";
 import VMControls from "@/components/VMControls";
+import CollapsibleSection from "@/components/CollapsibleSection";
 import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import StatusBar from "@/components/StatusBar";
@@ -251,7 +252,9 @@ export default function Home() {
 
           <ControlPanel onControl={handleControl} state={state} />
 
-          <VMControls onLog={(message, level) => addLog(message, level)} />
+          <CollapsibleSection title="VM管理（デバッグ）">
+            <VMControls onLog={(message, level) => addLog(message, level)} />
+          </CollapsibleSection>
 
           <TaskHistory
             items={history}
