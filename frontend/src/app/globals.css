@@ -419,16 +419,16 @@ body {
   display: block;
   white-space: normal;
   overflow-wrap: anywhere;
-  font-size: 16px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--text);
 }
 
 .history-meta {
   flex-shrink: 0;
-  color: #9fb3c8;
-  font-size: 13px;
-  line-height: 1.6;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ── VM tabs ── */
