@@ -10,17 +10,22 @@ from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
 
 @pytest.fixture(autouse=True)
-def _reset_session():
+def _reset_session(tmp_path):
     """各テスト前にグローバルセッションをリセットし、モックを使うようにする。"""
+    from ai_desktop_agent.server.store import TaskStore
+
     server_app._active_session = None
+    server_app._store = TaskStore(root=tmp_path / "data")
     # セッションファクトリをモックに差し替え（本番コードパスはそのまま）
     server_app._create_session = lambda: TaskSession(
         llm=MockLLMProvider(),
         display=FakeDisplayBackend(),
+        store=server_app._store,
     )
     yield
     server_app._active_session = None
-    server_app._create_session = TaskSession  # デフォルトに戻す
+    server_app._create_session = server_app._default_create_session  # デフォルトに戻す
+    server_app._store = None
 
 
 @pytest.mark.asyncio

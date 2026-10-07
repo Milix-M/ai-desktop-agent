@@ -1,4 +1,4 @@
-import type { TaskStatus } from "./types";
+import type { TaskDetail, TaskHistoryItem, TaskStatus, VmStatus } from "./types";
 
 const BACKEND_URL =
   typeof window !== "undefined"
@@ -44,4 +44,28 @@ export function getVncWsUrl(): string {
   if (typeof window === "undefined") return "ws://localhost:6080";
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.hostname}:6080`;
+}
+
+export async function getVmStatus(): Promise<VmStatus> {
+  const resp = await fetch(`${BACKEND_URL}/vm/status`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function restartVm(): Promise<VmStatus> {
+  const resp = await fetch(`${BACKEND_URL}/vm/restart`, { method: "POST" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
+  const resp = await fetch(`${BACKEND_URL}/tasks?limit=${limit}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
 }

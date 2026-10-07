@@ -52,7 +52,8 @@ class FakeDisplayBackend(DisplayBackend):
     def disconnect(self) -> None:
         self._connected = False
 
-    def capture_screen(self) -> Screenshot:
+    def capture_screen(self, *, with_overlay: bool = True) -> Screenshot:
+        del with_overlay  # Fakeは常に同一ダミー画像
         self._frame_count += 1
         self.screenshots_taken += 1
         return Screenshot(
@@ -62,6 +63,10 @@ class FakeDisplayBackend(DisplayBackend):
             timestamp=0.0,
             frame_number=self._frame_count,
         )
+
+    def capture_raw(self) -> Screenshot:
+        """オーバーレイなしの生スクリーンショット（Fakeは同一画像）。"""
+        return self.capture_screen(with_overlay=False)
 
     def capture_region(self, x: int, y: int, width: int, height: int) -> Screenshot:
         self._frame_count += 1
@@ -74,6 +79,14 @@ class FakeDisplayBackend(DisplayBackend):
             frame_number=self._frame_count,
         )
 
+    @property
+    def screen_width(self) -> int:
+        return self._screen_width
+
+    @property
+    def screen_height(self) -> int:
+        return self._screen_height
+
     def mouse_move(self, x: int, y: int) -> None:
         self.mouse_moves.append((x, y))
 
@@ -83,13 +96,18 @@ class FakeDisplayBackend(DisplayBackend):
     def mouse_up(self, button: int = 1) -> None:
         pass
 
-    def mouse_click(self, x: int, y: int, button: int = 1) -> None:
-        self.mouse_moves.append((x, y))
-        self.clicks.append({"button": button, "x": x, "y": y})
+    def mouse_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
+        # None の場合は (0, 0) 扱い（旧「現在位置クリック」の代替。座標必須化後は通常呼ばれない）
+        cx, cy = (x if x is not None else 0, y if y is not None else 0)
+        self.mouse_moves.append((cx, cy))
+        self.clicks.append({"button": button, "x": cx, "y": cy})
 
-    def mouse_double_click(self, x: int, y: int, button: int = 1) -> None:
-        self.mouse_moves.append((x, y))
-        self.clicks.append({"button": button, "x": x, "y": y, "double": True})
+    def mouse_double_click(
+        self, x: int | None = None, y: int | None = None, button: int = 1
+    ) -> None:
+        cx, cy = (x if x is not None else 0, y if y is not None else 0)
+        self.mouse_moves.append((cx, cy))
+        self.clicks.append({"button": button, "x": cx, "y": cy, "double": True})
 
     def mouse_drag(
         self, start_x: int, start_y: int, end_x: int, end_y: int, button: int = 1

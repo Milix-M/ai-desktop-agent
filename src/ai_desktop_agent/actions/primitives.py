@@ -31,6 +31,8 @@ class ActionType(Enum):
     WAIT = "wait"
     WAIT_FOR_TEXT = "wait_for_text"
     WAIT_FOR_STILL = "wait_for_still"
+    # 注意: SCREENSHOT は毎ターン自動撮影されるため LLM には提示しない
+    # （プロンプト・スキーマから除外済み）。enumと実行器は互換のため残す。
     SCREENSHOT = "screenshot"
     SUBTASK_COMPLETE = "subtask_complete"
 
@@ -41,13 +43,29 @@ class ActionType(Enum):
 # 全アクション種別リスト（テスト用）
 ALL_ACTION_TYPES = list(ActionType)
 
+# クリック系アクション（座標必須）
+CLICK_ACTIONS: frozenset[ActionType] = frozenset(
+    {
+        ActionType.LEFT_CLICK,
+        ActionType.RIGHT_CLICK,
+        ActionType.MIDDLE_CLICK,
+        ActionType.DOUBLE_CLICK,
+    }
+)
+
+# 座標キー（絶対座標系）
+_X_KEYS: frozenset[str] = frozenset({"x", "start_x", "end_x"})
+_Y_KEYS: frozenset[str] = frozenset({"y", "start_y", "end_y"})
+
 # アクション種別ごとの必須パラメータ
+# クリック系は座標必須。空パラメータでの「現在位置クリック」は
+# 誤クリックの温床になるため禁止する（#26 のスキーマと整合）。
 _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.MOUSE_MOVE: {"x", "y"},
-    ActionType.LEFT_CLICK: set(),
-    ActionType.RIGHT_CLICK: set(),
-    ActionType.MIDDLE_CLICK: set(),
-    ActionType.DOUBLE_CLICK: set(),
+    ActionType.LEFT_CLICK: {"x", "y"},
+    ActionType.RIGHT_CLICK: {"x", "y"},
+    ActionType.MIDDLE_CLICK: {"x", "y"},
+    ActionType.DOUBLE_CLICK: {"x", "y"},
     ActionType.DRAG: {"start_x", "start_y", "end_x", "end_y"},
     ActionType.SCROLL: {"direction", "amount"},
     ActionType.TYPE: {"text"},
@@ -64,10 +82,10 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
 
 # アクション種別ごとの任意パラメータ
 _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
-    ActionType.LEFT_CLICK: {"x", "y"},
-    ActionType.RIGHT_CLICK: {"x", "y"},
-    ActionType.MIDDLE_CLICK: {"x", "y"},
-    ActionType.DOUBLE_CLICK: {"x", "y"},
+    ActionType.LEFT_CLICK: set(),
+    ActionType.RIGHT_CLICK: set(),
+    ActionType.MIDDLE_CLICK: set(),
+    ActionType.DOUBLE_CLICK: set(),
     ActionType.MOUSE_MOVE: set(),
     ActionType.DRAG: set(),
     ActionType.SCROLL: set(),
@@ -150,9 +168,10 @@ def _generate_description(action_type: ActionType, params: dict) -> str:
         ActionType.MIDDLE_CLICK,
         ActionType.DOUBLE_CLICK,
     ):
+        # 座標は必須（バリデーション済み）。欠落時はフォールバック表示。
         if "x" in params and "y" in params:
             return f"{name} ({params['x']}, {params['y']})"
-        return f"{name}（現在位置）"
+        return f"{name}（座標不明）"
     elif action_type == ActionType.TYPE:
         text = str(params.get("text", ""))
         if len(text) > 30:

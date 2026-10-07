@@ -151,7 +151,7 @@ class TestOpenAICompatProvider:
             )
         )
         error = ErrorContext(
-            action=Action(action_type=ActionType.LEFT_CLICK),
+            action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20}),
             error_message="timeout",
             retry_count=1,
         )
@@ -176,7 +176,7 @@ class TestOpenAICompatProvider:
             )
         )
         decision = ActionDecision(
-            action=Action(action_type=ActionType.LEFT_CLICK),
+            action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20}),
             expected_effect="クリックされる",
             confidence=1.0,
             reasoning="ボタンをクリック",
@@ -194,7 +194,7 @@ class TestOpenAICompatProvider:
             )
         )
         decision = ActionDecision(
-            action=Action(action_type=ActionType.LEFT_CLICK),
+            action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20}),
             expected_effect="クリックで失敗",
             confidence=0.5,
             reasoning="クリックするが失敗する想定",
@@ -219,7 +219,7 @@ class TestOpenAICompatProvider:
             )
         )
         error = ErrorContext(
-            action=Action(action_type=ActionType.LEFT_CLICK),
+            action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20}),
             error_message="not found",
             retry_count=0,
         )
@@ -242,7 +242,7 @@ class TestOpenAICompatProvider:
             )
         )
         error = ErrorContext(
-            action=Action(action_type=ActionType.LEFT_CLICK),
+            action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 10, "y": 20}),
             error_message="not found",
             retry_count=3,
         )
@@ -327,6 +327,78 @@ class TestOpenAICompatProvider:
             image_bytes=b"fake_png_data",
         )
         assert data["action_type"] == "wait"
+
+    # ── structured output フォールバック ───────────────
+
+    @staticmethod
+    def _unsupported_error() -> Exception:
+        err = Exception("Model does not support response_format json_schema (400)")
+        err.status_code = 400  # type: ignore[attr-defined]
+        return err
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_structured_output_unsupported(self, provider):
+        """400エラーで通常JSONモードに切り替わり、2回目は成功する。"""
+        provider._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                self._unsupported_error(),
+                self._make_mock_response(
+                    {
+                        "action_type": "wait",
+                        "params": {"seconds": 1.0},
+                        "expected_effect": "待機",
+                        "confidence": 1.0,
+                        "reasoning": "fallback",
+                    }
+                ),
+            ]
+        )
+        data = await provider._call("prompt", {"name": "s", "schema": {"type": "object"}})
+        assert data["action_type"] == "wait"
+        assert provider._structured_output is False
+        # 2回目の呼び出しでは response_format が付いていないこと
+        second_kwargs = provider._client.chat.completions.create.call_args.kwargs
+        assert "response_format" not in second_kwargs
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_on_auth_error(self, provider):
+        """401ではフォールバックせず例外が伝播する。"""
+        err = Exception("Unauthorized (401)")
+        err.status_code = 401  # type: ignore[attr-defined]
+        provider._client.chat.completions.create = AsyncMock(side_effect=err)
+        with pytest.raises(Exception, match="Unauthorized"):
+            await provider._call("prompt", {"name": "s", "schema": {"type": "object"}})
+        assert provider._structured_output is True
+
+    def test_parse_json_with_surrounding_text(self, provider):
+        """説明文混じりの応答からJSONを抽出できる。"""
+        text = '了解です。```json\n{"key": "value"}\n```\n以上です。'
+        assert provider._parse_json(text) == {"key": "value"}
+        assert provider._parse_json('結果: {"a": 1} です') == {"a": 1}
+
+    def test_parse_json_invalid_raises(self, provider):
+        """JSONが一切ない応答は例外になる。"""
+        import json as _json
+
+        with pytest.raises((_json.JSONDecodeError, ValueError)):
+            provider._parse_json("これはJSONではありません")
+
+    # ── screenshot 除外（無駄ループ防止） ───────────────
+
+    def test_schema_has_no_screenshot(self, provider):
+        """LLMの選択肢に screenshot を出さない（毎ターン自動撮影のため）。"""
+        import json as _json
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            _ACTION_TYPES,
+            _SCHEMA_ACTION,
+            _SYSTEM_PROMPT,
+        )
+
+        assert "screenshot" not in _ACTION_TYPES
+        assert "screenshot" not in _SYSTEM_PROMPT
+        schema_text = _json.dumps(_SCHEMA_ACTION)
+        assert '"screenshot"' not in schema_text
 
 
 # ── LLMProviderFactory ────────────────────────────────

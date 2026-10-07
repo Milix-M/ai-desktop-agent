@@ -63,39 +63,20 @@ class ActionExecutor:
 
     async def _dispatch(self, action: Action) -> None:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
-        p = action.params
+        p = action.params or {}
         match action.action_type:
             # ── マウス操作 ──
             case ActionType.MOUSE_MOVE:
-                self._backend.mouse_move(p["x"], p["y"])
+                self._backend.mouse_move(int(p["x"]), int(p["y"]))
             case ActionType.LEFT_CLICK:
-                x = p.get("x")
-                y = p.get("y")
-                if x is not None and y is not None:
-                    self._backend.mouse_click(x, y, button=1)
-                else:
-                    self._backend.mouse_down(1)
-                    self._backend.mouse_up(1)
+                # 座標必須（primitivesで検証済み）
+                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=1)
             case ActionType.RIGHT_CLICK:
-                x = p.get("x")
-                y = p.get("y")
-                if x is not None and y is not None:
-                    self._backend.mouse_click(x, y, button=3)
-                else:
-                    self._backend.mouse_down(3)
-                    self._backend.mouse_up(3)
+                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=3)
             case ActionType.DOUBLE_CLICK:
-                x = p.get("x")
-                y = p.get("y")
-                self._backend.mouse_double_click(x, y)
+                self._backend.mouse_double_click(int(p["x"]), int(p["y"]))
             case ActionType.MIDDLE_CLICK:
-                x = p.get("x")
-                y = p.get("y")
-                if x is not None and y is not None:
-                    self._backend.mouse_click(x, y, button=2)
-                else:
-                    self._backend.mouse_down(2)
-                    self._backend.mouse_up(2)
+                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=2)
             case ActionType.DRAG:
                 self._backend.mouse_drag(
                     p["start_x"],
@@ -130,6 +111,12 @@ class ActionExecutor:
             case ActionType.SCREENSHOT:
                 self._backend.capture_screen()
 
+            # ── ズーム要求 ──
+            case ActionType.REGION_SELECT:
+                # 本来は TaskSession が横取りして拡大→再判断する。
+                # 直接 executor に来た場合は何もしない（誤って成功扱いしないよう明示）。
+                logger.warning("REGION_SELECT が executor に到達（sessionで処理されるべき）")
+
             # ── メタ ──
             case ActionType.SUBTASK_COMPLETE:
                 pass  # 何もしない（状態機械へのシグナル）
@@ -140,28 +127,20 @@ class ActionExecutor:
         """画面に指定テキストが現れるまでスクリーンショットを取得して待機。
 
         テキスト抽出器（OCR）が設定されている場合は抽出テキストから検索する。
-        設定されていない場合は画面変化を検出する。
+        OCR未設定時は早期リターンせずタイムアウトまで待つ（画面変化だけでの
+        誤判定を防ぐため）。
         """
         elapsed = 0.0
         interval = 0.5
-        prev_hash = ""
 
         while elapsed < timeout:
-            ss = self._backend.capture_screen()
+            ss = self._capture_stable()
             extracted = self._extract_text(ss.image_bytes)
 
             if extracted and text in extracted:
                 logger.info("テキスト検出: %s", text)
                 return
 
-            # OCR未設定時: 画面変化があれば何か表示されたとみなす
-            current_hash = self._image_hash(ss.image_bytes)
-            if prev_hash and current_hash != prev_hash and not self._extract_text(ss.image_bytes):
-                # OCRがない → 変化を検出したので進む
-                logger.debug("画面変化を検出 (wait_for_text fallback)")
-                return
-
-            prev_hash = current_hash
             await asyncio.sleep(interval)
             elapsed += interval
 
@@ -172,6 +151,8 @@ class ActionExecutor:
 
         連続するスクリーンショットの画像ハッシュを比較し、
         指定回数連続で変化がなければ安定とみなす。
+        オーバーレイ（グリッド/カーソル十字）の影響を避けるため
+        生画像で比較する。
         """
         check_interval = 0.3
         min_stable_frames = 3
@@ -180,7 +161,7 @@ class ActionExecutor:
         elapsed = 0.0
 
         while elapsed < timeout:
-            ss = self._backend.capture_screen()
+            ss = self._capture_stable()
             current_hash = self._image_hash(ss.image_bytes)
 
             if prev_hash and current_hash == prev_hash:
@@ -198,6 +179,16 @@ class ActionExecutor:
         logger.debug("wait_for_still がタイムアウト (%.1fs経過)", timeout)
 
     # ── 画像ユーティリティ ─────────────────────────────
+
+    def _capture_stable(self):
+        """安定比較用の生画像を取得（オーバーレイなしを優先）。"""
+        capture_raw = getattr(self._backend, "capture_raw", None)
+        if callable(capture_raw):
+            try:
+                return capture_raw()
+            except Exception:
+                pass
+        return self._backend.capture_screen()
 
     @staticmethod
     def _image_hash(image_bytes: bytes) -> str:

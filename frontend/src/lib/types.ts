@@ -46,3 +46,40 @@ export interface LogEntry {
   message: string;
   level: "action" | "error" | "state" | "complete";
 }
+
+export interface VmStatus {
+  running: boolean;
+  status: string;
+  health: string | null;
+  name: string | null;
+}
+
+export interface TaskHistoryItem {
+  id: string;
+  instruction: string;
+  state: string;
+  success: boolean | null;
+  action_count: number;
+  success_count: number;
+  failure_count: number;
+  updated_at: number;
+}
+
+export interface TaskAction {
+  action_type: string;
+  params: Record<string, unknown>;
+  description: string;
+  success: boolean;
+  error_message: string;
+  duration_ms: number;
+  at: number;
+  reasoning: string;
+  confidence: number;
+}
+
+export interface TaskDetail extends TaskHistoryItem {
+  actions: TaskAction[];
+  subtasks: { id: string; description: string; expected_outcome: string }[];
+  goal: Record<string, unknown>;
+  created_at: number;
+}

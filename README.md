@@ -22,7 +22,7 @@
 │  ┌──────────────┐  ┌─────────────┐  ┌───────────────┐  │
 │  │  frontend    │  │  backend     │  │  websockify   │  │
 │  │  (Next.js)   │  │  (FastAPI)   │  │  (VNC→WS中継) │  │
-│  │  :3000       │  │  :8080       │  │  :6080→vm:5900│  │
+│  │  :3000       │  │  :8081       │  │  :6080→vm:5900│  │
 │  └──────────────┘  └──────┬───────┘  └───────┬───────┘  │
 │                           │                   │          │
 │                           │  ┌────────────────┘          │
@@ -43,7 +43,7 @@
 | websockify | Dockerコンテナ | VNC→WebSocket中継 |
 | vm (QEMU/KVM) | Dockerコンテナ | AIが操作する隔離環境。`/dev/kvm` をマウント |
 
-ブラウザ → `localhost:3000`（frontend）。frontend→backend (`:8080`)、websockify→vm (`vm:5900`)、backend→vm (`vm:5900`) はすべてDocker内部ネットワークで通信。
+ブラウザ → `localhost:3000`（frontend）。frontend→backend (`:8081`)、websockify→vm (`vm:5900`)、backend→vm (`vm:5900`) はすべてDocker内部ネットワークで通信。
 
 ## 技術スタック
 
@@ -70,6 +70,10 @@
 |----|------|--------|------|
 | Linux | QEMU + KVM + Docker | Docker内KVM | ネイティブ動作、最速 |
 | Windows 11 | WSL2 + KVM有効化 + Docker Desktop | Docker内KVM | BIOSで仮想化有効 |
+
+**KVM有効化**: `.env` で `USE_KVM=true` にする（`docker-compose.yml` の `vm` は `/dev/kvm` をマウント済み）。無効時（デフォルト `false`）はTCGソフトウェアエミュレーションで動作するが低速。ホストに `/dev/kvm` がない環境では `devices` の2行を削除すること。
+
+**デバッグ: VM作り直し**: 操作UIのサイドバー「VM管理（デバッグ）」から `VM作り直し` ボタンでVMコンテナを再起動できる（ゲストOSごとクリーンブート、実行中タスクは停止）。backendがDockerソケット（`/var/run/docker.sock` マウント）経由で操作する。API直叩きの場合: `POST /vm/restart`、`GET /vm/status`。
 
 
 ### LLM / AI モデル
@@ -99,6 +103,7 @@
   - エージェント制御用WebSocket
   - websockify連携（VNC→WS中継）
   - タスクキュー管理（バックグラウンドジョブ）
+  - タスク履歴の永続化（`data/tasks/` にJSON保存、`GET /tasks` で履歴取得。再起動で中断扱い）
 
 ## エージェント設計
 
@@ -108,93 +113,128 @@
 
 ## プロジェクト構成
 
-```\nai-desktop-agent/
+```
+ai-desktop-agent/
 ├── pyproject.toml
 ├── README.md
-├── docker-compose.yml       # Docker Compose 構成
+├── docker-compose.yml       # Docker Compose 構成（vm/backend/frontend/websockify）
+├── docker-compose.override.yml  # ローカル用上書き（任意・git管理外）
 ├── Dockerfile               # backend コンテナ定義
-├── .dockerignore
 ├── docs/
 │   └── architecture.md     # エージェント詳細設計
 ├── src/
 │   └── ai_desktop_agent/
-│       ├── __init__.py
 │       ├── main.py              # エントリポイント
-│       ├── config.py            # 設定管理
 │       ├── server/
-│       │   ├── __init__.py
-│       │   ├── app.py           # FastAPIアプリケーション
-│       │   ├── routes.py        # HTTP/WebSocketルート
-│       │   └── static/          # フロントエンド資材
+│       │   ├── app.py           # FastAPIアプリ・REST/WSルート
+│       │   ├── session.py       # タスク実行セッション（状態機械の駆動）
+│       │   ├── store.py         # タスク履歴の永続化（data/tasks）
+│       │   └── vm_control.py    # VMコンテナ管理（Docker経由の再起動）
 │       ├── agent/
-│       │   ├── __init__.py
-│       │   ├── loop.py          # メインエージェントループ（状態機械）
-│       │   ├── planner.py       # タスク分解と計画立案
-│       │   ├── executor.py      # アクション実行エンジン
-│       │   ├── verifier.py      # 実行結果の検証
-│       │   ├── recovery.py      # エラー回復戦略
-│       │   ├── state.py         # エージェント状態管理
+│       │   ├── loop.py          # 状態機械の遷移管理
+│       │   ├── state.py         # Goal/Subtask/履歴の定義
 │       │   └── llm/
-│       │       ├── __init__.py
 │       │       ├── base.py      # LLMプロバイダ抽象インターフェース
-│       │       ├── anthropic.py # Anthropic (Claude)
-│       │       ├── openai.py    # OpenAI (GPT-4o)
-│       │       ├── google.py    # Google (Gemini)
-│       │       ├── ollama.py    # Ollama (ローカル)
-│       │       └── openai_compat.py # OpenAI互換 (vLLM等)
+│       │       ├── factory.py   # プロバイダ生成（openai/anthropic/openrouter/ollama/mock）
+│       │       ├── openai_compat_provider.py # OpenAI互換API実装（画像つき判断の中核）
+│       │       ├── types.py     # 決定・検証・回復の型定義
+│       │       └── mock.py      # テスト用モック
 │       ├── vm/
-│       │   ├── __init__.py
-│       │   ├── base.py          # VMバックエンド抽象化
-│       │   ├── vnc_client.py    # VNC接続と制御
-│       │   └── screenshot.py    # 画面キャプチャ + OCR
+│       │   ├── base.py          # 表示バックエンド抽象化
+│       │   ├── vnc_client.py    # VNC接続と制御（vncdotool）
+│       │   ├── screenshot.py    # 画面キャプチャ値オブジェクト
+│       │   ├── overlay.py       # 座標グリッド重畳・領域ズーム
+│       │   └── fake.py          # テスト用フェイク
 │       └── actions/
-│           ├── __init__.py
-│           ├── primitives.py    # 基本アクション定義
-│           └── executor.py      # アクション実行 (vncdotool)
+│           ├── primitives.py    # アクション定義・バリデーション
+│           └── executor.py      # アクション実行エンジン
 ├── vm/                          # VMコンテナ用ビルドコンテキスト
 │   ├── Dockerfile               # QEMU/KVMコンテナ
-│   └── entrypoint.sh            # QEMU起動スクリプト
+│   ├── entrypoint.sh            # QEMU起動スクリプト
+│   ├── build-vm-image.sh        # ゲストOSイメージ構築
+│   ├── desktop.qcow2            # ゲストディスク（生成物・git管理外）
+│   ├── vmlinuz / initrd.img / cmdline.txt  # ゲストカーネル一式（生成物）
 ├── frontend/                    # Next.js アプリケーション
 │   ├── package.json
-│   ├── next.config.js
 │   ├── src/
 │   │   ├── app/
 │   │   │   ├── layout.tsx
-│   │   │   ├── page.tsx        # メインダッシュボード
+│   │   │   ├── page.tsx        # メインダッシュボード（状態復元つき）
 │   │   │   └── globals.css
 │   │   ├── components/
-│   │   │   ├── ChatPanel.tsx    # 指示入力 + ログ
-│   │   │   ├── VMViewer.tsx     # noVNC埋め込み
-│   │   │   └── VMControls.tsx   # VM管理パネル
+│   │   │   ├── InstructionInput.tsx  # 指示入力
+│   │   │   ├── LogPanel.tsx          # 操作ログ
+│   │   │   ├── StatusPanel.tsx       # エージェント状態
+│   │   │   ├── StatusBar.tsx         # VNC/VM状態バー
+│   │   │   ├── ControlPanel.tsx      # 一時停止/再開/停止
+│   │   │   ├── VMControls.tsx        # VM管理（デバッグ用作り直し）
+│   │   │   ├── TaskHistory.tsx       # タスク履歴
+│   │   │   └── VncViewer.tsx         # noVNC埋め込み＋状態表示
+│   │   ├── hooks/
+│   │   │   └── useWebSocket.ts       # WebSocketクライアント
 │   │   └── lib/
-│   │       └── websocket.ts    # WebSocketクライアント
-│   └── public/
-│       └── novnc/              # noVNC静的ファイル
-└── scripts/
-    ├── start_vm.sh
-    └── setup_vm_image.sh
+│   │       ├── api.ts                # backend APIクライアント
+│   │       └── types.ts
+├── websockify/                  # VNC→WebSocket中継コンテキスト
+└── data/tasks/                      # タスク履歴の保存先（git管理外）
+```
+
+## 使い方
+
+### 起動
+
+```bash
+cp .env.example .env   # APIキー・USE_KVMを設定
+docker compose up -d --build
+```
+
+* 操作UI: `http://localhost:3000`
+* backend: `http://localhost:8081`（`/health`で確認）
+* 3000番が他プロセスと競合する場合は `docker-compose.override.yml` でずらす
+
+### 主なAPI
+
+| メソッド | パス | 用途 |
+|---|---|---|
+| GET | `/health` | 生存確認 |
+| POST | `/tasks` | タスク投入（`{"instruction": "..."}`） |
+| GET | `/tasks` | 履歴一覧 |
+| GET | `/tasks/{id}` | タスク詳細（操作履歴つき） |
+| GET | `/tasks/current` | 最新タスク状態（リロード後の復元用） |
+| POST | `/tasks/current/{pause,resume,stop}` | タスク制御 |
+| GET | `/vm/status` | VMコンテナ状態 |
+| POST | `/vm/restart` | VM作り直し（再起動） |
+| WS | `/ws` | 状態・操作ログのプッシュ配信 |
+
+### 開発
+
+```bash
+uv run pytest -q          # backendテスト
+uv run ruff check src tests
+cd frontend && npm test   # frontendテスト（vitest）
 ```
 
 ## 安全性設計
 
 - **VM隔離**: AIはサンドボックスVM内で動作し、ホストに影響を与えない
-- **アクションレート制限**: ループ暴走の防止（1秒あたり最大Nアクション）
-- **ユーザー割り込み**: Web UIからいつでもエージェントを停止可能
-- **操作ログ**: 全アクションを記録、チャットパネルで確認可能
-- **アクションホワイトリスト**: 危険操作（`rm -rf`、`sudo`等）はデフォルトブロック、明示許可制
+- **ステップ上限**: 1タスク200アクションで打ち切り（トークン燃費対策）
+- **ユーザー割り込み**: Web UIからいつでも一時停止・停止可能
+- **操作ログ**: 全アクション＋LLMの判断理由を記録・永続化し、履歴から確認可能
+- **画面ブランク対策**: ゲストのDPMS無効化＋真っ黒検出時の自動ウェイク
+- 未実装: アクションレート制限、危険操作のホワイトリスト（予定）
 
 ## ロードマップ
 
-- [ ] QEMU VMの基本管理（Dockerコンテナ内で起動/停止）
-- [ ] VNC経由の画面キャプチャと操作実行
-- [ ] LLMプロバイダ抽象化レイヤー（Anthropic / OpenAI / Gemini / Ollama）
-- [ ] 多段階エージェントパイプライン（計画→実行→検証→回復）
-- [ ] FastAPIバックエンド + WebSocket
-- [ ] noVNC統合（ライブ視聴）
-- [ ] Next.jsフロントエンド（チャット + ビューア）
-- [ ] OCRによる画面テキスト抽出
-- [ ] 操作履歴とログ機能
-- [ ] エラーリカバリとリトライ戦略
+- [x] QEMU VMの基本管理（Dockerコンテナ内で起動/停止）
+- [x] VNC経由の画面キャプチャと操作実行
+- [x] LLMプロバイダ抽象化レイヤー（OpenAI互換でAnthropic / OpenAI / Gemini / Ollama対応）
+- [x] 多段階エージェントパイプライン（計画→実行→検証→回復）
+- [x] FastAPIバックエンド + WebSocket
+- [x] noVNC統合（ライブ視聴）
+- [x] Next.jsフロントエンド（チャット + ビューア）
+- [x] 操作履歴とログ機能（永続化つき）
+- [x] エラーリカバリとリトライ戦略
+- [ ] OCRによる画面テキスト抽出（現在はVLMの読解に依存）
 - [ ] 複数VM対応
 - [ ] 定型タスクのテンプレート機能
 

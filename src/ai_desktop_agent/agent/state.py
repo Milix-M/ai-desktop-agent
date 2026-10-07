@@ -128,12 +128,16 @@ class ActionRecord:
         success: アクションが成功したかどうか。
         error_message: 失敗時のエラーメッセージ。
         duration_ms: 実行にかかった時間（ミリ秒）。
+        reasoning: LLMの判断理由（デバッグ・監査用）。
+        confidence: LLMの確信度。
     """
 
     action: Action
     success: bool
     error_message: str = ""
     duration_ms: float = 0.0
+    reasoning: str = ""
+    confidence: float = 1.0
 
 
 @dataclass
@@ -175,7 +179,13 @@ class AgentContext:
         return self.current_subtask
 
     def record_action(
-        self, action: Action, success: bool, error: str = "", duration_ms: float = 0.0
+        self,
+        action: Action,
+        success: bool,
+        error: str = "",
+        duration_ms: float = 0.0,
+        reasoning: str = "",
+        confidence: float = 1.0,
     ) -> None:
         """アクションの実行結果を履歴に記録する。"""
         self.action_history.append(
@@ -184,6 +194,8 @@ class AgentContext:
                 success=success,
                 error_message=error,
                 duration_ms=duration_ms,
+                reasoning=reasoning,
+                confidence=confidence,
             )
         )
 

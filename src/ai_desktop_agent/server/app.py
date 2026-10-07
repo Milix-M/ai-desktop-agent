@@ -6,17 +6,55 @@ WebSocket でフロントエンドと通信し、TaskSession を管理する。
 
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ai_desktop_agent.server.session import TaskSession
+from ai_desktop_agent.server.store import TaskStore
+from ai_desktop_agent.server.vm_control import (
+    DockerUnavailableError,
+    get_vm_controller,
+)
+
+logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Desktop Agent", version="0.1.0")
+
+# ── 永続化ストア（遅延初期化：テスト時は差し替え可能） ──
+
+_store: TaskStore | None = None
+
+
+def get_store() -> TaskStore:
+    """タスク永続化ストアを返す（初回利用時に初期化）。"""
+    global _store
+    if _store is None:
+        _store = TaskStore()
+    return _store
+
+
+def _default_create_session() -> TaskSession:
+    return TaskSession(store=get_store())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """起動時に中断タスクをマークする。"""
+    try:
+        marked = get_store().mark_interrupted()
+        if marked:
+            logger.info("起動時に中断タスク %d 件をマーク", marked)
+    except Exception:
+        logger.exception("タスクストアの初期化に失敗")
+    yield
+
+
+app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
 
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
 app.add_middleware(
@@ -31,7 +69,7 @@ app.add_middleware(
 _active_session: TaskSession | None = None
 
 # テスト用のセッションファクトリ。テストから差し替え可能。
-_create_session = TaskSession  # type: ignore[var-annotated]
+_create_session = _default_create_session  # type: ignore[var-annotated]
 
 # WebSocket コールバックのグローバルレジストリ
 # セッションより長生きする WebSocket 接続のコールバックを保持し、
@@ -53,6 +91,60 @@ class TaskStatus(BaseModel):
     action_count: int
     success_count: int
     failure_count: int
+
+
+class VmStatus(BaseModel):
+    running: bool
+    status: str
+    health: str | None = None
+    name: str | None = None
+
+
+class StoredActionItem(BaseModel):
+    action_type: str
+    params: dict = {}
+    description: str = ""
+    success: bool = True
+    error_message: str = ""
+    duration_ms: float = 0.0
+    at: float = 0.0
+    reasoning: str = ""
+    confidence: float = 1.0
+
+
+class TaskSummary(BaseModel):
+    id: str
+    instruction: str
+    state: str
+    success: bool | None = None
+    action_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    updated_at: float = 0.0
+
+
+class TaskDetail(TaskSummary):
+    actions: list[StoredActionItem] = []
+    subtasks: list[dict] = []
+    goal: dict = {}
+    created_at: float = 0.0
+
+
+def _to_summary(d: dict) -> TaskSummary:
+    return TaskSummary(
+        id=d.get("id", ""),
+        instruction=d.get("instruction", ""),
+        state=d.get("state", "idle"),
+        success=d.get("success"),
+        action_count=d.get("action_count", 0),
+        success_count=d.get("success_count", 0),
+        failure_count=d.get("failure_count", 0),
+        updated_at=d.get("updated_at", 0.0),
+    )
+
+
+# テスト用の VM コントローラファクトリ。テストから差し替え可能。
+_get_vm_controller = get_vm_controller
 
 
 # ── REST API ──────────────────────────────────────────
@@ -91,17 +183,57 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
 
 @app.get("/tasks/current", response_model=TaskStatus)
 async def get_current_task() -> TaskStatus:
-    """現在のタスク状態を返す。"""
-    if _active_session is None:
+    """現在のタスク状態を返す。
+
+    ライブセッションがなければ、永続化された最新タスクを返す
+    （ブラウザリロード後も状態が分かるように）。
+    """
+    if _active_session is not None:
+        return _make_status(_active_session)
+    latest = get_store().latest()
+    if latest is not None:
+        d = latest.to_dict()
         return TaskStatus(
-            session_id=None,
-            state="idle",
+            session_id=d.get("id"),
+            state=d.get("state", "idle"),
             is_running=False,
-            action_count=0,
-            success_count=0,
-            failure_count=0,
+            action_count=d.get("action_count", 0),
+            success_count=d.get("success_count", 0),
+            failure_count=d.get("failure_count", 0),
         )
-    return _make_status(_active_session)
+    return TaskStatus(
+        session_id=None,
+        state="idle",
+        is_running=False,
+        action_count=0,
+        success_count=0,
+        failure_count=0,
+    )
+
+
+@app.get("/tasks", response_model=list[TaskSummary])
+async def list_tasks(limit: int = 20) -> list[TaskSummary]:
+    """タスク履歴を新しい順に返す。"""
+    return [_to_summary(r.to_dict()) for r in get_store().list(limit=limit)]
+
+
+@app.get("/tasks/{task_id}", response_model=TaskDetail)
+async def get_task(task_id: str) -> TaskDetail:
+    """タスク詳細（操作履歴つき）を返す。リロード後のログ復元用。"""
+    from fastapi import HTTPException
+
+    rec = get_store().load(task_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    d = rec.to_dict()
+    summary = _to_summary(d)
+    return TaskDetail(
+        **summary.model_dump(),
+        actions=[StoredActionItem(**a) for a in d.get("actions", [])],
+        subtasks=d.get("subtasks", []),
+        goal=d.get("goal", {}),
+        created_at=d.get("created_at", 0.0),
+    )
 
 
 @app.post("/tasks/current/pause")
@@ -126,6 +258,43 @@ async def stop_task() -> dict[str, str]:
         _active_session.stop()
         return {"status": "stopped"}
     return {"status": "no_session"}
+
+
+# ── VM 管理（デバッグ用） ─────────────────────────────
+
+
+@app.get("/vm/status", response_model=VmStatus)
+async def vm_status() -> VmStatus:
+    """VMコンテナの状態を返す。Docker未利用時は 503。"""
+    from fastapi import HTTPException
+
+    try:
+        info = _get_vm_controller().status()
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return VmStatus(running=info.running, status=info.status, health=info.health, name=info.name)
+
+
+@app.post("/vm/restart", response_model=VmStatus)
+async def vm_restart() -> VmStatus:
+    """VMコンテナを再起動する（ゲストOSごと作り直し）。
+
+    実行中のエージェントタスクがあれば先に停止する。
+    再起動自体は即時戻り、デスクトップが使えるまで数分かかる。
+    """
+    from fastapi import HTTPException
+
+    global _active_session
+
+    if _active_session and _active_session.is_running:
+        _active_session.stop()
+        _active_session = None
+
+    try:
+        info = _get_vm_controller().restart()
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return VmStatus(running=info.running, status=info.status, health=info.health, name=info.name)
 
 
 # ── WebSocket ─────────────────────────────────────────

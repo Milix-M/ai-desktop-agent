@@ -1,15 +1,17 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import VncViewer from "@/components/VncViewer";
 import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
 import ControlPanel from "@/components/ControlPanel";
+import VMControls from "@/components/VMControls";
+import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import StatusBar from "@/components/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { createTask, controlTask } from "@/lib/api";
-import type { WsMessage, LogEntry } from "@/lib/types";
+import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory } from "@/lib/api";
+import type { WsMessage, LogEntry, TaskHistoryItem } from "@/lib/types";
 
 let logIdCounter = 0;
 
@@ -20,6 +22,20 @@ function timeStr(): string {
   });
 }
 
+function epochStr(epochSec: number): string {
+  if (!epochSec) return "--:--";
+  return new Date(epochSec * 1000).toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+const STATE_LABEL: Record<string, string> = {
+  completed: "完了",
+  failed: "失敗",
+  interrupted: "中断（サーバー再起動）",
+};
+
 export default function Home() {
   const [state, setState] = useState("idle");
   const [subtaskIndex, setSubtaskIndex] = useState(0);
@@ -27,6 +43,9 @@ export default function Home() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [vncConnected, setVncConnected] = useState(false);
   const [vmResolution, setVmResolution] = useState<string | undefined>();
+  const [history, setHistory] = useState<TaskHistoryItem[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const mountedRef = useRef(false);
 
   const addLog = useCallback(
     (message: string, level: LogEntry["level"]) => {
@@ -40,6 +59,87 @@ export default function Home() {
     },
     []
   );
+
+  const showTaskDetail = useCallback(
+    async (taskId: string) => {
+      try {
+        const detail = await getTaskDetail(taskId);
+        setSelectedTaskId(taskId);
+        setState(detail.state);
+        setSubtaskCount(detail.subtasks.length);
+        setSubtaskIndex(detail.subtasks.length);
+        const entries: LogEntry[] = [
+          {
+            id: logIdCounter++,
+            time: epochStr(detail.updated_at),
+            message: `タスク: ${detail.instruction || "(指示なし)"}（${
+              STATE_LABEL[detail.state] ?? detail.state
+            }）`,
+            level: "state",
+          },
+          ...detail.actions.flatMap((a) => {
+            const main = {
+              id: logIdCounter++,
+              time: epochStr(a.at),
+              message: `${a.action_type} ${a.description || ""}${
+                a.error_message ? ` [${a.error_message}]` : ""
+              }`,
+              level: (a.success ? "action" : "error") as LogEntry["level"],
+            };
+            if (a.reasoning) {
+              const short =
+                a.reasoning.length > 140
+                  ? a.reasoning.slice(0, 140) + "..."
+                  : a.reasoning;
+              return [
+                main,
+                {
+                  id: logIdCounter++,
+                  time: epochStr(a.at),
+                  message: `判断: ${short}`,
+                  level: "state" as LogEntry["level"],
+                },
+              ];
+            }
+            return [main];
+          }),
+        ];
+        setLogs(entries);
+      } catch {
+        addLog("タスク詳細の取得に失敗", "error");
+      }
+    },
+    [addLog]
+  );
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      setHistory(await getTaskHistory());
+    } catch {
+      // 履歴なしでも継続
+    }
+  }, []);
+
+  // 初回マウント時：現在の状態を復元（リロード対応）
+  useEffect(() => {
+    if (mountedRef.current) return;
+    mountedRef.current = true;
+    (async () => {
+      try {
+        const current = await getCurrentTask();
+        if (current.session_id && !current.is_running) {
+          // 実行中でない永続タスク → 詳細を復元
+          await showTaskDetail(current.session_id);
+        } else if (current.session_id && current.is_running) {
+          setState(current.state);
+          addLog("実行中のタスクに再接続", "state");
+        }
+      } catch {
+        addLog("状態の復元に失敗", "error");
+      }
+      refreshHistory();
+    })();
+  }, [addLog, refreshHistory, showTaskDetail]);
 
   const handleWsMessage = useCallback(
     (data: WsMessage) => {
@@ -68,10 +168,11 @@ export default function Home() {
             data.success ? "complete" : "error"
           );
           setState(data.success ? "completed" : "failed");
+          refreshHistory();
           break;
       }
     },
-    [addLog]
+    [addLog, refreshHistory]
   );
 
   useWebSocket(handleWsMessage);
@@ -97,6 +198,7 @@ export default function Home() {
 
   const handleSubmit = useCallback(
     async (instruction: string) => {
+      setSelectedTaskId(null);
       addLog(`${instruction}`, "action");
       const result = await createTask(instruction);
       setState(result.state);
@@ -136,6 +238,14 @@ export default function Home() {
           />
 
           <ControlPanel onControl={handleControl} state={state} />
+
+          <VMControls onLog={(message, level) => addLog(message, level)} />
+
+          <TaskHistory
+            items={history}
+            selectedId={selectedTaskId}
+            onSelect={showTaskDetail}
+          />
 
           <LogPanel entries={logs} />
         </div>

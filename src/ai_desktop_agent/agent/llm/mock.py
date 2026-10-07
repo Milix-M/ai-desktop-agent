@@ -78,6 +78,7 @@ class MockLLMProvider(LLMProvider):
         *,
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
+        zoom_scale: float = 1.0,
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))
         if self._decide_result:
@@ -93,6 +94,8 @@ class MockLLMProvider(LLMProvider):
         self,
         action: ActionDecision,
         expected_effect: str,
+        screenshot: Screenshot | None = None,
+        expected_outcome: str | None = None,
     ) -> VerificationResult:
         if self._verify_result:
             return self._verify_result

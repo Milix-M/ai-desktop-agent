@@ -1,6 +1,7 @@
 # Next.js
 .next/
 node_modules/
+*.tsbuildinfo
 
 # Output
 out/

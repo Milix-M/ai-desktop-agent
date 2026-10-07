@@ -83,6 +83,10 @@ chroot "$TARGET" apt-get install -y --no-install-recommends \
 chroot "$TARGET" apt-get install -y --no-install-recommends \
     plasma-desktop plasma-workspace kwin-x11 sddm konsole \
     firefox xdotool wmctrl xauth dolphin
+# 注意: Ubuntu 24.04 の firefox パッケージは snap 移行用のスタブ。
+# chroot 内では snapd が動かないため実体が入らない。初回起動後に
+# ゲスト内で `sudo snap install firefox` を実行すること。
+# （将来的には Mozilla Team PPA からの firefox-esr 導入を検討）
 chroot "$TARGET" apt-get clean
 rm -rf "$TARGET/var/lib/apt/lists/"* "$TARGET/usr/share/doc/"* \
        "$TARGET/usr/share/man/"* "$TARGET/var/cache/apt/archives/"*
@@ -92,6 +96,8 @@ log "Configuring user + autologin..."
 chroot "$TARGET" useradd -m -s /bin/bash -G sudo agent
 echo "agent:agent" | chroot "$TARGET" chpasswd
 echo "agent ALL=(ALL) NOPASSWD:ALL" > "$TARGET/etc/sudoers.d/agent"
+# sudo 時の hostname 解決警告を抑止
+echo "127.0.1.1 ai-desktop" >> "$TARGET/etc/hosts"
 
 # スクリーンロック無効化（AIエージェント操作用）
 mkdir -p "$TARGET/home/agent/.config"
@@ -110,6 +116,36 @@ AutoSuspend=false
 POWER_EOF
 
 chroot "$TARGET" chown -R agent:agent /home/agent/.config
+
+# ── 画面ブランク防止: DPMS/Xスクリーンセーバを無効化 ──
+# powerdevil の設定だけでは X の DPMS (600秒で消灯) が残るため、
+# ログイン時に xset で確実に切る。VNC が真っ黒になるのを防ぐ。
+mkdir -p "$TARGET/home/agent/.config/autostart"
+cat > "$TARGET/home/agent/.config/autostart/disable-dpms.desktop" <<'DPMS_EOF'
+[Desktop Entry]
+Type=Application
+Name=Disable DPMS
+Exec=sh -c 'xset s off; xset -dpms; xset s noblank'
+X-GNOME-Autostart-enabled=true
+DPMS_EOF
+chroot "$TARGET" chown -R agent:agent /home/agent/.config/autostart
+
+# ── ネットワーク: QEMU user-mode NAT (10.0.0.0/8) 前提で ens3 を DHCP 構成 ──
+# NetworkManager 単独では ens3 が unmanaged になるため netplan で明示する。
+# systemd-resolved の stub にも依存せず QEMU 内蔵DNS (10.0.2.3) を直接使う。
+mkdir -p "$TARGET/etc/netplan"
+cat > "$TARGET/etc/netplan/99-ens3.yaml" <<'NETPLAN_EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    ens3:
+      dhcp4: true
+      dhcp6: false
+NETPLAN_EOF
+chmod 600 "$TARGET/etc/netplan/99-ens3.yaml"
+rm -f "$TARGET/etc/resolv.conf"
+echo "nameserver 10.0.2.3" > "$TARGET/etc/resolv.conf"
 
 # SDDM 自動ログイン: 実際にインストールされたセッションを検出
 SESSION_NAME=""
@@ -160,6 +196,10 @@ for mp in /proc /sys /dev; do umount "$TARGET$mp" 2>/dev/null || true; done
 
 ROOTFS_MB=$(du -sm --exclude="$TARGET/proc" --exclude="$TARGET/sys" --exclude="$TARGET/dev" "$TARGET" | cut -f1)
 DISK_MB=$((ROOTFS_MB + ROOTFS_MB / 2))
+# 最低 15GB を確保（KDE + snap アプリ導入の余裕。3〜4GB では即枯渇する）
+if [ "$DISK_MB" -lt 15360 ]; then
+    DISK_MB=15360
+fi
 log "Phase 3: Creating ext4 (${ROOTFS_MB}MB → ${DISK_MB}MB)..."
 truncate -s "${DISK_MB}M" "$OUTPUT_DIR/disk.raw"
 mkfs.ext4 -F -d "$TARGET" "$OUTPUT_DIR/disk.raw"

@@ -277,7 +277,7 @@ class TestAllActionTypesExecuted:
         [
             (ActionType.MOUSE_MOVE, {"x": 0, "y": 0}),
             (ActionType.LEFT_CLICK, {"x": 10, "y": 20}),
-            (ActionType.RIGHT_CLICK, {}),
+            (ActionType.RIGHT_CLICK, {"x": 10, "y": 20}),
             (ActionType.DOUBLE_CLICK, {"x": 5, "y": 5}),
             (ActionType.MIDDLE_CLICK, {"x": 0, "y": 0}),
             (ActionType.DRAG, {"start_x": 0, "start_y": 0, "end_x": 100, "end_y": 100}),

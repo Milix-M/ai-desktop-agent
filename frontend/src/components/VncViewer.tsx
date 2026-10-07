@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getVncWsUrl } from "@/lib/api";
 
 interface Props {
@@ -9,77 +9,104 @@ interface Props {
 
 export default function VncViewer({ onConnectionChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const rfbRef = useRef<unknown>(null);
+  const rfbRef = useRef<any>(null);
+  const cancelledRef = useRef(false);
+  const onChangeRef = useRef(onConnectionChange);
+  onChangeRef.current = onConnectionChange;
   const [status, setStatus] = useState("未接続");
   const [connected, setConnected] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function init() {
-      try {
-        const { default: RFB } = await import("@novnc/novnc");
-        if (cancelled || !containerRef.current) return;
-
-        const rfb = new RFB(containerRef.current, getVncWsUrl(), {
-          credentials: { password: "" },
-          shared: true,
-          wsProtocols: ["binary"],
-        });
-        rfbRef.current = rfb;
-        rfb.viewOnly = true;
-        rfb.scaleViewport = true;
-        rfb.resizeSession = false;
-
-        (rfb as any).addEventListener("connect", () => {
-          if (cancelled) return;
-          setStatus("接続中");
-          setConnected(true);
-          const w = (rfb as any).fbWidth;
-          const h = (rfb as any).fbHeight;
-          onConnectionChange?.(true, w && h ? `${w}x${h}` : undefined);
-        });
-
-        (rfb as any).addEventListener("disconnect", (e: any) => {
-          if (cancelled) return;
-          setConnected(false);
-          onConnectionChange?.(false);
-          if (e.detail.clean) {
-            setStatus("切断");
-          } else {
-            setStatus("再接続中...");
-            setTimeout(() => {
-              if (!cancelled && rfbRef.current) {
-                (rfbRef.current as any).connect();
-              }
-            }, 3000);
-          }
-        });
-      } catch (e) {
-        if (!cancelled) {
-          setStatus("接続エラー");
-          console.error("noVNC:", e);
-        }
+  const connectRfb = useCallback(async () => {
+    let RFB;
+    try {
+      ({ default: RFB } = await import("@novnc/novnc"));
+    } catch (e) {
+      if (!cancelledRef.current) {
+        setStatus("接続エラー");
+        console.error("noVNC:", e);
       }
+      return;
     }
+    if (cancelledRef.current || !containerRef.current) return;
 
-    init();
+    try {
+      rfbRef.current?.disconnect();
+    } catch {
+      // ignore
+    }
+    rfbRef.current = null;
+    setConnected(false);
+    setStatus("接続中...");
 
+    const rfb = new RFB(containerRef.current, getVncWsUrl(), {
+      credentials: { password: "" },
+      shared: true,
+      wsProtocols: ["binary"],
+    });
+    rfbRef.current = rfb;
+    rfb.viewOnly = true;
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+
+    rfb.addEventListener("connect", () => {
+      if (cancelledRef.current) return;
+      setStatus("接続済み");
+      setConnected(true);
+      const w = rfb.fbWidth;
+      const h = rfb.fbHeight;
+      onChangeRef.current?.(true, w && h ? `${w}x${h}` : undefined);
+    });
+
+    rfb.addEventListener("disconnect", (e: any) => {
+      if (cancelledRef.current) return;
+      setConnected(false);
+      onChangeRef.current?.(false);
+      if (e.detail.clean) {
+        setStatus("切断");
+      } else {
+        setStatus("再接続中...");
+        setTimeout(() => {
+          if (!cancelledRef.current && rfbRef.current) {
+            rfbRef.current.connect();
+          }
+        }, 3000);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    connectRfb();
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       if (rfbRef.current) {
         try {
-          (rfbRef.current as any).disconnect();
+          rfbRef.current.disconnect();
         } catch {
           // ignore
         }
       }
     };
-  }, [onConnectionChange]);
+  }, [connectRfb]);
 
   return (
     <div className="vnc-panel">
       <div ref={containerRef} className="vnc-screen" />
+      <div
+        className={`vnc-status${connected ? " connected" : ""}`}
+        data-testid="vnc-status"
+      >
+        {status}
+      </div>
+      {!connected && (
+        <button
+          className="vnc-reconnect"
+          data-testid="vnc-reconnect"
+          onClick={() => connectRfb()}
+        >
+          再接続
+        </button>
+      )}
     </div>
   );
 }

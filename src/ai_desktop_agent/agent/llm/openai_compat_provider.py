@@ -91,10 +91,12 @@ AI エージェントです。
 - type: {text: str} — テキスト入力
 - key_press: {key: str} — キー押下（enter, escape, tab 等）
 - key_combo: {keys: [str]} — 複合キー（["ctrl", "c"] 等）
-- wait: {seconds: float} — 待機
-- screenshot: {} — 画面再撮影
+- wait: {seconds: float} — 待機（アプリ起動待ちには2〜5秒を使う）
 - region_select: {x: int, y: int, width: int, height: int} — 領域拡大を要求
 - subtask_complete: {} — 現在のサブタスク完了
+
+※ 毎ターン最新の画面が自動で送られるため、画面再取得のためのアクションは不要。
+   アプリの起動を待つ場合は wait を使う。
 
 # 重要なルール
 
@@ -103,6 +105,18 @@ AI エージェントです。
 3. **アクション後は画面変化を待つ**：クリック後は 0.5〜1.0 秒 wait する。
 4. **失敗したら別の方法を試す**：同じ座標を連続クリックしない。
 5. **confidence は正直に**：自信がないのに 0.9 以上を付けない。
+6. **subtask_complete は操作の後に**：そのサブタスクで1つも操作せずに完了宣言すると
+   システムに却下される。まずクリック・入力・キー操作・待機のいずれかを実行し、
+   期待結果が画面に現れたことを確認してから完了を宣言する。
+7. **アプリ起動はキーボード優先**：タスクバーの小さいアイコンへの直接クリックは
+   誤爆しやすいため最後の手段にする。第一選択は Alt+F2（ランナー）→
+   アプリ名を type → Enter。ランナーが使えない場合のみアイコンを使う。
+8. **アプリが無い場合は導入する**：起動を試みて見つからない・起動しない場合、
+   Ctrl+Alt+T で端末を開き `which <アプリ名>` で確認する。無ければ
+   `sudo apt install -y <pkg>` か `sudo snap install <snap>` で導入する
+   （sudo はパスワード不要）。導入後は改めて起動し、画面で確認する。
+   ネットワーク不可等で導入できない場合は、試した手順を reasoning に残した上で
+   完了を宣言する（推測での完了宣言はしない）。
 
 画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
 
@@ -121,7 +135,6 @@ _ACTION_TYPES = [
     "key_press",
     "key_combo",
     "wait",
-    "screenshot",
     "region_select",
     "subtask_complete",
 ]
@@ -321,23 +334,6 @@ _SCHEMA_ACTION = {
                             "height": {"type": "integer"},
                         },
                         "required": ["x", "y", "width", "height"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "screenshot"},
-                    "params": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
                         "additionalProperties": False,
                     },
                     "expected_effect": {"type": "string"},
@@ -640,20 +636,6 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "screenshot"},
-                                "params": {
-                                    "type": "object",
-                                    "properties": {},
-                                    "required": [],
-                                    "additionalProperties": False,
-                                },
-                            },
-                            "required": ["action_type", "params"],
-                            "additionalProperties": False,
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
                                 "action_type": {"const": "subtask_complete"},
                                 "params": {
                                     "type": "object",
@@ -702,6 +684,9 @@ class OpenAICompatProvider(LLMProvider):
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**client_kwargs)
+        # structured output (response_format) が使えるかどうか。
+        # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
+        self._structured_output = True
 
     @property
     def provider_name(self) -> str:
@@ -766,6 +751,7 @@ class OpenAICompatProvider(LLMProvider):
         *,
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
+        zoom_scale: float = 1.0,
     ) -> ActionDecision:
         """現在の画面とコンテキストから次に実行すべきアクションを決定する。
 
@@ -777,6 +763,8 @@ class OpenAICompatProvider(LLMProvider):
             error_context: エラー回復中の場合のエラー情報。
             is_zoomed: このスクリーンショットが拡大表示かどうか。
             zoom_origin: 拡大表示の場合、元画面での左上座標 (x, y)。
+            zoom_scale: 拡大表示の場合の倍率。LLMには拡大後ピクセル座標で
+                返させ、呼び出し側で ``origin + coord / scale`` に戻す。
         """
         history_text = self._format_action_history(action_history[-10:])
 
@@ -794,14 +782,23 @@ class OpenAICompatProvider(LLMProvider):
             zx, zy = zoom_origin
             zoom_block = f"""
 【拡大表示モード】
-この画像は元の画面の領域 ({zx}, {zy}) を起点とする拡大表示です。
-画像内の座標は領域内の相対座標です。
-たとえば画像内の (50, 30) は元画面の ({zx + 50}, {zy + 30}) に相当します。
-精密なクリック座標を画像から直接読み取ってください。
+この画像は元の画面の領域 ({zx}, {zy}) を {zoom_scale:.2f} 倍に拡大したものです。
+画像には相対座標のグリッドが描画されています。ターゲットの位置を
+この拡大画像上のピクセル座標（左上原点）でそのまま返してください。
+元画面への逆変換（origin + coord / scale）はシステムが行います。
+画像外の座標や負の座標は返さないでください。
+"""
+
+        screen_block = f"""
+【画面情報】
+解像度: {screenshot.width}x{screenshot.height}
+有効な座標範囲: 0 <= x < {screenshot.width}, 0 <= y < {screenshot.height}
+範囲外の座標は実行時にクランプされますが、精度が落ちるため範囲内に収めてください。
 """
 
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 {zoom_block}
+{screen_block}
 【ゴール】{goal.description}
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}
@@ -821,8 +818,9 @@ ID: {current_subtask.id}
             action_type = ActionType(action_type_str)
         except ValueError:
             action_type = ActionType.SUBTASK_COMPLETE
+        params = self._clamp_params(action_type, data.get("params", {}), screenshot)
         return ActionDecision(
-            action=Action(action_type=action_type, params=data.get("params", {})),
+            action=Action(action_type=action_type, params=params),
             expected_effect=data.get("expected_effect", ""),
             confidence=float(data.get("confidence", 0.5)),
             reasoning=data.get("reasoning", ""),
@@ -831,9 +829,27 @@ ID: {current_subtask.id}
     # ── 結果検証 ─────────────────────────────────
 
     async def verify_result(
-        self, action: ActionDecision, expected_effect: str
+        self,
+        action: ActionDecision,
+        expected_effect: str,
+        screenshot: Screenshot | None = None,
+        expected_outcome: str | None = None,
     ) -> VerificationResult:
-        prompt = f"""アクションの実行結果を検証してください。
+        if screenshot is not None and expected_outcome:
+            prompt = f"""サブタスクが達成されたか、添付の画面を見て判定してください。
+
+【サブタスクの期待結果】
+{expected_outcome}
+
+【直前のアクション】
+種別: {action.action.action_type.value}
+パラメータ: {action.action.params}
+理由: {action.reasoning}
+
+期待結果が画面上で確認できれば success=true、できなければ false を返してください。
+推測での true は禁止です。"""
+        else:
+            prompt = f"""アクションの実行結果を検証してください。
 
 【実行したアクション】
 種別: {action.action.action_type.value}
@@ -844,7 +860,9 @@ ID: {current_subtask.id}
 
 【LLMの判断理由】
 {action.reasoning}"""
-        data = await self._call(prompt, _SCHEMA_VERIFY)
+        data = await self._call(
+            prompt, _SCHEMA_VERIFY, image_bytes=screenshot.image_bytes if screenshot else None
+        )
         return VerificationResult(
             success=bool(data.get("success", True)),
             reasoning=data.get("reasoning", ""),
@@ -898,21 +916,37 @@ ID: {subtask.id}
         json_schema: dict[str, Any] | None = None,
         image_bytes: bytes | None = None,
     ) -> dict[str, Any]:
-        """OpenAI API を呼び出し、JSON 応答を返す。"""
-        # メッセージ構築
+        """OpenAI API を呼び出し、JSON 応答を返す。
+
+        structured output (response_format) に対応していないモデルでは
+        400系エラーになるため、その場合は通常JSONモード（スキーマ指示を
+        プロンプトに追記＋応答テキストからJSON抽出）に自動フォールバックする。
+        画像は同一解像度のJPEG（q80）に変換して送る。座標系は変わらないまま
+        ペイロードを約1/4に削減し、応答速度とコストを改善する。
+        """
+        # メッセージ構築（座標精度のため detail: high で原解像度を維持）
         if image_bytes:
-            b64 = base64.b64encode(image_bytes).decode("ascii")
+            b64 = base64.b64encode(self._to_jpeg(image_bytes)).decode("ascii")
             user_content: Any = [
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}",
+                        "detail": "high",
+                    },
                 },
             ]
         else:
             user_content = prompt
 
+        use_schema = bool(json_schema) and self._structured_output
+        if json_schema and not use_schema:
+            # 既に非対応と判明している場合は最初からJSON指示付きで呼ぶ
+            user_content = self._with_json_instruction(user_content, json_schema)
+
         max_retries = 3
+        empty_count = 0
         for attempt in range(max_retries):
             try:
                 kwargs: dict[str, Any] = {
@@ -924,7 +958,7 @@ ID: {subtask.id}
                         {"role": "user", "content": user_content},
                     ],
                 }
-                if json_schema:
+                if use_schema:
                     kwargs["response_format"] = {
                         "type": "json_schema",
                         "json_schema": json_schema,
@@ -933,10 +967,9 @@ ID: {subtask.id}
                 response = await self._client.chat.completions.create(**kwargs)
                 text = response.choices[0].message.content or ""
                 if not text:
+                    empty_count += 1
                     raise ValueError("応答が空です")
 
-                if json_schema:
-                    return json.loads(text)  # type: ignore[no-any-return]
                 return self._parse_json(text)
 
             except (json.JSONDecodeError, ValueError) as e:
@@ -947,26 +980,166 @@ ID: {subtask.id}
                     e,
                 )
                 if attempt == max_retries - 1:
+                    if empty_count >= max_retries:
+                        raise ValueError(
+                            "応答が空です（空応答が連続）。モデルが画像付き"
+                            "structured outputに対応していない可能性があります。"
+                            "LLM_MODEL の変更を検討してください"
+                        ) from e
                     raise
-            except Exception:
+            except Exception as e:
+                if use_schema and self._is_unsupported_error(e):
+                    logger.warning(
+                        "structured output 非対応のため通常JSONモードに切替: %s",
+                        e,
+                    )
+                    self._structured_output = False
+                    use_schema = False
+                    if json_schema is not None:
+                        user_content = self._with_json_instruction(user_content, json_schema)
+                    continue
                 logger.exception("API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries)
                 if attempt == max_retries - 1:
                     raise
         return {}
 
     @staticmethod
+    def _to_jpeg(image_bytes: bytes, quality: int = 80) -> bytes:
+        """PNG画像を同一解像度のJPEGに変換する（座標系不変・軽量化）。
+
+        変換に失敗したら元のバイト列をそのまま返す。
+        """
+        try:
+            import io
+
+            from PIL import Image
+
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=quality)
+                return buf.getvalue()
+        except Exception:
+            logger.debug("JPEG変換に失敗、PNGのまま送信")
+            return image_bytes
+
+    @staticmethod
+    def _is_unsupported_error(e: Exception) -> bool:
+        """response_format 非対応を示すエラーかどうかを判定する。
+
+        401（認証）や429（レート制限）はフォールバック対象外とし、
+        response_format 付きリクエストでの400/404/422系のみ対象とする。
+        """
+        msg = str(e).lower()
+        if getattr(e, "status_code", None) in (400, 404, 422):
+            return True
+        return "response_format" in msg or "json_schema" in msg
+
+    @staticmethod
+    def _with_json_instruction(user_content: Any, json_schema: dict[str, Any]) -> Any:
+        """response_format の代わりにプロンプトへJSON指示を追記する。"""
+        instruction = (
+            "\n\n必ずJSONオブジェクトのみで返答してください"
+            "（前後の説明文やコードフェンスは禁止）。"
+            "以下のJSONスキーマに従うこと:\n" + json.dumps(json_schema, ensure_ascii=False)
+        )
+        if isinstance(user_content, str):
+            return user_content + instruction
+        if isinstance(user_content, list):
+            updated = list(user_content)
+            for i, part in enumerate(updated):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    updated[i] = {**part, "text": part.get("text", "") + instruction}
+                    break
+            return updated
+        return user_content
+
+    @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """LLM応答テキストからJSONを抽出してパースする（フォールバック用）。"""
-        text = text.strip()
-        if "```json" in text:
-            start = text.index("```json") + 7
-            end = text.index("```", start)
-            text = text[start:end].strip()
-        elif "```" in text:
-            start = text.index("```") + 3
-            end = text.index("```", start)
-            text = text[start:end].strip()
-        return json.loads(text)
+        """LLM応答テキストからJSONを抽出してパースする。
+
+        通常JSONモードでは説明文が混ざることがあるため、
+        全体→コードフェンス→先頭{〜末尾}の順で試す。
+        """
+        stripped = text.strip()
+        first_error: json.JSONDecodeError | None = None
+        try:
+            return json.loads(stripped)  # type: ignore[no-any-return]
+        except json.JSONDecodeError as e:
+            first_error = e
+
+        candidate = stripped
+        if "```json" in candidate:
+            start = candidate.index("```json") + 7
+            end = candidate.index("```", start)
+            candidate = candidate[start:end].strip()
+        elif "```" in candidate:
+            start = candidate.index("```") + 3
+            end = candidate.index("```", start)
+            candidate = candidate[start:end].strip()
+        try:
+            return json.loads(candidate)  # type: ignore[no-any-return]
+        except json.JSONDecodeError:
+            pass
+
+        # 最後の手段：最初と最後の波括弧で切り出す
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(stripped[start : end + 1])  # type: ignore[no-any-return]
+            except json.JSONDecodeError:
+                pass
+        raise first_error or ValueError(f"JSONを抽出できません: {text[:100]}")
+
+    @staticmethod
+    def _clamp_params(
+        action_type: ActionType, params: dict[str, Any], screenshot: Screenshot
+    ) -> dict[str, Any]:
+        """LLMが返した座標を画面内にクランプする。
+
+        範囲外座標は実行時にずれる原因になるため、ここで丸める。
+        region_select の幅・高さは最低16pxを保証する。
+        """
+        if not isinstance(params, dict):
+            return {}
+        clamped = dict(params)
+        w, h = screenshot.width, screenshot.height
+
+        def _clamp_int(v: Any, lo: int, hi: int) -> int:
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                iv = lo
+            return max(lo, min(iv, hi))
+
+        if action_type in (
+            ActionType.MOUSE_MOVE,
+            ActionType.LEFT_CLICK,
+            ActionType.RIGHT_CLICK,
+            ActionType.MIDDLE_CLICK,
+            ActionType.DOUBLE_CLICK,
+        ):
+            if "x" in clamped:
+                clamped["x"] = _clamp_int(clamped["x"], 0, max(0, w - 1))
+            if "y" in clamped:
+                clamped["y"] = _clamp_int(clamped["y"], 0, max(0, h - 1))
+        elif action_type == ActionType.DRAG:
+            for k in ("start_x", "end_x"):
+                if k in clamped:
+                    clamped[k] = _clamp_int(clamped[k], 0, max(0, w - 1))
+            for k in ("start_y", "end_y"):
+                if k in clamped:
+                    clamped[k] = _clamp_int(clamped[k], 0, max(0, h - 1))
+        elif action_type == ActionType.REGION_SELECT:
+            if "x" in clamped:
+                clamped["x"] = _clamp_int(clamped["x"], 0, max(0, w - 1))
+            if "y" in clamped:
+                clamped["y"] = _clamp_int(clamped["y"], 0, max(0, h - 1))
+            if "width" in clamped:
+                clamped["width"] = max(16, min(int(clamped["width"]), w))
+            if "height" in clamped:
+                clamped["height"] = max(16, min(int(clamped["height"]), h))
+        return clamped
 
     @staticmethod
     def _format_action_history(history: list[ActionRecord]) -> str:
