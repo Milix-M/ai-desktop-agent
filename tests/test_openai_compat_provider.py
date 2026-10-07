@@ -400,6 +400,34 @@ class TestOpenAICompatProvider:
         schema_text = _json.dumps(_SCHEMA_ACTION)
         assert '"screenshot"' not in schema_text
 
+    # ── x-opencode-session ─────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_session_id_header_sent(self, provider):
+        """session_id 設定時は x-opencode-session が付く。"""
+        provider.session_id = "task123"
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {"action_type": "wait", "params": {}, "confidence": 1.0, "reasoning": "ok"}
+            )
+        )
+        await provider._call("prompt")
+        kwargs = provider._client.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_headers"] == {"x-opencode-session": "task123"}
+
+    @pytest.mark.asyncio
+    async def test_no_session_header_by_default(self, provider):
+        """未設定時はヘッダを付けない。"""
+        assert provider.session_id is None
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {"action_type": "wait", "params": {}, "confidence": 1.0, "reasoning": "ok"}
+            )
+        )
+        await provider._call("prompt")
+        kwargs = provider._client.chat.completions.create.call_args.kwargs
+        assert "extra_headers" not in kwargs
+
 
 # ── LLMProviderFactory ────────────────────────────────
 

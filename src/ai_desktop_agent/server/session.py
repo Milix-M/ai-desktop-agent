@@ -76,6 +76,10 @@ class TaskSession:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
         self.llm = llm or create_llm_provider()
+        if hasattr(self.llm, "session_id"):
+            # 会話単位IDをLLMに引き渡す（OpenCode Go の x-opencode-session 用）。
+            # タスク内では不変のため、生成直後の1回だけ設定する。
+            self.llm.session_id = self.id
         self._store = store
         self._instruction = ""
         self._created_at = time.time()
