@@ -40,7 +40,7 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmN
             key={item.id}
             className={`history-item${item.id === selectedId ? " selected" : ""}`}
           >
-            <button className="history-main" onClick={() => onSelect(item.id)}>
+            <button className="history-main" onClick={() => onSelect(item.id)} title={item.instruction || undefined}>
               <span className="history-row">
                 <span className="history-state">
                   {STATE_LABEL[item.state] ?? item.state}
