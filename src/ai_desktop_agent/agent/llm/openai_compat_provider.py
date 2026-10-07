@@ -674,15 +674,22 @@ class OpenAICompatProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.0,
         base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        # 会話単位ID（OpenCode Go の x-opencode-session 用）。
+        # タスクごとに TaskSession が設定する。
+        self.session_id = session_id
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
         client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
         self._client = AsyncOpenAI(**client_kwargs)
         # structured output (response_format) が使えるかどうか。
         # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
@@ -963,6 +970,8 @@ ID: {subtask.id}
                         "type": "json_schema",
                         "json_schema": json_schema,
                     }
+                if self.session_id:
+                    kwargs["extra_headers"] = {"x-opencode-session": self.session_id}
 
                 response = await self._client.chat.completions.create(**kwargs)
                 text = response.choices[0].message.content or ""

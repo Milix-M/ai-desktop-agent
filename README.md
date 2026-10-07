@@ -87,6 +87,8 @@
 | Google | Gemini |
 | ローカル (Ollama) | Llama, Qwen 等 |
 | OpenAI互換 (vLLM) | 任意 |
+| OpenCode Zen | DeepSeek / GPT / Claude / Gemini 等（`chat/completions`互換モデル） |
+| OpenCode Go | 月額制のopenモデル群（`chat/completions`互換モデル。独自UA付き） |
 
 ### フロントエンド
 
@@ -135,7 +137,7 @@ ai-desktop-agent/
 │       │   ├── state.py         # Goal/Subtask/履歴の定義
 │       │   └── llm/
 │       │       ├── base.py      # LLMプロバイダ抽象インターフェース
-│       │       ├── factory.py   # プロバイダ生成（openai/anthropic/openrouter/ollama/mock）
+│       │       ├── factory.py   # プロバイダ生成（openai/anthropic/openrouter/opencode/ollama/mock）
 │       │       ├── openai_compat_provider.py # OpenAI互換API実装（画像つき判断の中核）
 │       │       ├── types.py     # 決定・検証・回復の型定義
 │       │       └── mock.py      # テスト用モック
@@ -227,7 +229,7 @@ cd frontend && npm test   # frontendテスト（vitest）
 
 - [x] QEMU VMの基本管理（Dockerコンテナ内で起動/停止）
 - [x] VNC経由の画面キャプチャと操作実行
-- [x] LLMプロバイダ抽象化レイヤー（OpenAI互換でAnthropic / OpenAI / Gemini / Ollama対応）
+- [x] LLMプロバイダ抽象化レイヤー（OpenAI互換でAnthropic / OpenAI / Gemini / Ollama / OpenCode Zen対応）
 - [x] 多段階エージェントパイプライン（計画→実行→検証→回復）
 - [x] FastAPIバックエンド + WebSocket
 - [x] noVNC統合（ライブ視聴）

@@ -496,3 +496,31 @@ class TestSlowVmGuards:
 
         ex = ActionExecutor(FakeDisplayBackend())
         await asyncio.wait_for(ex.wait_for_still(timeout=5.0), timeout=10)
+class TestSessionIdWiring:
+    """TaskSession.id がLLMの会話単位IDになること。"""
+
+    def test_provider_receives_session_id(self):
+        from unittest.mock import patch
+
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ):
+            from ai_desktop_agent.agent.llm.openai_compat_provider import (
+                OpenAICompatProvider,
+            )
+
+            provider = OpenAICompatProvider(api_key="k")
+        session = TaskSession(llm=provider, display=FakeDisplayBackend())
+        assert provider.session_id == session.id
+
+    def test_mock_llm_without_session_id_ok(self):
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
+        assert session.id  # 属性がなくても生成できること

@@ -400,6 +400,34 @@ class TestOpenAICompatProvider:
         schema_text = _json.dumps(_SCHEMA_ACTION)
         assert '"screenshot"' not in schema_text
 
+    # ── x-opencode-session ─────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_session_id_header_sent(self, provider):
+        """session_id 設定時は x-opencode-session が付く。"""
+        provider.session_id = "task123"
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {"action_type": "wait", "params": {}, "confidence": 1.0, "reasoning": "ok"}
+            )
+        )
+        await provider._call("prompt")
+        kwargs = provider._client.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_headers"] == {"x-opencode-session": "task123"}
+
+    @pytest.mark.asyncio
+    async def test_no_session_header_by_default(self, provider):
+        """未設定時はヘッダを付けない。"""
+        assert provider.session_id is None
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {"action_type": "wait", "params": {}, "confidence": 1.0, "reasoning": "ok"}
+            )
+        )
+        await provider._call("prompt")
+        kwargs = provider._client.chat.completions.create.call_args.kwargs
+        assert "extra_headers" not in kwargs
+
 
 # ── LLMProviderFactory ────────────────────────────────
 
@@ -468,6 +496,65 @@ class TestLLMProviderFactory:
         ):
             p = create_llm_provider(provider="openrouter")
         assert p.provider_name == "openai_compat"
+
+    # ── opencode (OpenCode Zen) ──────────────────────
+
+    def test_opencode_with_api_key(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            p = create_llm_provider(provider="opencode", api_key="sk-opencode-test")
+        assert p.provider_name == "openai_compat"
+        assert p.model_name == "deepseek-v4.1-flash"
+        _, kwargs = mock_client.call_args
+        assert kwargs["base_url"] == "https://opencode.ai/zen/v1"
+
+    def test_opencode_requires_key(self):
+        with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
+            with pytest.raises(ValueError, match="OPENCODE_API_KEY"):
+                create_llm_provider(provider="opencode")
+
+    def test_opencode_from_env(self):
+        with (
+            patch("openai.AsyncOpenAI", autospec=True),
+            patch.dict("os.environ", {"OPENCODE_API_KEY": "sk-env"}),
+        ):
+            p = create_llm_provider(provider="opencode")
+        assert p.provider_name == "openai_compat"
+
+    def test_opencode_custom_model(self):
+        with patch("openai.AsyncOpenAI", autospec=True):
+            p = create_llm_provider(provider="opencode", api_key="sk-test", model="qwen3.8-max")
+        assert p.model_name == "qwen3.8-max"
+
+    # ── opencode-go ────────────────────────────────
+
+    def test_opencode_go_with_api_key(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            p = create_llm_provider(provider="opencode-go", api_key="sk-go-test")
+        assert p.provider_name == "openai_compat"
+        assert p.model_name == "deepseek-v4.1-flash"
+        _, kwargs = mock_client.call_args
+        assert kwargs["base_url"] == "https://opencode.ai/zen/go/v1"
+        assert kwargs["default_headers"]["User-Agent"] == "ai-desktop-agent/0.1.0"
+
+    def test_opencode_go_requires_key(self):
+        with patch.dict("os.environ", {}, clear=True):  # noqa: SIM117
+            with pytest.raises(ValueError, match="OPENCODE_GO_API_KEY"):
+                create_llm_provider(provider="opencode-go")
+
+    def test_opencode_sends_user_agent(self):
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            create_llm_provider(provider="opencode", api_key="sk-test")
+        _, kwargs = mock_client.call_args
+        assert kwargs["default_headers"]["User-Agent"] == "ai-desktop-agent/0.1.0"
 
     # ── ollama ───────────────────────────────────────
 
