@@ -104,6 +104,7 @@ class TaskSession:
         llm: LLMProvider | None = None,
         display: DisplayBackend | None = None,
         store: TaskStore | None = None,
+        vm_id: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
@@ -115,6 +116,8 @@ class TaskSession:
         self._store = store
         self._instruction = ""
         self._created_at = time.time()
+        # 実行対象VMのID（複数VMの並列実行用）
+        self.vm_id = vm_id
 
         if display is not None:
             self.display = display
