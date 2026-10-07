@@ -28,11 +28,12 @@ const ITEMS: TaskHistoryItem[] = [
 ];
 
 describe("TaskHistory", () => {
-  it("renders nothing when empty", () => {
-    const { container } = render(
+  it("renders empty state when no items", () => {
+    render(
       <TaskHistory items={[]} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText("履歴（0件）")).toBeInTheDocument();
+    expect(screen.getByText("履歴なし")).toBeInTheDocument();
   });
 
   it("renders items with state labels", () => {

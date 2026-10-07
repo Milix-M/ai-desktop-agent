@@ -12,6 +12,7 @@ import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import StatusBar from "@/components/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useSidebarWidth } from "@/hooks/useSidebarWidth";
 import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, getVncWsUrl } from "@/lib/api";
 import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo, VmInfo } from "@/lib/types";
 
@@ -51,6 +52,8 @@ export default function Home() {
   const [vms, setVms] = useState<VmInfo[]>([]);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [creatingVm, setCreatingVm] = useState(false);
+  const [vncReset, setVncReset] = useState(0);
+  const { width: sidebarWidth, onResizeStart } = useSidebarWidth();
   const mountedRef = useRef(false);
 
   const addLog = useCallback(
@@ -298,10 +301,27 @@ export default function Home() {
         creating={creatingVm}
       />
       <div className="main-layout">
-        <VncViewer key={vncUrl} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+        <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
 
-        <div className="sidebar">
+        <div
+          className="sidebar-resizer"
+          data-testid="sidebar-resizer"
+          onMouseDown={onResizeStart}
+        />
+
+        <div className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
           <h1>AI Desktop Agent</h1>
+
+          {!vncConnected && (
+            <div className="section">
+              <h2>VNC接続</h2>
+              <div className="controls">
+                <button onClick={() => setVncReset((n) => n + 1)}>
+                  再接続
+                </button>
+              </div>
+            </div>
+          )}
 
           <InstructionInput
             onSubmit={handleSubmit}

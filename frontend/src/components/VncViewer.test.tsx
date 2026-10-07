@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import VncViewer from "@/components/VncViewer";
 
 const listeners: Record<string, ((e?: unknown) => void)[]> = {};
 const instances: unknown[] = [];
@@ -32,8 +32,6 @@ class MockRFB {
 
 vi.mock("@novnc/novnc", () => ({ default: MockRFB }));
 
-import VncViewer from "@/components/VncViewer";
-
 function fire(type: string, event?: unknown) {
   for (const cb of listeners[type] ?? []) cb(event);
 }
@@ -45,14 +43,16 @@ describe("VncViewer", () => {
     instances.length = 0;
   });
 
-  it("shows reconnect button while disconnected", async () => {
-    render(<VncViewer />);
+  it("creates a connection on mount with given url", async () => {
+    render(<VncViewer wsUrl="ws://example:6090" />);
     await waitFor(() => {
-      expect(screen.getByTestId("vnc-reconnect")).toBeInTheDocument();
+      expect(instances.length).toBeGreaterThan(0);
     });
+    const first = instances[0] as MockRFB;
+    expect(first.url).toBe("ws://example:6090");
   });
 
-  it("hides reconnect button when connected, shows on dirty disconnect", async () => {
+  it("notifies connect with resolution", async () => {
     const onChange = vi.fn();
     render(<VncViewer onConnectionChange={onChange} />);
 
@@ -63,24 +63,30 @@ describe("VncViewer", () => {
       fire("connect");
     });
     expect(onChange).toHaveBeenCalledWith(true, "1280x800");
-    expect(screen.queryByTestId("vnc-reconnect")).not.toBeInTheDocument();
+  });
 
+  it("notifies disconnect", async () => {
+    const onChange = vi.fn();
+    render(<VncViewer onConnectionChange={onChange} />);
+
+    await waitFor(() => {
+      expect(instances.length).toBeGreaterThan(0);
+    });
+    await act(async () => {
+      fire("connect");
+    });
     await act(async () => {
       fire("disconnect", { detail: { clean: false } });
     });
-    expect(screen.getByTestId("vnc-reconnect")).toBeInTheDocument();
+    expect(onChange).toHaveBeenCalledWith(false);
   });
 
-  it("manual reconnect creates a new connection", async () => {
-    render(<VncViewer />);
+  it("renders no overlay controls", async () => {
+    const { container } = render(<VncViewer />);
     await waitFor(() => {
-      expect(screen.getByTestId("vnc-reconnect")).toBeInTheDocument();
+      expect(instances.length).toBeGreaterThan(0);
     });
-    const before = instances.length;
-
-    await userEvent.click(screen.getByTestId("vnc-reconnect"));
-    await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(before);
-    });
+    expect(container.querySelector(".vnc-screen")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

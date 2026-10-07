@@ -14,7 +14,6 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
   const cancelledRef = useRef(false);
   const onChangeRef = useRef(onConnectionChange);
   onChangeRef.current = onConnectionChange;
-  const [connected, setConnected] = useState(false);
 
   const connectRfb = useCallback(async () => {
     let RFB;
@@ -34,7 +33,6 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
       // ignore
     }
     rfbRef.current = null;
-    setConnected(false);
 
     const rfb = new RFB(containerRef.current, wsUrl ?? getVncWsUrl(), {
       credentials: { password: "" },
@@ -48,7 +46,6 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
 
     rfb.addEventListener("connect", () => {
       if (cancelledRef.current) return;
-      setConnected(true);
       const w = rfb.fbWidth;
       const h = rfb.fbHeight;
       onChangeRef.current?.(true, w && h ? `${w}x${h}` : undefined);
@@ -56,8 +53,7 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
 
     rfb.addEventListener("disconnect", (e: any) => {
       if (cancelledRef.current) return;
-      setConnected(false);
-      onChangeRef.current?.(false);
+        onChangeRef.current?.(false);
       if (!e.detail.clean) {
         setTimeout(() => {
           if (!cancelledRef.current && rfbRef.current) {
@@ -86,15 +82,6 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
   return (
     <div className="vnc-panel">
       <div ref={containerRef} className="vnc-screen" />
-      {!connected && (
-        <button
-          className="vnc-reconnect"
-          data-testid="vnc-reconnect"
-          onClick={() => connectRfb()}
-        >
-          再接続
-        </button>
-      )}
     </div>
   );
 }

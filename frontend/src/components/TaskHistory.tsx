@@ -29,11 +29,12 @@ function timeStr(epochSec: number): string {
 }
 
 export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmNames = {} }: Props) {
-  if (items.length === 0) return null;
-
   return (
     <div className="section">
-      <h2>履歴</h2>
+      <h2>履歴（{items.length}件）</h2>
+      {items.length === 0 ? (
+        <div className="history-empty">履歴なし</div>
+      ) : (
       <div className="history-list">
         {items.map((item) => (
           <div
@@ -66,6 +67,7 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmN
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }

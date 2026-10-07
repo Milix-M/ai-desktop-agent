@@ -111,6 +111,21 @@ body {
   overflow-y: auto;
 }
 
+.sidebar-resizer {
+  flex-shrink: 0;
+  width: 8px;
+  margin-left: -4px;
+  margin-right: -4px;
+  z-index: 5;
+  cursor: ew-resize;
+  background: transparent;
+}
+
+.sidebar-resizer:hover {
+  background: var(--accent, #4da3ff);
+  opacity: 0.5;
+}
+
 .sidebar h1 {
   font-size: 18px;
   padding: 16px 20px;
@@ -332,6 +347,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
+  min-height: 72px;
 }
 
 .history-item.selected {
@@ -376,35 +392,43 @@ body {
 
 .history-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
 .history-state {
   flex-shrink: 0;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--dim);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 2px 8px;
+  margin-top: 2px;
+}
+
+.history-empty {
+  color: var(--dim);
+  font-size: 14px;
+  padding: 8px 0;
 }
 
 .history-instruction {
   flex: 1;
   min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  font-size: 15px;
-  line-height: 1.6;
+  display: block;
+  white-space: normal;
   overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text);
 }
 
 .history-meta {
   flex-shrink: 0;
-  color: var(--dim);
-  font-size: 12px;
+  color: #9fb3c8;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 /* ── VM tabs ── */
