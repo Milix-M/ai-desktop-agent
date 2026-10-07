@@ -321,6 +321,7 @@ class TaskSession:
                 for s in ctx.subtasks
             ],
             current_subtask_index=ctx.current_subtask_index,
+            vm_id=self.vm_id,
             goal=(
                 {
                     "description": goal.description,

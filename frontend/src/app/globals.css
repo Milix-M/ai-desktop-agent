@@ -404,6 +404,91 @@ body {
   font-size: 11px;
 }
 
+/* ── VM tabs ── */
+.vm-tabs {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.vm-tab {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.vm-tab.selected {
+  border-color: var(--accent, #4da3ff);
+}
+
+.vm-tab-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.vm-dot.green {
+  background: var(--success, #3fb950);
+}
+
+.vm-dot.red {
+  background: #f85149;
+}
+
+.vm-tab-sub {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.vm-tab-delete {
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--dim);
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.vm-tab-delete:hover {
+  background: #5c1a1a;
+  color: #fff;
+}
+
+.vm-tab-add {
+  padding: 6px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vm-tab-add:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 /* ── Collapsible ── */
 .collapsible-toggle {
   display: flex;

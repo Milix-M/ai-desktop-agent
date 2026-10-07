@@ -5,9 +5,10 @@ import { getVncWsUrl } from "@/lib/api";
 
 interface Props {
   onConnectionChange?: (connected: boolean, resolution?: string) => void;
+  wsUrl?: string;
 }
 
-export default function VncViewer({ onConnectionChange }: Props) {
+export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
   const cancelledRef = useRef(false);
@@ -35,7 +36,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
     rfbRef.current = null;
     setConnected(false);
 
-    const rfb = new RFB(containerRef.current, getVncWsUrl(), {
+    const rfb = new RFB(containerRef.current, wsUrl ?? getVncWsUrl(), {
       credentials: { password: "" },
       shared: true,
       wsProtocols: ["binary"],
@@ -65,7 +66,7 @@ export default function VncViewer({ onConnectionChange }: Props) {
         }, 3000);
       }
     });
-  }, []);
+  }, [wsUrl]);
 
   useEffect(() => {
     cancelledRef.current = false;

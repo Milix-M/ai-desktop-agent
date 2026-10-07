@@ -825,7 +825,8 @@ ID: {current_subtask.id}
             action_type = ActionType(action_type_str)
         except ValueError:
             action_type = ActionType.SUBTASK_COMPLETE
-        params = self._clamp_params(action_type, data.get("params", {}), screenshot)
+        params = self._sanitize_params(action_type, data.get("params", {}))
+        params = self._clamp_params(action_type, params, screenshot)
         return ActionDecision(
             action=Action(action_type=action_type, params=params),
             expected_effect=data.get("expected_effect", ""),
@@ -901,13 +902,18 @@ ID: {subtask.id}
 {history_text}"""
         data = await self._call(prompt, _SCHEMA_RECOVER)
         raw_actions = data.get("actions", [])
-        recovery_actions = [
-            Action(
-                action_type=ActionType(a.get("action_type", "wait")),
-                params=a.get("params", {}),
-            )
-            for a in raw_actions
-        ]
+        recovery_actions = []
+        for a in raw_actions:
+            try:
+                at = ActionType(a.get("action_type", "wait"))
+            except ValueError:
+                continue
+            params = self._sanitize_params(at, a.get("params", {}))
+            try:
+                recovery_actions.append(Action(action_type=at, params=params))
+            except ValueError:
+                logger.warning("回復アクションをスキップ（不正params）: %s", a)
+                continue
         return RecoveryPlan(
             strategy=RecoveryStrategy(data.get("strategy", "wait_and_retry")),
             actions=recovery_actions,
@@ -1099,6 +1105,21 @@ ID: {subtask.id}
             except json.JSONDecodeError:
                 pass
         raise first_error or ValueError(f"JSONを抽出できません: {text[:100]}")
+
+    @staticmethod
+    def _sanitize_params(action_type: ActionType, params: dict[str, Any]) -> dict[str, Any]:
+        """LLMのゴミパラメータを除去する。
+
+        structured output 非厳密なモデルが余計なキーを付けてくることがある。
+        許可リストに無いキーは落とす。必須欠落は残し、後段の
+        Action バリデーションに任せる。
+        """
+        from ai_desktop_agent.actions.primitives import allowed_params
+
+        if not isinstance(params, dict):
+            return {}
+        allowed = allowed_params(action_type)
+        return {k: v for k, v in params.items() if k in allowed}
 
     @staticmethod
     def _clamp_params(

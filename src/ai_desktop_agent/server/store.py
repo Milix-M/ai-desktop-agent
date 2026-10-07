@@ -57,6 +57,7 @@ class TaskRecord:
     actions: list[StoredAction] = dataclasses.field(default_factory=list)
     subtasks: list[dict] = dataclasses.field(default_factory=list)
     current_subtask_index: int = 0
+    vm_id: str | None = None
     goal: dict = dataclasses.field(default_factory=dict)
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -70,6 +71,7 @@ class TaskRecord:
             "actions": [dataclasses.asdict(a) for a in self.actions],
             "subtasks": self.subtasks,
             "current_subtask_index": self.current_subtask_index,
+            "vm_id": self.vm_id,
             "goal": self.goal,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -88,6 +90,7 @@ class TaskRecord:
             actions=[StoredAction(**a) for a in d.get("actions", [])],
             subtasks=list(d.get("subtasks", [])),
             current_subtask_index=int(d.get("current_subtask_index", 0)),
+            vm_id=d.get("vm_id"),
             goal=dict(d.get("goal", {})),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),

@@ -158,6 +158,7 @@ class TaskSummary(BaseModel):
     success_count: int = 0
     failure_count: int = 0
     updated_at: float = 0.0
+    vm_id: str | None = None
 
 
 class TaskDetail(TaskSummary):
@@ -178,6 +179,7 @@ def _to_summary(d: dict) -> TaskSummary:
         success_count=d.get("success_count", 0),
         failure_count=d.get("failure_count", 0),
         updated_at=d.get("updated_at", 0.0),
+        vm_id=d.get("vm_id"),
     )
 
 

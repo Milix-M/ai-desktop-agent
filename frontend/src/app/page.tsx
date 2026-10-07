@@ -6,13 +6,14 @@ import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
 import ControlPanel from "@/components/ControlPanel";
 import VMControls from "@/components/VMControls";
+import VmTabs from "@/components/VmTabs";
 import CollapsibleSection from "@/components/CollapsibleSection";
 import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import StatusBar from "@/components/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask } from "@/lib/api";
-import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo } from "@/lib/types";
+import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, getVncWsUrl } from "@/lib/api";
+import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo, VmInfo } from "@/lib/types";
 
 let logIdCounter = 0;
 
@@ -47,6 +48,9 @@ export default function Home() {
   const [history, setHistory] = useState<TaskHistoryItem[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [subtasks, setSubtasks] = useState<SubtaskInfo[]>([]);
+  const [vms, setVms] = useState<VmInfo[]>([]);
+  const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
+  const [creatingVm, setCreatingVm] = useState(false);
   const mountedRef = useRef(false);
 
   const addLog = useCallback(
@@ -125,10 +129,25 @@ export default function Home() {
     }
   }, []);
 
+  const refreshVms = useCallback(async () => {
+    try {
+      const list = await getVms();
+      setVms(list);
+      setSelectedVmId((prev) => {
+        if (prev && list.some((v) => v.id === prev)) return prev;
+        return list[0]?.id ?? null;
+      });
+    } catch {
+      // VM一覧なしでも継続
+    }
+  }, []);
+
   // 初回マウント時：現在の状態を復元（リロード対応）
   useEffect(() => {
     if (mountedRef.current) return;
     mountedRef.current = true;
+    refreshVms();
+    const vmTimer = setInterval(refreshVms, 15000);
     (async () => {
       try {
         const current = await getCurrentTask();
@@ -147,7 +166,8 @@ export default function Home() {
       }
       refreshHistory();
     })();
-  }, [addLog, refreshHistory, showTaskDetail]);
+    return () => clearInterval(vmTimer);
+  }, [addLog, refreshHistory, showTaskDetail, refreshVms]);
 
   const handleWsMessage = useCallback(
     (data: WsMessage) => {
@@ -212,10 +232,15 @@ export default function Home() {
       setSubtaskIndex(0);
       setSubtaskCount(0);
       addLog(`${instruction}`, "action");
-      const result = await createTask(instruction);
-      setState(result.state);
+      try {
+        const result = await createTask(instruction, selectedVmId);
+        setState(result.state);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        addLog(`投入エラー: ${msg}`, "error");
+      }
     },
-    [addLog]
+    [addLog, selectedVmId]
   );
 
   const handleControl = useCallback(
@@ -230,10 +255,50 @@ export default function Home() {
     [addLog]
   );
 
+  const handleCreateVm = useCallback(async () => {
+    const name = typeof window !== "undefined" ? window.prompt("VM名（空可）") : null;
+    if (name === null) return; // キャンセル
+    setCreatingVm(true);
+    try {
+      const vm = await createVm(name || undefined);
+      addLog(`VM作成開始: ${vm.name}`, "action");
+      await refreshVms();
+      setSelectedVmId(vm.id);
+    } catch (e: unknown) {
+      addLog(`VM作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      setCreatingVm(false);
+    }
+  }, [addLog, refreshVms]);
+
+  const handleDeleteVm = useCallback(async (vmId: string) => {
+    if (typeof window !== "undefined" && !window.confirm("このVMを削除しますか？上のタスクは停止します。")) {
+      return;
+    }
+    try {
+      await deleteVm(vmId);
+      addLog("VM削除", "state");
+      await refreshVms();
+    } catch (e: unknown) {
+      addLog(`VM削除失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  }, [addLog, refreshVms]);
+
+  const selectedVm = vms.find((v) => v.id === selectedVmId) ?? vms[0] ?? null;
+  const vncUrl = getVncWsUrl(selectedVm?.ws_port);
+
   return (
     <div className="app-container">
+      <VmTabs
+        vms={vms}
+        selectedId={selectedVm?.id ?? null}
+        onSelect={setSelectedVmId}
+        onCreate={handleCreateVm}
+        onDelete={handleDeleteVm}
+        creating={creatingVm}
+      />
       <div className="main-layout">
-        <VncViewer onConnectionChange={handleVncChange} />
+        <VncViewer key={vncUrl} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
 
         <div className="sidebar">
           <h1>AI Desktop Agent</h1>
@@ -260,6 +325,7 @@ export default function Home() {
             items={history}
             selectedId={selectedTaskId}
             onSelect={showTaskDetail}
+            vmNames={Object.fromEntries(vms.map((v) => [v.id, v.name]))}
             onDelete={async (taskId) => {
               try {
                 await deleteTask(taskId);

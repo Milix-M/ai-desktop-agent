@@ -43,6 +43,19 @@ class ActionType(Enum):
 # 全アクション種別リスト（テスト用）
 ALL_ACTION_TYPES = list(ActionType)
 
+
+def allowed_params(action_type: ActionType) -> set[str]:
+    """指定アクション種別で有効なパラメータ名の集合を返す。"""
+    return set(_REQUIRED_PARAMS.get(action_type, set())) | set(
+        _OPTIONAL_PARAMS.get(action_type, set())
+    )
+
+
+def required_params(action_type: ActionType) -> set[str]:
+    """指定アクション種別の必須パラメータ名の集合を返す。"""
+    return set(_REQUIRED_PARAMS.get(action_type, set()))
+
+
 # クリック系アクション（座標必須）
 CLICK_ACTIONS: frozenset[ActionType] = frozenset(
     {

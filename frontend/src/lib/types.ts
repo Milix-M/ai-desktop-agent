@@ -12,10 +12,24 @@ export interface TaskStatus {
   failure_count: number;
   subtasks: SubtaskInfo[];
   current_subtask_index: number;
+  vm_id?: string | null;
+}
+
+export interface VmInfo {
+  id: string;
+  name: string;
+  status: string;
+  health: string | null;
+  vnc_port: number;
+  ws_port: number;
+  vnc_host: string;
+  managed: boolean;
 }
 
 export interface WsStateMessage {
   type: "state";
+  session_id?: string | null;
+  vm_id?: string | null;
   state: string;
   subtask_index: number;
   subtask_count: number;
@@ -25,6 +39,8 @@ export interface WsStateMessage {
 
 export interface WsActionMessage {
   type: "action";
+  session_id?: string | null;
+  vm_id?: string | null;
   action_type: string;
   description: string;
   success: boolean;
@@ -32,11 +48,15 @@ export interface WsActionMessage {
 
 export interface WsErrorMessage {
   type: "error";
+  session_id?: string | null;
+  vm_id?: string | null;
   message: string;
 }
 
 export interface WsCompleteMessage {
   type: "complete";
+  session_id?: string | null;
+  vm_id?: string | null;
   success: boolean;
 }
 
@@ -71,6 +91,7 @@ export interface TaskHistoryItem {
   success_count: number;
   failure_count: number;
   updated_at: number;
+  vm_id?: string | null;
 }
 
 export interface TaskAction {

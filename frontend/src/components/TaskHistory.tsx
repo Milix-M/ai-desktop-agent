@@ -7,6 +7,7 @@ interface Props {
   selectedId: string | null;
   onSelect: (taskId: string) => void;
   onDelete: (taskId: string) => void;
+  vmNames?: Record<string, string>;
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -27,7 +28,7 @@ function timeStr(epochSec: number): string {
   });
 }
 
-export default function TaskHistory({ items, selectedId, onSelect, onDelete }: Props) {
+export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmNames = {} }: Props) {
   if (items.length === 0) return null;
 
   return (
@@ -50,6 +51,7 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete }: P
               </span>
               <span className="history-row">
                 <span className="history-meta">
+                  {item.vm_id && vmNames[item.vm_id] ? `[${vmNames[item.vm_id]}] ` : ""}
                   {item.action_count}操作・成功{item.success_count}・失敗{item.failure_count}・{timeStr(item.updated_at)}
                 </span>
               </span>
