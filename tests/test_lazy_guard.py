@@ -399,7 +399,7 @@ class TestWakeOnBlack:
         disp = _BlackThenNormal()
         session = TaskSession(llm=MockLLMProvider(), display=disp)
         ss = await session._capture_screenshot()
-        assert disp.calls == 2  # 黒→ウェイク→再取得
+        assert disp.calls == 3  # 黒→ウェイク→再取得→OCR用raw
         assert "shift" in disp.key_presses
         # 返るのは2枚目（明るい方）
         import io
@@ -596,3 +596,46 @@ class TestVmRestartAction:
         assert session.loop.state == AgentState.RECOVERING
         assert session._pending_error is not None
         assert "初期状態" in session._pending_error.error_message
+
+
+class TestCursorInfo:
+    """VNCプロトコル層のカーソル情報テスト。"""
+
+    @staticmethod
+    def _client_with_protocol(x=None, y=None, cursor=None):
+        from ai_desktop_agent.vm.vnc_client import VNCClient
+
+        c = VNCClient()
+
+        class _Proto:
+            pass
+
+        proto = _Proto()
+        proto.x = x
+        proto.y = y
+        proto.cursor = cursor
+
+        class _FakeVNC:
+            protocol = proto
+
+            def keyPress(self, key):  # noqa: N802
+                pass
+
+        c._client = _FakeVNC()
+        c._connected = True
+        return c
+
+    def test_protocol_position_preferred(self):
+        c = self._client_with_protocol(111, 222)
+        assert c.cursor_position == (111, 222)
+        assert c.cursor_x == 111
+        assert c.cursor_y == 222
+
+    def test_fallback_to_tracked(self):
+        c = self._client_with_protocol(None, None)
+        c._cursor_x, c._cursor_y = 5, 6
+        assert c.cursor_position == (5, 6)
+
+    def test_custom_cursor_flag(self):
+        assert self._client_with_protocol(cursor=object()).has_custom_cursor is True
+        assert self._client_with_protocol(cursor=None).has_custom_cursor is False

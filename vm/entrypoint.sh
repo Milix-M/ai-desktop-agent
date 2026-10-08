@@ -8,6 +8,8 @@ VM_MEMORY="${VM_MEMORY:-4096}"
 VM_CPUS="${VM_CPUS:-4}"
 VM_VNC_PORT="${VM_VNC_PORT:-5900}"
 CMDLINE_FILE="${CMDLINE_FILE:-/vm/cmdline.txt}"
+QMP_SOCK="${QMP_SOCK:-/vm/sockets/qmp.sock}"
+QGA_SOCK="${QGA_SOCK:-/vm/sockets/qga.sock}"
 VNC_DISPLAY=$((VM_VNC_PORT - 5900))
 USE_KVM="${USE_KVM:-false}"
 
@@ -34,6 +36,8 @@ log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB, CPUs:${VM_CPUS},
 log "Kernel: /vm/vmlinuz, Initrd: /vm/initrd.img"
 log "Command line: $CMDLINE"
 
+mkdir -p "$(dirname "$QMP_SOCK")" "$(dirname "$QGA_SOCK")"
+
 exec qemu-system-x86_64 \
     "${QEMU_ACCEL[@]}" \
     -m "$VM_MEMORY" \
@@ -45,4 +49,9 @@ exec qemu-system-x86_64 \
     -device virtio-net,netdev=net0 \
     -netdev user,id=net0 \
     -serial stdio \
-    -display none
+    -display none \
+    -chardev socket,path="$QMP_SOCK",server=on,wait=off,id=qmp0 \
+    -mon chardev=qmp0,mode=control \
+    -chardev socket,path="$QGA_SOCK",server=on,wait=off,id=qga0 \
+    -device virtio-serial-pci \
+    -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0

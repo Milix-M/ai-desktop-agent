@@ -199,6 +199,20 @@ class ActionExecutor:
                 pass
         return self._backend.capture_screen()
 
+    def locate(self, template_png: bytes, threshold: float = 0.9) -> tuple[int, int] | None:
+        """画面上からテンプレート画像の位置を探す。
+
+        Returns:
+            (中心x, 中心y) または見つからなければ None。
+        """
+        from ai_desktop_agent.vm.matcher import find_template
+
+        ss = self._capture_stable()
+        found = find_template(ss.image_bytes, template_png, threshold=threshold)
+        if found is None:
+            return None
+        return (found[0], found[1])
+
     @staticmethod
     def _image_hash(image_bytes: bytes) -> str:
         """画像のSHA256ハッシュを返す（変化検出用）。"""

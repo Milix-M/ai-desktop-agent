@@ -58,6 +58,9 @@ class TaskRecord:
     subtasks: list[dict] = dataclasses.field(default_factory=list)
     current_subtask_index: int = 0
     vm_id: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_calls: int = 0
     goal: dict = dataclasses.field(default_factory=dict)
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -72,6 +75,9 @@ class TaskRecord:
             "subtasks": self.subtasks,
             "current_subtask_index": self.current_subtask_index,
             "vm_id": self.vm_id,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "llm_calls": self.llm_calls,
             "goal": self.goal,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -91,6 +97,9 @@ class TaskRecord:
             subtasks=list(d.get("subtasks", [])),
             current_subtask_index=int(d.get("current_subtask_index", 0)),
             vm_id=d.get("vm_id"),
+            prompt_tokens=int(d.get("prompt_tokens", 0)),
+            completion_tokens=int(d.get("completion_tokens", 0)),
+            llm_calls=int(d.get("llm_calls", 0)),
             goal=dict(d.get("goal", {})),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),

@@ -121,6 +121,7 @@ class VmStatus(BaseModel):
     status: str
     health: str | None = None
     name: str | None = None
+    qmp_status: str | None = None
 
 
 class VmInfoModel(BaseModel):
@@ -160,6 +161,9 @@ class TaskSummary(BaseModel):
     failure_count: int = 0
     updated_at: float = 0.0
     vm_id: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_calls: int = 0
 
 
 class TaskDetail(TaskSummary):
@@ -181,6 +185,9 @@ def _to_summary(d: dict) -> TaskSummary:
         failure_count=d.get("failure_count", 0),
         updated_at=d.get("updated_at", 0.0),
         vm_id=d.get("vm_id"),
+        prompt_tokens=d.get("prompt_tokens", 0),
+        completion_tokens=d.get("completion_tokens", 0),
+        llm_calls=d.get("llm_calls", 0),
     )
 
 
@@ -415,7 +422,13 @@ async def vm_status() -> VmStatus:
         info = _get_vm_controller().status()
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    return VmStatus(running=info.running, status=info.status, health=info.health, name=info.name)
+    return VmStatus(
+        running=info.running,
+        status=info.status,
+        health=info.health,
+        name=info.name,
+        qmp_status=info.qmp_status,
+    )
 
 
 @app.post("/vm/restart", response_model=VmStatus)
@@ -437,7 +450,13 @@ async def vm_restart() -> VmStatus:
         info = _get_vm_controller().restart()
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    return VmStatus(running=info.running, status=info.status, health=info.health, name=info.name)
+    return VmStatus(
+        running=info.running,
+        status=info.status,
+        health=info.health,
+        name=info.name,
+        qmp_status=info.qmp_status,
+    )
 
 
 # ── WebSocket ─────────────────────────────────────────

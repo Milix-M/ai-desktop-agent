@@ -24,6 +24,7 @@ from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.ocr import extract_text as _ocr_text
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
@@ -137,10 +138,12 @@ class TaskSession:
                 "環境変数 VNC_HOST を設定するか、display オブジェクトを明示的に渡してください。"
             )
 
-        self.executor = ActionExecutor(self.display)
+        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
         self._task: asyncio.Task | None = None
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
+        # 直近のOCRテキスト（LLMプロンプト用）
+        self._last_ocr_text: str = ""
         # サブタスクごとの空完了却下回数
         self._empty_complete_refusals: dict[str, int] = {}
         # サブタスクごとの検証失敗回数
@@ -166,7 +169,7 @@ class TaskSession:
         except AttributeError:
             pass
         self.display = display
-        self.executor = ActionExecutor(self.display)
+        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
 
     # ── イベント ──────────────────────────────
 
@@ -301,6 +304,9 @@ class TaskSession:
             instruction=self._instruction,
             state=self.loop.state.value,
             success=success,
+            prompt_tokens=int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(self.llm, "total_completion_tokens", 0) or 0),
+            llm_calls=int(getattr(self.llm, "call_count", 0) or 0),
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
@@ -1048,13 +1054,14 @@ class TaskSession:
             action_history=self.loop.context.action_history,
             screenshot=screenshot,
             error_context=error_context,
+            ocr_text=self._last_ocr_text or None,
         )
 
     async def _capture_screenshot(self) -> Screenshot:
         """現在のVM画面をキャプチャする（オーバーレイ付き）。
 
         DPMS 等で画面が真っ黒の場合は Shift キーで起こしてから
-        取り直す（最大1回）。エージェントの自己回復。
+        取り直す（最大1回）。ついでに生画像のOCRテキストを保持する。
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
@@ -1067,6 +1074,12 @@ class TaskSession:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
             screenshot = self.display.capture_screen()
+        try:
+            capture_raw = getattr(self.display, "capture_raw", None)
+            if callable(capture_raw):
+                self._last_ocr_text = _ocr_text(capture_raw().image_bytes)
+        except Exception:
+            logger.debug("OCRテキスト取得に失敗", exc_info=True)
         return screenshot
 
     # ── 制御 ────────────────────────────────────

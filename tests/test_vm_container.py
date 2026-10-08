@@ -216,6 +216,9 @@ class TestBuildVmImage:
         content = _read_cmdline(VM_DIR / "build-vm-image.sh")
         assert "xdotool" in content, "GUI 操作用に xdotool をインストールする必要があります"
         assert "wmctrl" in content, "ウィンドウ制御用に wmctrl をインストールする必要があります"
+        assert "qemu-guest-agent" in content, (
+            "ゲスト情報取得・コマンド実行用に qemu-guest-agent が必要です"
+        )
 
     def test_configures_sddm_autologin(self):
         content = (VM_DIR / "build-vm-image.sh").read_text()
@@ -350,7 +353,7 @@ class TestDockerCompose:
     def test_vm_volume_mounts(self):
         vm = self._vm_service()
         volumes = vm.get("volumes", [])
-        assert len(volumes) == 4, f"vm には4つの volume マウントが必要です（実際: {len(volumes)}）"
+        assert len(volumes) == 5, f"vm には5つの volume マウントが必要です（実際: {len(volumes)}）"
 
         # 文字列のリストか、長形式かを正規化
         vol_specs = {}
@@ -374,6 +377,9 @@ class TestDockerCompose:
         for fname in ("vmlinuz", "initrd.img", "cmdline.txt"):
             assert fname in vol_specs, f"{fname} の volume マウントが必要です"
             assert vol_specs[fname] is True, f"{fname} は ro でマウントする必要があります"
+
+        # QMP/QGA ソケット共有ディレクトリ
+        assert "sockets" in vol_specs, "QMP/QGA 用の sockets マウントが必要です"
 
     def test_vm_environment_variables(self):
         vm = self._vm_service()

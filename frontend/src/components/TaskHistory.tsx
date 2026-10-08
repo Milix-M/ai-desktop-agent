@@ -53,7 +53,11 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmN
               <span className="history-row">
                 <span className="history-meta">
                   {item.vm_id && vmNames[item.vm_id] ? `[${vmNames[item.vm_id]}] ` : ""}
-                  {item.action_count}操作・成功{item.success_count}・失敗{item.failure_count}・{timeStr(item.updated_at)}
+                  {item.action_count}操作・成功{item.success_count}・失敗{item.failure_count}
+                  {(item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0) > 0
+                    ? `・tok${((item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0)).toLocaleString()}`
+                    : ""}
+                  ・{timeStr(item.updated_at)}
                 </span>
               </span>
             </button>

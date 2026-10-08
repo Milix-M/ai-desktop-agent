@@ -243,3 +243,34 @@ class TestSubtaskProgress:
             data = resp.json()
             assert data["subtasks"][0]["description"] == "進捗テスト"
             assert data["current_subtask_index"] >= 0
+
+
+class TestTokenPersistence:
+    def test_snapshot_carries_tokens(self, tmp_path):
+        from unittest.mock import patch
+
+        from ai_desktop_agent.agent.state import Goal
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.server.store import TaskStore
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ):
+            from ai_desktop_agent.agent.llm.openai_compat_provider import (
+                OpenAICompatProvider,
+            )
+
+            llm = OpenAICompatProvider(api_key="k")
+        llm.total_prompt_tokens = 1000
+        llm.total_completion_tokens = 200
+        llm.call_count = 5
+        session = TaskSession(llm=llm, display=FakeDisplayBackend())
+        session.loop.start(Goal(description="g"))
+        rec = session.snapshot()
+        assert (rec.prompt_tokens, rec.completion_tokens, rec.llm_calls) == (1000, 200, 5)
+        store = TaskStore(root=tmp_path / "data")
+        store.save(rec)
+        d = store.load(rec.id).to_dict()
+        assert d["prompt_tokens"] == 1000

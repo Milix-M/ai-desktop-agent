@@ -300,3 +300,271 @@ class TestAllActionTypesExecuted:
         action = Action(action_type=action_type, params=params)
         result = await executor.execute(action)
         assert result
+
+
+class TestMatcher:
+    """テンプレート照合のテスト。"""
+
+    @staticmethod
+    def _png(color, size=(64, 48)):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", size, color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _screen_with_square():
+        import io
+
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (200, 150), "black")
+        ImageDraw.Draw(img).rectangle([50, 40, 90, 80], fill="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        tpl = Image.new("RGB", (40, 40), "white")
+        tbuf = io.BytesIO()
+        tpl.save(tbuf, format="PNG")
+        return buf.getvalue(), tbuf.getvalue()
+
+    def test_finds_exact_match(self):
+        from ai_desktop_agent.vm.matcher import find_template
+
+        screen, tpl = self._screen_with_square()
+        found = find_template(screen, tpl, threshold=0.9)
+        assert found is not None
+        x, y, score = found
+        assert score > 0.99
+        assert abs(x - 70) <= 4
+        assert abs(y - 60) <= 4
+
+    def test_no_match_returns_none(self):
+        from ai_desktop_agent.vm.matcher import find_template
+
+        screen, _ = self._screen_with_square()
+        gray = self._png((128, 128, 128), (40, 40))
+        assert find_template(screen, gray, threshold=0.99) is None
+
+    def test_oversized_template_returns_none(self):
+        from ai_desktop_agent.vm.matcher import find_template
+
+        small = self._png((0, 0, 0), (10, 10))
+        big = self._png((255, 255, 255), (100, 100))
+        assert find_template(small, big) is None
+
+    def test_flat_template_returns_none(self):
+        from ai_desktop_agent.vm.matcher import find_template
+
+        screen, _ = self._screen_with_square()
+        flat = self._png((0, 0, 0), (20, 20))
+        assert find_template(screen, flat) is None
+
+    @pytest.mark.asyncio
+    async def test_executor_locate(self):
+        import io
+
+        from PIL import Image, ImageDraw
+
+        from ai_desktop_agent.actions.executor import ActionExecutor
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+        from ai_desktop_agent.vm.screenshot import Screenshot
+
+        img = Image.new("RGB", (200, 150), "black")
+        ImageDraw.Draw(img).rectangle([50, 40, 90, 80], fill="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        tpl = Image.new("RGB", (40, 40), "white")
+        tbuf = io.BytesIO()
+        tpl.save(tbuf, format="PNG")
+
+        class _ScreenBackend(FakeDisplayBackend):
+            def capture_screen(self, *, with_overlay=True):
+                self.screenshots_taken += 1
+                return Screenshot(image_bytes=buf.getvalue(), width=200, height=150)
+
+            def capture_raw(self):
+                return self.capture_screen(with_overlay=False)
+
+        ex = ActionExecutor(_ScreenBackend())
+        found = ex.locate(tbuf.getvalue(), threshold=0.9)
+        assert found is not None
+        assert abs(found[0] - 70) <= 4
+
+
+class TestOcr:
+    """OCRテキスト抽出のテスト。"""
+
+    def test_unavailable_returns_empty(self, monkeypatch):
+        import sys
+
+        from ai_desktop_agent.vm import ocr
+
+        monkeypatch.setitem(sys.modules, "pytesseract", None)
+        assert ocr.extract_text(b"not-an-image") == ""
+
+    def test_cache_hit(self, monkeypatch):
+        import io
+        import sys
+
+        from PIL import Image
+
+        from ai_desktop_agent.vm import ocr
+
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 16), "white").save(buf, format="PNG")
+        data = buf.getvalue()
+        calls = []
+
+        class _FakeTess:
+            @staticmethod
+            def image_to_string(img, lang="eng"):
+                calls.append(1)
+                return "hello"
+
+        monkeypatch.setitem(sys.modules, "pytesseract", _FakeTess)
+        assert ocr.extract_text(data) == "hello"
+        assert ocr.extract_text(data) == "hello"
+        assert len(calls) == 1  # 2回目はキャッシュ
+
+
+class TestQmpClient:
+    """QMPクライアントのテスト（ソケットペアによる偽サーバ）。"""
+
+    @staticmethod
+    def _pair(handler):
+        import json
+        import socket
+        import threading
+
+        a, b = socket.socketpair()
+
+        def serve():
+            r = b.makefile("r", encoding="utf-8")
+            try:
+                b.sendall(b'{"QMP": {"version": {"qemu": {"major": 8}}}}\n')
+                for line in r:
+                    try:
+                        req = json.loads(line)
+                    except Exception:
+                        break
+                    resp = handler(req)
+                    if resp is None:
+                        break
+                    b.sendall((json.dumps(resp) + "\n").encode())
+            finally:
+                b.close()
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        return a
+
+    def test_query_status(self):
+        from ai_desktop_agent.vm.qmp import QmpClient
+
+        sock = self._pair(
+            lambda req: (
+                {"return": {}}
+                if req.get("execute") == "qmp_capabilities"
+                else {"return": {"status": "running", "running": True}}
+                if req.get("execute") == "query-status"
+                else {"error": {"desc": "unknown"}}
+            )
+        )
+        path = "/tmp/ai-test-qmp.sock"
+        import contextlib
+        import os
+
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        # ソケットペアを直接渡すため簡易ラップ
+        client = QmpClient(path)
+        client._sock = sock
+        client._file = sock.makefile("r", encoding="utf-8")
+        client._file.readline()  # greeting相当を読み飛ばす
+        # greeting相当を読み飛ばす代わりに直接execute
+        status = client.query_status()
+        assert status["status"] == "running"
+        client.close()
+
+    def test_connect_failure(self):
+        from ai_desktop_agent.vm.qga import QgaError
+        from ai_desktop_agent.vm.qmp import QmpClient, QmpError
+
+        with __import__("pytest").raises(QmpError, match="接続に失敗"):
+            QmpClient("/nonexistent-qmp.sock", timeout=1.0).connect()
+        assert issubclass(QmpError, RuntimeError)
+        assert issubclass(QgaError, RuntimeError)
+        _ = QgaError
+
+
+class TestQgaClient:
+    """guest agent クライアントのテスト。"""
+
+    @staticmethod
+    def _client_with_responses(responses):
+        import socket
+
+        from ai_desktop_agent.vm.qga import QgaClient
+
+        a, b = socket.socketpair()
+        import json
+        import threading
+
+        def serve():
+            r = b.makefile("r", encoding="utf-8")
+            try:
+                for line in r:
+                    req = json.loads(line)
+                    key = req.get("execute")
+                    resp = responses.get(key, {"return": {}})
+                    if callable(resp):
+                        resp = resp(req)
+                    b.sendall((json.dumps(resp) + "\n").encode())
+            finally:
+                b.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        client = QgaClient("/fake.sock")
+        client._sock = a
+        client._file = a.makefile("r", encoding="utf-8")
+        return client
+
+    def test_ping_and_osinfo(self):
+        c = self._client_with_responses(
+            {
+                "guest-ping": {"return": {}},
+                "guest-get-osinfo": {"return": {"name": "Ubuntu"}},
+            }
+        )
+        assert c.ping() is True
+        assert c.get_osinfo()["name"] == "Ubuntu"
+        c.close()
+
+    def test_run_echo(self):
+        import base64
+
+        out = base64.b64encode(b"hi\n").decode()
+
+        def _exec(req):
+            return {"return": {"pid": 42}}
+
+        def _status(req):
+            return {"return": {"exited": True, "exitcode": 0, "out-data": out}}
+
+        c = self._client_with_responses({"guest-exec": _exec, "guest-exec-status": _status})
+        code, stdout, stderr = c.run(["echo", "hi"])
+        assert (code, stdout, stderr) == (0, "hi\n", "")
+        c.close()
+
+    def test_error_raises(self):
+        import pytest
+
+        from ai_desktop_agent.vm.qga import QgaError
+
+        c = self._client_with_responses({"guest-ping": {"error": {"desc": "no agent"}}})
+        with pytest.raises(QgaError):
+            c.ping()
+        c.close()

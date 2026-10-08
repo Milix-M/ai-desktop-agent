@@ -21,6 +21,7 @@ services:
       - ./vm/vmlinuz:/vm/vmlinuz:ro
       - ./vm/initrd.img:/vm/initrd.img:ro
       - ./vm/cmdline.txt:/vm/cmdline.txt:ro
+      - ./vm/sockets:/vm/sockets
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
@@ -42,6 +43,7 @@ services:
       - PORT=8081
     volumes:
       - ./data:/app/data
+      - ./vm/sockets:/vm/sockets
       # デバッグ用VM管理（作り直し機能）に必要。不要なら削除可。
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

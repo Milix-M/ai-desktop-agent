@@ -139,8 +139,10 @@ class VmPool:
         vm_name = f"ai-desktop-agent-{vm_id}"
         logger.info("VM作成: %s (vnc=%d ws=%d)", vm_id, vnc_port, ws_port)
 
+        host_repo = self._host_repo_dir()
         volumes = {
             overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
+            f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
             **self._ro_vm_files(),
         }
         docker.containers.run(
@@ -156,6 +158,8 @@ class VmPool:
                 "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
                 "CMDLINE_FILE": "/vm/cmdline.txt",
                 "USE_KVM": use_kvm,
+                "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
+                "QGA_SOCK": f"/vm/sockets/{vm_id}-qga.sock",
             },
             volumes=volumes,
             labels=common_labels,

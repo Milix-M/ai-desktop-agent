@@ -32,6 +32,7 @@ class VmStatusInfo:
     status: str  # running / exited / restarting / not_found 等
     health: str | None = None  # healthy / unhealthy / starting / none
     name: str | None = None
+    qmp_status: str | None = None  # QMP query-status の status（inmigrate等もあり得る）
 
 
 class VmController:
@@ -54,7 +55,7 @@ class VmController:
     # ── 公開 API ──────────────────────────────────────
 
     def status(self) -> VmStatusInfo:
-        """VMコンテナの現在の状態を返す。"""
+        """VMコンテナの現在の状態を返す。QMPが生きていればゲスト状態も付与。"""
         container = self._find_container()
         if container is None:
             return VmStatusInfo(running=False, status="not_found")
@@ -66,6 +67,7 @@ class VmController:
             status=str(container.status),
             health=health,
             name=container.name,
+            qmp_status=self._qmp_status(),
         )
 
     def restart(self, timeout: int = 30) -> VmStatusInfo:
@@ -82,6 +84,18 @@ class VmController:
         return self.status()
 
     # ── 内部 ──────────────────────────────────────────
+
+    def _qmp_status(self) -> str | None:
+        """QMPでゲスト稼働状態を照会する。失敗時は None。"""
+        try:
+            from ai_desktop_agent.vm.qmp import QmpClient
+
+            sock = os.environ.get("QMP_SOCK", "/vm/sockets/qmp.sock")
+            with QmpClient(sock, timeout=3.0) as qmp:
+                return str(qmp.query_status().get("status"))
+        except Exception:
+            logger.debug("QMP照会に失敗", exc_info=True)
+            return None
 
     def _docker(self) -> Any:
         if self._client is not None:

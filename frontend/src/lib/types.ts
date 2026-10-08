@@ -92,6 +92,9 @@ export interface TaskHistoryItem {
   failure_count: number;
   updated_at: number;
   vm_id?: string | null;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  llm_calls?: number;
 }
 
 export interface TaskAction {

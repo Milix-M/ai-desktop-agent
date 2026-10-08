@@ -637,3 +637,42 @@ class TestSanitizeParams:
             Goal(description="t"), Subtask(id="s", description="d"), [], ss
         )
         assert result.action.action_type.value == "subtask_complete"
+
+
+class TestTokenUsage:
+    """トークン使用量の記録テスト。"""
+
+    @staticmethod
+    def _provider():
+        from unittest.mock import patch
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ):
+            return OpenAICompatProvider(api_key="k")
+
+    def test_record_usage_accumulates(self):
+        from unittest.mock import MagicMock
+
+        provider = self._provider()
+
+        usage = MagicMock(prompt_tokens=100, completion_tokens=20)
+        provider._record_usage(MagicMock(usage=usage))
+        provider._record_usage(MagicMock(usage=usage))
+        assert provider.total_prompt_tokens == 200
+        assert provider.total_completion_tokens == 40
+        assert provider.total_tokens == 240
+        assert provider.call_count == 2
+
+    def test_record_usage_missing_is_safe(self):
+        from unittest.mock import MagicMock
+
+        provider = self._provider()
+        provider._record_usage(MagicMock(usage=None))
+        provider._record_usage(object())
+        assert provider.total_tokens == 0
