@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
@@ -22,8 +23,22 @@ _PROVIDER_CONFIGS: dict[str, tuple[str, str, str | None]] = {
         "anthropic/claude-sonnet-4",
         "https://openrouter.ai/api/v1",
     ),
+    "opencode": (
+        "OPENCODE_API_KEY",
+        "deepseek-v4.1-flash",
+        "https://opencode.ai/zen/v1",
+    ),
+    "opencode-go": (
+        "OPENCODE_GO_API_KEY",
+        "deepseek-v4.1-flash",
+        "https://opencode.ai/zen/go/v1",
+    ),
     "ollama": ("OLLAMA_API_KEY", "llama3.2", "http://localhost:11434/v1"),
 }
+
+# Go が求める独自 User-Agent（乱用監視用）。Zen 側にも付与して無害。
+_USER_AGENT_HEADERS: dict[str, str] = {"User-Agent": "ai-desktop-agent/0.1.0"}
+_PROVIDERS_WITH_UA: frozenset[str] = frozenset({"opencode", "opencode-go"})
 
 
 def create_llm_provider(
@@ -37,7 +52,7 @@ def create_llm_provider(
     provider 未指定時は LLM_PROVIDER 環境変数を参照。
     全プロバイダは OpenAICompatProvider で統一される。
 
-    対応プロバイダ: openai, anthropic, openrouter, ollama, mock
+    対応プロバイダ: openai, anthropic, openrouter, opencode, opencode-go, ollama, mock
     """
     provider = provider or os.environ.get("LLM_PROVIDER", "openai")
 
@@ -65,4 +80,7 @@ def create_llm_provider(
     base_url = base_url or default_base_url
 
     logger.info("OpenAICompatProvider: provider=%s model=%s base_url=%s", provider, model, base_url)
-    return OpenAICompatProvider(model=model, api_key=api_key, base_url=base_url)
+    extra: dict[str, Any] = {}
+    if provider in _PROVIDERS_WITH_UA:
+        extra["default_headers"] = dict(_USER_AGENT_HEADERS)
+    return OpenAICompatProvider(model=model, api_key=api_key, base_url=base_url, **extra)
