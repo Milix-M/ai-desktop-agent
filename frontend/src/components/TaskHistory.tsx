@@ -6,15 +6,8 @@ interface Props {
   items: TaskHistoryItem[];
   selectedId: string | null;
   onSelect: (taskId: string) => void;
+  onDelete: (taskId: string) => void;
 }
-
-const STATE_LABEL: Record<string, string> = {
-  completed: "完了",
-  failed: "失敗",
-  interrupted: "中断",
-  executing: "実行中",
-  paused: "一時停止",
-};
 
 function timeStr(epochSec: number): string {
   if (!epochSec) return "--:--";
@@ -26,31 +19,42 @@ function timeStr(epochSec: number): string {
   });
 }
 
-export default function TaskHistory({ items, selectedId, onSelect }: Props) {
-  if (items.length === 0) return null;
-
+export default function TaskHistory({ items, selectedId, onSelect, onDelete }: Props) {
   return (
     <div className="section">
-      <h2>履歴</h2>
+      <h2>履歴（{items.length}件）</h2>
+      {items.length === 0 ? (
+        <div className="history-empty">履歴なし</div>
+      ) : (
       <div className="history-list">
         {items.map((item) => (
-          <button
+          <div
             key={item.id}
             className={`history-item${item.id === selectedId ? " selected" : ""}`}
-            onClick={() => onSelect(item.id)}
           >
-            <span className="history-state">
-              {STATE_LABEL[item.state] ?? item.state}
-            </span>
-            <span className="history-instruction">
-              {item.instruction || "(指示なし)"}
-            </span>
-            <span className="history-meta">
-              {item.action_count}操作・{timeStr(item.updated_at)}
-            </span>
-          </button>
+            <button className="history-main" onClick={() => onSelect(item.id)} title={item.instruction || undefined}>
+              <span className="history-row">
+                <span className="history-instruction">
+                  {item.instruction || "(指示なし)"}
+                </span>
+              </span>
+              <span className="history-row">
+                <span className="history-meta">
+                  {timeStr(item.updated_at)}
+                </span>
+              </span>
+            </button>
+            <button
+              className="history-delete"
+              aria-label={`${item.instruction || item.id}を削除`}
+              onClick={() => onDelete(item.id)}
+            >
+              ×
+            </button>
+          </div>
         ))}
       </div>
+      )}
     </div>
   );
 }

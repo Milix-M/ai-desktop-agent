@@ -11,28 +11,37 @@ interface Props {
 export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
   const [status, setStatus] = useState("取得中...");
   const [restarting, setRestarting] = useState(false);
+  const [watching, setWatching] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const vm = await getVmStatus();
       const health = vm.health ? ` (${vm.health})` : "";
       setStatus(vm.running ? `起動中: ${vm.status}${health}` : `停止中: ${vm.status}`);
+      if (vm.running && vm.health === "healthy") {
+        setWatching(false);
+        setRestarting(false);
+      }
+      return vm;
     } catch {
       setStatus("取得失敗（backend未接続？）");
+      return null;
     }
   }, []);
 
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, pollIntervalMs);
+    // 作り直し直後は2秒間隔で追跡し、healthyに戻ったら通常間隔へ
+    const timer = setInterval(refresh, watching ? 2000 : pollIntervalMs);
     return () => clearInterval(timer);
-  }, [refresh, pollIntervalMs]);
+  }, [refresh, pollIntervalMs, watching]);
 
   const handleRestart = useCallback(async () => {
     if (typeof window !== "undefined" && !window.confirm("VMを作り直しますか？実行中のタスクは停止します。")) {
       return;
     }
     setRestarting(true);
+    setWatching(true);
     onLog?.("VM作り直し開始", "action");
     try {
       const vm = await restartVm();
@@ -40,15 +49,15 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       onLog?.(`VM作り直し失敗: ${msg}`, "error");
-    } finally {
       setRestarting(false);
+      setWatching(false);
+    } finally {
       refresh();
     }
   }, [onLog, refresh]);
 
   return (
-    <div className="section">
-      <h2>VM管理（デバッグ）</h2>
+    <>
       <div className="vm-status" data-testid="vm-status">
         {restarting ? "作り直し中..." : status}
       </div>
@@ -57,6 +66,6 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
           VM作り直し
         </button>
       </div>
-    </div>
+    </>
   );
 }

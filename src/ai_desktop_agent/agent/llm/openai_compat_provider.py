@@ -93,6 +93,9 @@ AI エージェントです。
 - key_combo: {keys: [str]} — 複合キー（["ctrl", "c"] 等）
 - wait: {seconds: float} — 待機（アプリ起動待ちには2〜5秒を使う）
 - region_select: {x: int, y: int, width: int, height: int} — 領域拡大を要求
+- vm_restart: {reason: str} — VM作り直し（事前にユーザーの許可が必要。
+  許可されていないタスクでは却下される。実行後は環境が初期化されるため、
+  計画の最初からやり直すつもりで使う）
 - subtask_complete: {} — 現在のサブタスク完了
 
 ※ 毎ターン最新の画面が自動で送られるため、画面再取得のためのアクションは不要。
@@ -136,6 +139,7 @@ _ACTION_TYPES = [
     "key_combo",
     "wait",
     "region_select",
+    "vm_restart",
     "subtask_complete",
 ]
 
@@ -334,6 +338,23 @@ _SCHEMA_ACTION = {
                             "height": {"type": "integer"},
                         },
                         "required": ["x", "y", "width", "height"],
+                        "additionalProperties": False,
+                    },
+                    "expected_effect": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"const": "vm_restart"},
+                    "params": {
+                        "type": "object",
+                        "properties": {"reason": {"type": "string"}},
+                        "required": ["reason"],
                         "additionalProperties": False,
                     },
                     "expected_effect": {"type": "string"},
@@ -636,6 +657,22 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
+                                "action_type": {"const": "vm_restart"},
+                                "params": {
+                                    "type": "object",
+                                    "properties": {
+                                        "reason": {"type": "string"},
+                                    },
+                                    "required": ["reason"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "required": ["action_type", "params"],
+                            "additionalProperties": False,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
                                 "action_type": {"const": "subtask_complete"},
                                 "params": {
                                     "type": "object",
@@ -671,7 +708,7 @@ class OpenAICompatProvider(LLMProvider):
         self,
         model: str = "gpt-4o",
         api_key: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 1500,
         temperature: float = 0.0,
         base_url: str | None = None,
         default_headers: dict[str, str] | None = None,
@@ -683,6 +720,10 @@ class OpenAICompatProvider(LLMProvider):
         # 会話単位ID（OpenCode Go の x-opencode-session 用）。
         # タスクごとに TaskSession が設定する。
         self.session_id = session_id
+        # 累積トークン使用量（可観測性用）
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.call_count = 0
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
         client_kwargs: dict[str, Any] = {"api_key": api_key}
@@ -759,20 +800,8 @@ class OpenAICompatProvider(LLMProvider):
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
+        ocr_text: str | None = None,
     ) -> ActionDecision:
-        """現在の画面とコンテキストから次に実行すべきアクションを決定する。
-
-        Args:
-            goal: ユーザーのゴール。
-            current_subtask: 現在のサブタスク。
-            action_history: 操作履歴。
-            screenshot: 現在の画面（オーバーレイ付き）。
-            error_context: エラー回復中の場合のエラー情報。
-            is_zoomed: このスクリーンショットが拡大表示かどうか。
-            zoom_origin: 拡大表示の場合、元画面での左上座標 (x, y)。
-            zoom_scale: 拡大表示の場合の倍率。LLMには拡大後ピクセル座標で
-                返させ、呼び出し側で ``origin + coord / scale`` に戻す。
-        """
         history_text = self._format_action_history(action_history[-10:])
 
         error_block = ""
@@ -803,9 +832,18 @@ class OpenAICompatProvider(LLMProvider):
 範囲外の座標は実行時にクランプされますが、精度が落ちるため範囲内に収めてください。
 """
 
+        ocr_block = ""
+        if ocr_text:
+            ocr_block = f"""
+【画面テキスト（OCR参考情報）】
+{ocr_text}
+座標特定の補助に使ってください（グリッド数字は含みません）。
+"""
+
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 {zoom_block}
 {screen_block}
+{ocr_block}
 【ゴール】{goal.description}
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}
@@ -825,7 +863,8 @@ ID: {current_subtask.id}
             action_type = ActionType(action_type_str)
         except ValueError:
             action_type = ActionType.SUBTASK_COMPLETE
-        params = self._clamp_params(action_type, data.get("params", {}), screenshot)
+        params = self._sanitize_params(action_type, data.get("params", {}))
+        params = self._clamp_params(action_type, params, screenshot)
         return ActionDecision(
             action=Action(action_type=action_type, params=params),
             expected_effect=data.get("expected_effect", ""),
@@ -901,13 +940,18 @@ ID: {subtask.id}
 {history_text}"""
         data = await self._call(prompt, _SCHEMA_RECOVER)
         raw_actions = data.get("actions", [])
-        recovery_actions = [
-            Action(
-                action_type=ActionType(a.get("action_type", "wait")),
-                params=a.get("params", {}),
-            )
-            for a in raw_actions
-        ]
+        recovery_actions = []
+        for a in raw_actions:
+            try:
+                at = ActionType(a.get("action_type", "wait"))
+            except ValueError:
+                continue
+            params = self._sanitize_params(at, a.get("params", {}))
+            try:
+                recovery_actions.append(Action(action_type=at, params=params))
+            except ValueError:
+                logger.warning("回復アクションをスキップ（不正params）: %s", a)
+                continue
         return RecoveryPlan(
             strategy=RecoveryStrategy(data.get("strategy", "wait_and_retry")),
             actions=recovery_actions,
@@ -974,6 +1018,7 @@ ID: {subtask.id}
                     kwargs["extra_headers"] = {"x-opencode-session": self.session_id}
 
                 response = await self._client.chat.completions.create(**kwargs)
+                self._record_usage(response)
                 text = response.choices[0].message.content or ""
                 if not text:
                     empty_count += 1
@@ -1043,6 +1088,25 @@ ID: {subtask.id}
             return True
         return "response_format" in msg or "json_schema" in msg
 
+    def _record_usage(self, response: Any) -> None:
+        """API応答のトークン使用量を累積する（可観測性用）。"""
+        try:
+            usage = getattr(response, "usage", None)
+            if usage is None:
+                return
+            prompt = getattr(usage, "prompt_tokens", 0) or 0
+            completion = getattr(usage, "completion_tokens", 0) or 0
+            self.total_prompt_tokens += int(prompt)
+            self.total_completion_tokens += int(completion)
+            self.call_count += 1
+        except Exception:
+            logger.debug("使用量記録に失敗", exc_info=True)
+
+    @property
+    def total_tokens(self) -> int:
+        """累積トークン数の合計。"""
+        return self.total_prompt_tokens + self.total_completion_tokens
+
     @staticmethod
     def _with_json_instruction(user_content: Any, json_schema: dict[str, Any]) -> Any:
         """response_format の代わりにプロンプトへJSON指示を追記する。"""
@@ -1099,6 +1163,21 @@ ID: {subtask.id}
             except json.JSONDecodeError:
                 pass
         raise first_error or ValueError(f"JSONを抽出できません: {text[:100]}")
+
+    @staticmethod
+    def _sanitize_params(action_type: ActionType, params: dict[str, Any]) -> dict[str, Any]:
+        """LLMのゴミパラメータを除去する。
+
+        structured output 非厳密なモデルが余計なキーを付けてくることがある。
+        許可リストに無いキーは落とす。必須欠落は残し、後段の
+        Action バリデーションに任せる。
+        """
+        from ai_desktop_agent.actions.primitives import allowed_params
+
+        if not isinstance(params, dict):
+            return {}
+        allowed = allowed_params(action_type)
+        return {k: v for k, v in params.items() if k in allowed}
 
     @staticmethod
     def _clamp_params(

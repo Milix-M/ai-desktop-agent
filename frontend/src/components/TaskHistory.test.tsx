@@ -28,24 +28,31 @@ const ITEMS: TaskHistoryItem[] = [
 ];
 
 describe("TaskHistory", () => {
-  it("renders nothing when empty", () => {
-    const { container } = render(
-      <TaskHistory items={[]} selectedId={null} onSelect={vi.fn()} />
+  it("renders empty state when no items", () => {
+    render(
+      <TaskHistory items={[]} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText("履歴（0件）")).toBeInTheDocument();
+    expect(screen.getByText("履歴なし")).toBeInTheDocument();
   });
 
-  it("renders items with state labels", () => {
-    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={vi.fn()} />);
+  it("renders items with titles", () => {
+    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />);
     expect(screen.getByText("テスト指示1")).toBeInTheDocument();
-    expect(screen.getByText("完了")).toBeInTheDocument();
-    expect(screen.getByText("中断")).toBeInTheDocument();
+    expect(screen.getByText("テスト指示2")).toBeInTheDocument();
   });
 
   it("calls onSelect with task id", async () => {
     const onSelect = vi.fn();
-    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={onSelect} />);
+    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={onSelect} onDelete={vi.fn()} />);
     await userEvent.click(screen.getByText("テスト指示2"));
     expect(onSelect).toHaveBeenCalledWith("b2");
+  });
+
+  it("calls onDelete with task id", async () => {
+    const onDelete = vi.fn();
+    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={vi.fn()} onDelete={onDelete} />);
+    await userEvent.click(screen.getByRole("button", { name: "テスト指示2を削除" }));
+    expect(onDelete).toHaveBeenCalledWith("b2");
   });
 });

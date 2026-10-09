@@ -56,6 +56,11 @@ class TaskRecord:
     success: bool | None = None
     actions: list[StoredAction] = dataclasses.field(default_factory=list)
     subtasks: list[dict] = dataclasses.field(default_factory=list)
+    current_subtask_index: int = 0
+    vm_id: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_calls: int = 0
     goal: dict = dataclasses.field(default_factory=dict)
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -68,6 +73,11 @@ class TaskRecord:
             "success": self.success,
             "actions": [dataclasses.asdict(a) for a in self.actions],
             "subtasks": self.subtasks,
+            "current_subtask_index": self.current_subtask_index,
+            "vm_id": self.vm_id,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "llm_calls": self.llm_calls,
             "goal": self.goal,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -85,6 +95,11 @@ class TaskRecord:
             success=d.get("success"),
             actions=[StoredAction(**a) for a in d.get("actions", [])],
             subtasks=list(d.get("subtasks", [])),
+            current_subtask_index=int(d.get("current_subtask_index", 0)),
+            vm_id=d.get("vm_id"),
+            prompt_tokens=int(d.get("prompt_tokens", 0)),
+            completion_tokens=int(d.get("completion_tokens", 0)),
+            llm_calls=int(d.get("llm_calls", 0)),
             goal=dict(d.get("goal", {})),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),
@@ -145,6 +160,18 @@ class TaskStore:
         """最新の1件。なければ None。"""
         items = self.list(limit=1)
         return items[0] if items else None
+
+    def delete(self, task_id: str) -> bool:
+        """1件削除する。存在しなければ False。"""
+        path = self._dir / f"{task_id}.json"
+        if not path.is_file():
+            return False
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.warning("タスク記録の削除に失敗 %s: %s", task_id, e)
+            return False
+        return True
 
     def mark_interrupted(self) -> int:
         """実行中のまま残っているレコードを interrupted に倒す。

@@ -399,7 +399,7 @@ class TestWakeOnBlack:
         disp = _BlackThenNormal()
         session = TaskSession(llm=MockLLMProvider(), display=disp)
         ss = await session._capture_screenshot()
-        assert disp.calls == 2  # 黒→ウェイク→再取得
+        assert disp.calls == 3  # 黒→ウェイク→再取得→OCR用raw
         assert "shift" in disp.key_presses
         # 返るのは2枚目（明るい方）
         import io
@@ -408,6 +408,94 @@ class TestWakeOnBlack:
 
         mean = sum(Image.open(io.BytesIO(ss.image_bytes)).convert("L").tobytes()) / (16 * 12)
         assert mean > 100
+
+
+class _CaptureLLM(MockLLMProvider):
+    """error_context を記録するモック。"""
+
+    def __init__(self, decision):
+        super().__init__(decide_result=decision)
+        self.seen_errors = []
+
+    async def decide_next_action(self, *args, **kwargs):
+        self._decide_calls.append(args)
+        self.seen_errors.append(kwargs.get("error_context"))
+        return self._decide_result
+
+
+def _executing_session(llm, store=None):
+    from ai_desktop_agent.agent.state import Goal, Subtask
+    from ai_desktop_agent.server.session import TaskSession
+    from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+    s = TaskSession(llm=llm, display=FakeDisplayBackend(), store=store)
+    s.loop.start(Goal(description="g"))
+    s.loop.understanding_done()
+    s.loop.plan_ready([Subtask(id="s1", description="d")])
+    return s
+
+
+def _type_decision(text="hello"):
+    from ai_desktop_agent.actions.primitives import Action, ActionType
+    from ai_desktop_agent.agent.llm.types import ActionDecision
+
+    return ActionDecision(
+        action=Action(action_type=ActionType.TYPE, params={"text": text}),
+        expected_effect="input",
+        confidence=0.9,
+        reasoning="type",
+    )
+
+
+class TestSlowVmGuards:
+    def test_is_stuck_repeat(self):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+
+        s = _executing_session(MockLLMProvider())
+        assert s._is_stuck_repeat(_type_decision().action) is False
+        for _ in range(2):
+            s.loop.record_action(
+                Action(action_type=ActionType.TYPE, params={"text": "hello"}), True
+            )
+        assert s._is_stuck_repeat(_type_decision().action) is True
+        assert s._is_stuck_repeat(_type_decision("other").action) is False
+
+    @pytest.mark.asyncio
+    async def test_stuck_repeat_becomes_wait(self):
+        from ai_desktop_agent.actions.primitives import ActionType
+
+        llm = _CaptureLLM(_type_decision())
+        s = _executing_session(llm)
+        # 履歴に同一TYPEを2件入れてから実行
+        from ai_desktop_agent.actions.primitives import Action
+
+        s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
+        s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
+        await s._execute_phase()
+        last = s.loop.context.action_history[-1]
+        assert last.action.action_type == ActionType.WAIT
+
+    @pytest.mark.asyncio
+    async def test_unchanged_screen_hints_next_decide(self):
+
+        llm = _CaptureLLM(_type_decision())
+        s = _executing_session(llm)
+        await s._execute_phase()  # 1ターン目（ヒントなし）
+        s.loop.verify_success()  # VERIFYING → EXECUTING
+        await s._execute_phase()  # 2ターン目（同一画像→ヒント付き）
+        hints = [e for e in llm.seen_errors if e is not None]
+        assert hints, "無変化ヒントが渡されること"
+        assert "変化がありません" in hints[-1].error_message
+
+    @pytest.mark.asyncio
+    async def test_wait_for_still_public(self):
+        import asyncio
+
+        from ai_desktop_agent.actions.executor import ActionExecutor
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        ex = ActionExecutor(FakeDisplayBackend())
+        await asyncio.wait_for(ex.wait_for_still(timeout=5.0), timeout=10)
 
 
 class TestSessionIdWiring:
@@ -438,3 +526,116 @@ class TestSessionIdWiring:
 
         session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
         assert session.id  # 属性がなくても生成できること
+
+
+class TestVmRestartAction:
+    """エージェント判断のVM作り直しテスト（許可制）。"""
+
+    @pytest.mark.asyncio
+    async def test_denied_without_permission(self):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import Goal, Subtask
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
+        session.loop.start(Goal(description="g"))
+        session.loop.understanding_done()
+        session.loop.plan_ready([Subtask(id="s1", description="d")])
+        assert session.allow_vm_restart is False
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.VM_RESTART, params={"reason": "test"}),
+            expected_effect="reboot",
+            confidence=0.9,
+            reasoning="test",
+        )
+        await session._execute_vm_restart(decision)
+        last = session.loop.context.action_history[-1]
+        assert last.action.action_type == ActionType.VM_RESTART
+        assert last.success is False
+        assert session._pending_error is not None
+        assert "許可" in session._pending_error.error_message
+
+    @pytest.mark.asyncio
+    async def test_allowed_restarts_and_replans(self, monkeypatch):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        restarted = []
+
+        class _FakePool:
+            def restart_vm(self, vm_id, timeout=30):
+                restarted.append(vm_id)
+                from ai_desktop_agent.server.vm_pool import VmInfo
+
+                return VmInfo(id=vm_id, name=vm_id, status="running")
+
+        monkeypatch.setattr("ai_desktop_agent.server.vm_pool.VmPool", _FakePool)
+        monkeypatch.setattr("ai_desktop_agent.server.session.RESTART_SETTLE_SECONDS", 0.0)
+
+        session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
+        session.allow_vm_restart = True
+        session.vm_id = "vm-test"
+        session.loop.start(Goal(description="g"))
+        session.loop.understanding_done()
+        session.loop.plan_ready([Subtask(id="s1", description="d")])
+        decision = ActionDecision(
+            action=Action(action_type=ActionType.VM_RESTART, params={"reason": "test"}),
+            expected_effect="reboot",
+            confidence=0.9,
+            reasoning="test",
+        )
+        await session._execute_vm_restart(decision)
+        assert restarted == ["vm-test"]
+        assert session.loop.state == AgentState.RECOVERING
+        assert session._pending_error is not None
+        assert "初期状態" in session._pending_error.error_message
+
+
+class TestCursorInfo:
+    """VNCプロトコル層のカーソル情報テスト。"""
+
+    @staticmethod
+    def _client_with_protocol(x=None, y=None, cursor=None):
+        from ai_desktop_agent.vm.vnc_client import VNCClient
+
+        c = VNCClient()
+
+        class _Proto:
+            pass
+
+        proto = _Proto()
+        proto.x = x
+        proto.y = y
+        proto.cursor = cursor
+
+        class _FakeVNC:
+            protocol = proto
+
+            def keyPress(self, key):  # noqa: N802
+                pass
+
+        c._client = _FakeVNC()
+        c._connected = True
+        return c
+
+    def test_protocol_position_preferred(self):
+        c = self._client_with_protocol(111, 222)
+        assert c.cursor_position == (111, 222)
+        assert c.cursor_x == 111
+        assert c.cursor_y == 222
+
+    def test_fallback_to_tracked(self):
+        c = self._client_with_protocol(None, None)
+        c._cursor_x, c._cursor_y = 5, 6
+        assert c.cursor_position == (5, 6)
+
+    def test_custom_cursor_flag(self):
+        assert self._client_with_protocol(cursor=object()).has_custom_cursor is True
+        assert self._client_with_protocol(cursor=None).has_custom_cursor is False

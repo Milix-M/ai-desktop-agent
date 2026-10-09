@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import VncViewer from "@/components/VncViewer";
 
 const listeners: Record<string, ((e?: unknown) => void)[]> = {};
 const instances: unknown[] = [];
@@ -32,8 +32,6 @@ class MockRFB {
 
 vi.mock("@novnc/novnc", () => ({ default: MockRFB }));
 
-import VncViewer from "@/components/VncViewer";
-
 function fire(type: string, event?: unknown) {
   for (const cb of listeners[type] ?? []) cb(event);
 }
@@ -45,49 +43,50 @@ describe("VncViewer", () => {
     instances.length = 0;
   });
 
-  it("shows status badge from the start", async () => {
-    render(<VncViewer />);
-    expect(screen.getByTestId("vnc-status")).toBeInTheDocument();
+  it("creates a connection on mount with given url", async () => {
+    render(<VncViewer wsUrl="ws://example:6090" />);
     await waitFor(() => {
-      expect(screen.getByTestId("vnc-status")).toHaveTextContent("接続中");
+      expect(instances.length).toBeGreaterThan(0);
     });
+    const first = instances[0] as MockRFB;
+    expect(first.url).toBe("ws://example:6090");
   });
 
-  it("shows connected status and reconnect flow", async () => {
+  it("notifies connect with resolution", async () => {
     const onChange = vi.fn();
     render(<VncViewer onConnectionChange={onChange} />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("vnc-status")).toHaveTextContent("接続中");
+      expect(instances.length).toBeGreaterThan(0);
     });
-
     await act(async () => {
       fire("connect");
     });
-    expect(screen.getByTestId("vnc-status")).toHaveTextContent("接続済み");
     expect(onChange).toHaveBeenCalledWith(true, "1280x800");
-    expect(screen.queryByTestId("vnc-reconnect")).not.toBeInTheDocument();
-
-    await act(async () => {
-      fire("disconnect", { detail: { clean: false } });
-    });
-    expect(screen.getByTestId("vnc-status")).toHaveTextContent("再接続");
-    expect(screen.getByTestId("vnc-reconnect")).toBeInTheDocument();
   });
 
-  it("manual reconnect creates a new connection", async () => {
-    render(<VncViewer />);
-    await waitFor(() => {
-      expect(screen.getByTestId("vnc-status")).toHaveTextContent("接続中");
-    });
-    const before = instances.length;
+  it("notifies disconnect", async () => {
+    const onChange = vi.fn();
+    render(<VncViewer onConnectionChange={onChange} />);
 
+    await waitFor(() => {
+      expect(instances.length).toBeGreaterThan(0);
+    });
+    await act(async () => {
+      fire("connect");
+    });
     await act(async () => {
       fire("disconnect", { detail: { clean: false } });
     });
-    await userEvent.click(screen.getByTestId("vnc-reconnect"));
+    expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it("renders no overlay controls", async () => {
+    const { container } = render(<VncViewer />);
     await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(before);
+      expect(instances.length).toBeGreaterThan(0);
     });
+    expect(container.querySelector(".vnc-screen")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

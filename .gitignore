@@ -29,6 +29,8 @@ vm_images/
 vm/vmlinuz
 vm/initrd.img
 vm/cmdline.txt
+vm/sockets/
+vm/overlays/
 
 # OS
 .DS_Store

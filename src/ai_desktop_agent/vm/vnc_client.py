@@ -151,11 +151,39 @@ class VNCClient(DisplayBackend):
 
     @property
     def cursor_x(self) -> int:
-        return self._cursor_x
+        return self.cursor_position[0]
 
     @property
     def cursor_y(self) -> int:
-        return self._cursor_y
+        return self.cursor_position[1]
+
+    @property
+    def cursor_position(self) -> tuple[int, int]:
+        """VNCプロトコル層のカーソル座標。
+
+        内部追跡より正確（プロトコルが把握している最終位置）。
+        取得できなければ内部追跡値を返す。
+        """
+        try:
+            proto = getattr(self._client, "protocol", None)
+            x, y = proto.x, proto.y
+            if isinstance(x, int) and isinstance(y, int):
+                self._cursor_x, self._cursor_y = x, y
+                return (x, y)
+        except Exception:
+            pass
+        return (self._cursor_x, self._cursor_y)
+
+    @property
+    def has_custom_cursor(self) -> bool:
+        """サーバーがカーソル形状を送ってきているか。
+
+        形状の有無で「何の上にいるか」（Iビーム等）の手がかりになる。
+        """
+        try:
+            return getattr(self._client, "protocol", None).cursor is not None
+        except Exception:
+            return False
 
     # ── 接続管理 ─────────────────────────────────────────
 

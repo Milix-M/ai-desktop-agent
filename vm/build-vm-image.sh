@@ -82,7 +82,10 @@ chroot "$TARGET" apt-get install -y --no-install-recommends \
     sudo curl wget
 chroot "$TARGET" apt-get install -y --no-install-recommends \
     plasma-desktop plasma-workspace kwin-x11 sddm konsole \
-    firefox xdotool wmctrl xauth dolphin
+    firefox xdotool wmctrl xauth dolphin \
+    qemu-guest-agent
+# guest agent は初回起動時に systemd が自動起動する。
+# QEMU 側の virtio-serial チャネルは entrypoint.sh で付与する。
 # 注意: Ubuntu 24.04 の firefox パッケージは snap 移行用のスタブ。
 # chroot 内では snapd が動かないため実体が入らない。初回起動後に
 # ゲスト内で `sudo snap install firefox` を実行すること。

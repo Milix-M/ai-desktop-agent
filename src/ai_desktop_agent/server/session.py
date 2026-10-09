@@ -8,6 +8,7 @@ region_select による2段階精密クリックをサポートする。
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -23,6 +24,7 @@ from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.ocr import extract_text as _ocr_text
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
@@ -30,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 #: 真っ黒判定の輝度しきい値（DPMS 消灯時は全画素 0）
 BLACK_SCREEN_THRESHOLD = 2.0
+
+
+def _image_hash(image_bytes: bytes) -> str:
+    """画像のSHA256ハッシュを返す（変化検出用）。"""
+    import hashlib
+
+    return hashlib.sha256(image_bytes).hexdigest()
+
+
+def _params_key(params: dict | None) -> tuple:
+    """アクション比較用の正規化キー。"""
+    return tuple(sorted((params or {}).items()))
 
 
 def _is_black_screen(screenshot: Screenshot, threshold: float = BLACK_SCREEN_THRESHOLD) -> bool:
@@ -58,6 +72,26 @@ ZOOM_MIN_SIZE = 50
 ZOOM_MAX_SIZE = 500
 MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
+RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
+STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
+STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
+SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
+
+# 画面を変える可能性のあるアクション（実行後に安定待ちする）
+VISUAL_ACTIONS: frozenset = frozenset(
+    {
+        ActionType.LEFT_CLICK,
+        ActionType.RIGHT_CLICK,
+        ActionType.MIDDLE_CLICK,
+        ActionType.DOUBLE_CLICK,
+        ActionType.DRAG,
+        ActionType.SCROLL,
+        ActionType.TYPE,
+        ActionType.KEY_PRESS,
+        ActionType.KEY_COMBO,
+        ActionType.KEY_HOLD,
+    }
+)
 
 
 class TaskSession:
@@ -72,6 +106,7 @@ class TaskSession:
         llm: LLMProvider | None = None,
         display: DisplayBackend | None = None,
         store: TaskStore | None = None,
+        vm_id: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
@@ -83,6 +118,10 @@ class TaskSession:
         self._store = store
         self._instruction = ""
         self._created_at = time.time()
+        # 実行対象VMのID（複数VMの並列実行用）
+        self.vm_id = vm_id
+        # ユーザー許可制：エージェント判断でのVM作り直しを許可するか
+        self.allow_vm_restart = False
 
         if display is not None:
             self.display = display
@@ -99,22 +138,38 @@ class TaskSession:
                 "環境変数 VNC_HOST を設定するか、display オブジェクトを明示的に渡してください。"
             )
 
-        self.executor = ActionExecutor(self.display)
+        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
         self._task: asyncio.Task | None = None
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
+        # 直近のOCRテキスト（LLMプロンプト用）
+        self._last_ocr_text: str = ""
         # サブタスクごとの空完了却下回数
         self._empty_complete_refusals: dict[str, int] = {}
         # サブタスクごとの検証失敗回数
         self._verify_failures: dict[str, int] = {}
         # 回復・再決定に引き継ぐエラー情報
         self._pending_error: ErrorContext | None = None
+        # 前ターンの画面ハッシュ（無変化検出用）
+        self._prev_turn_hash: str | None = None
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
         self._on_action: list[Callable] = []
         self._on_error: list[Callable] = []
         self._on_complete: list[Callable] = []
+
+    def set_display(self, display: DisplayBackend) -> None:
+        """操作対象の表示バックエンドを差し替える（VM指定用）。"""
+        try:
+            old = self.display
+            if old is not None and old is not display:
+                with contextlib.suppress(Exception):
+                    old.disconnect()
+        except AttributeError:
+            pass
+        self.display = display
+        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
 
     # ── イベント ──────────────────────────────
 
@@ -249,6 +304,9 @@ class TaskSession:
             instruction=self._instruction,
             state=self.loop.state.value,
             success=success,
+            prompt_tokens=int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(self.llm, "total_completion_tokens", 0) or 0),
+            llm_calls=int(getattr(self.llm, "call_count", 0) or 0),
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
@@ -271,6 +329,8 @@ class TaskSession:
                 }
                 for s in ctx.subtasks
             ],
+            current_subtask_index=ctx.current_subtask_index,
+            vm_id=self.vm_id,
             goal=(
                 {
                     "description": goal.description,
@@ -320,9 +380,21 @@ class TaskSession:
 
         # LLM に判断させる（手抜き完了は最大2回まで却下して再問い合わせ）。
         # 回復フローからのエラー情報があれば引き継ぐ。
+        # 前ターンから画面が無変化なら、その旨も伝える（低速VM対策）。
         error_ctx = self._pending_error
         self._pending_error = None
+        if error_ctx is None and self._is_screen_unchanged(screenshot):
+            error_ctx = ErrorContext(
+                action=self.loop.context.action_history[-1].action,
+                error_message=(
+                    "前回の操作後も画面に変化がありません。"
+                    "アプリの起動には時間がかかる場合があります。"
+                    "同じ操作の連打は避け、wait で待機するか、別の手段を試してください。"
+                ),
+                retry_count=0,
+            )
         decision = await self._decide_action(subtask, screenshot, error_ctx)
+        self._prev_turn_hash = _image_hash(screenshot.image_bytes)
         for _ in range(MAX_EMPTY_COMPLETE_REFUSALS):
             if not self._is_empty_complete(decision):
                 break
@@ -348,6 +420,10 @@ class TaskSession:
             # 3回連続で完了宣言なら受け入れる（本当に何もない場合の脱出）
             pass
 
+        # VM作り直しは専用フローで処理する
+        if decision.action.action_type == ActionType.VM_RESTART:
+            await self._execute_vm_restart(decision)
+            return
         # 低確信度クリックは拡大へ回す（いきなり撃たせない）
         if (
             decision.action.action_type
@@ -393,6 +469,16 @@ class TaskSession:
         # 画面内にクランプ（範囲外座標のズレを防ぐ）
         decision = self._clamp_decision(decision, screenshot)
 
+        # 同一アクションの足踏みは待機に置換する（低速VM対策）
+        if self._is_stuck_repeat(decision.action):
+            logger.info("同一操作の連続を検出、待機に置換します: %s", decision.action.params)
+            decision = ActionDecision(
+                action=Action(action_type=ActionType.WAIT, params={"seconds": STUCK_WAIT_SECONDS}),
+                expected_effect="画面変化の待機",
+                confidence=decision.confidence,
+                reasoning="同一操作の連続検出による待機: " + decision.reasoning,
+            )
+
         # 一時停止中は再開まで待つ（遷移エラーを防ぐ）
         await self._wait_if_paused()
 
@@ -418,8 +504,12 @@ class TaskSession:
             confidence=decision.confidence,
         )
 
-        # 画面変化を待つ
-        await asyncio.sleep(0.5)
+        # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
+        # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
+        if action.action_type in VISUAL_ACTIONS:
+            await self.executor.wait_for_still(SETTLE_TIMEOUT)
+        else:
+            await asyncio.sleep(0.5)
 
         # 一時停止中は再開まで待つ（遷移エラーを防ぐ）
         await self._wait_if_paused()
@@ -440,6 +530,67 @@ class TaskSession:
         """PAUSED の間は再開まで待機する。"""
         while self.loop.state == AgentState.PAUSED:
             await asyncio.sleep(0.5)
+
+    async def _execute_vm_restart(self, decision: ActionDecision) -> None:
+        """VM_RESTART を処理する：許可制で作り直し、後は回復フローへ。
+
+        許可なし → 却下して回復フロー（別手段へ）。
+        実行後 → 環境初期化として回復フローへ（新画面で再判断）。
+        """
+        from ai_desktop_agent.server.vm_pool import VmPool
+
+        action = decision.action
+        reason = (action.params or {}).get("reason", "")
+
+        if not self.allow_vm_restart:
+            logger.info("VM作り直しは許可されていないため却下: %s", reason)
+            self.loop.record_action(action, False, "VM作り直しは許可されていません")
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=(
+                    "VM作り直しはこのタスクでは許可されていません。"
+                    "VMを作り直さずに別の方法で進めてください。"
+                ),
+                retry_count=0,
+            )
+            self.loop.action_executed()
+            self.loop.wait_complete()
+            self.loop.verify_failed()
+            await self._emit_action(action, False)
+            await self._emit_state_change()
+            return
+
+        try:
+            pool = VmPool()
+            info = pool.restart_vm(self.vm_id or "vm")
+            logger.info("VM作り直しを実行: %s (%s)", info.id, reason)
+            await asyncio.sleep(RESTART_SETTLE_SECONDS)
+            ok, error = True, ""
+        except Exception as e:
+            logger.exception("VM作り直しに失敗")
+            ok, error = False, f"VM作り直しに失敗しました: {e}"
+
+        self.loop.record_action(action, ok, error)
+        if ok:
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=(
+                    "VMを作り直しました。環境は初期状態に戻っています。"
+                    "最初からやり直すつもりで計画してください。"
+                ),
+                retry_count=0,
+            )
+        else:
+            self._pending_error = ErrorContext(
+                action=action,
+                error_message=error,
+                retry_count=0,
+            )
+        self.loop.action_executed()
+        self.loop.wait_complete()
+        self.loop.verify_failed()
+        await self._emit_action(action, ok)
+        await self._emit_state_change()
 
     async def _handle_region_zoom(
         self, subtask: Subtask, decision: ActionDecision, depth: int = 0
@@ -659,6 +810,25 @@ class TaskSession:
             if history[i].action.action_type == ActionType.SUBTASK_COMPLETE:
                 return history[i + 1 :]
         return list(history)
+
+    def _is_screen_unchanged(self, screenshot: Screenshot) -> bool:
+        """前ターンの画面と同一かどうか（低速VMの無変化検出用）。"""
+        if self._prev_turn_hash is None or not self.loop.context.action_history:
+            return False
+        return _image_hash(screenshot.image_bytes) == self._prev_turn_hash
+
+    def _is_stuck_repeat(self, action: Action) -> bool:
+        """同一アクションが連続しているか（SUBTASK_COMPLETE除く）。"""
+        if action.action_type == ActionType.SUBTASK_COMPLETE:
+            return False
+        history = self.loop.context.action_history
+        if len(history) < STUCK_REPEAT_COUNT - 1:
+            return False
+        key = (action.action_type, _params_key(action.params))
+        recent = history[-(STUCK_REPEAT_COUNT - 1) :]
+        return all(
+            (r.action.action_type, _params_key(r.action.params or {})) == key for r in recent
+        )
 
     def _is_repeat_click(self, action: Action) -> bool:
         """直前と同じクリックの繰り返しかを判定する。"""
@@ -884,13 +1054,14 @@ class TaskSession:
             action_history=self.loop.context.action_history,
             screenshot=screenshot,
             error_context=error_context,
+            ocr_text=self._last_ocr_text or None,
         )
 
     async def _capture_screenshot(self) -> Screenshot:
         """現在のVM画面をキャプチャする（オーバーレイ付き）。
 
         DPMS 等で画面が真っ黒の場合は Shift キーで起こしてから
-        取り直す（最大1回）。エージェントの自己回復。
+        取り直す（最大1回）。ついでに生画像のOCRテキストを保持する。
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
@@ -903,6 +1074,12 @@ class TaskSession:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
             screenshot = self.display.capture_screen()
+        try:
+            capture_raw = getattr(self.display, "capture_raw", None)
+            if callable(capture_raw):
+                self._last_ocr_text = _ocr_text(capture_raw().image_bytes)
+        except Exception:
+            logger.debug("OCRテキスト取得に失敗", exc_info=True)
         return screenshot
 
     # ── 制御 ────────────────────────────────────

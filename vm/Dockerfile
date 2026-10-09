@@ -14,7 +14,8 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV VM_IMAGE=/vm/desktop.qcow2 \
-    VM_MEMORY=2048 \
+    VM_MEMORY=4096 \
+    VM_CPUS=4 \
     VM_VNC_PORT=5900 \
     CMDLINE_FILE=/vm/cmdline.txt
 

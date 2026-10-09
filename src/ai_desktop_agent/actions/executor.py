@@ -61,6 +61,10 @@ class ActionExecutor:
             logger.error("[FAIL] %s: %s (%.0fms)", action.description, e, duration)
             return False
 
+    async def wait_for_still(self, timeout: float = 5.0) -> None:
+        """画面変化が収まるまで待機する（公開API）。"""
+        await self._wait_for_still(timeout)
+
     async def _dispatch(self, action: Action) -> None:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
         p = action.params or {}
@@ -116,6 +120,11 @@ class ActionExecutor:
                 # 本来は TaskSession が横取りして拡大→再判断する。
                 # 直接 executor に来た場合は何もしない（誤って成功扱いしないよう明示）。
                 logger.warning("REGION_SELECT が executor に到達（sessionで処理されるべき）")
+
+            # ── VM操作（ユーザー許可制） ──
+            case ActionType.VM_RESTART:
+                # 本来は TaskSession が横取りして許可確認の上で実行する。
+                logger.warning("VM_RESTART が executor に到達（sessionで処理されるべき）")
 
             # ── メタ ──
             case ActionType.SUBTASK_COMPLETE:
@@ -189,6 +198,20 @@ class ActionExecutor:
             except Exception:
                 pass
         return self._backend.capture_screen()
+
+    def locate(self, template_png: bytes, threshold: float = 0.9) -> tuple[int, int] | None:
+        """画面上からテンプレート画像の位置を探す。
+
+        Returns:
+            (中心x, 中心y) または見つからなければ None。
+        """
+        from ai_desktop_agent.vm.matcher import find_template
+
+        ss = self._capture_stable()
+        found = find_template(ss.image_bytes, template_png, threshold=threshold)
+        if found is None:
+            return None
+        return (found[0], found[1])
 
     @staticmethod
     def _image_hash(image_bytes: bytes) -> str:

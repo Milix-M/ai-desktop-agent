@@ -32,6 +32,7 @@ class VmStatusInfo:
     status: str  # running / exited / restarting / not_found 等
     health: str | None = None  # healthy / unhealthy / starting / none
     name: str | None = None
+    qmp_status: str | None = None  # QMP query-status の status（inmigrate等もあり得る）
 
 
 class VmController:
@@ -54,7 +55,7 @@ class VmController:
     # ── 公開 API ──────────────────────────────────────
 
     def status(self) -> VmStatusInfo:
-        """VMコンテナの現在の状態を返す。"""
+        """VMコンテナの現在の状態を返す。QMPが生きていればゲスト状態も付与。"""
         container = self._find_container()
         if container is None:
             return VmStatusInfo(running=False, status="not_found")
@@ -66,14 +67,25 @@ class VmController:
             status=str(container.status),
             health=health,
             name=container.name,
+            qmp_status=self._qmp_status(),
         )
 
     def restart(self, timeout: int = 30) -> VmStatusInfo:
         """VMコンテナを再起動する（ゲストOSごと作り直し）。
 
+        KVMが利用できない環境ではTCG実行が遅すぎるため再起動を制限する
+        （`KvmUnavailableError`）。デバッグ用の明示許可は `ALLOW_TCG_VM=true`。
         `docker restart` はコンテナ再起動の完了で戻る。
         ゲストのデスクトップが使えるようになるまで数分かかる。
         """
+        from ai_desktop_agent.server.kvm import (
+            KvmUnavailableError,
+            is_kvm_available,
+            is_tcg_allowed,
+        )
+
+        if not is_tcg_allowed() and not is_kvm_available(self._client):
+            raise KvmUnavailableError()
         container = self._find_container()
         if container is None:
             raise DockerUnavailableError("vm コンテナが見つかりません")
@@ -82,6 +94,18 @@ class VmController:
         return self.status()
 
     # ── 内部 ──────────────────────────────────────────
+
+    def _qmp_status(self) -> str | None:
+        """QMPでゲスト稼働状態を照会する。失敗時は None。"""
+        try:
+            from ai_desktop_agent.vm.qmp import QmpClient
+
+            sock = os.environ.get("QMP_SOCK", "/vm/sockets/qmp.sock")
+            with QmpClient(sock, timeout=3.0) as qmp:
+                return str(qmp.query_status().get("status"))
+        except Exception:
+            logger.debug("QMP照会に失敗", exc_info=True)
+            return None
 
     def _docker(self) -> Any:
         if self._client is not None:

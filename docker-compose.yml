@@ -1,25 +1,51 @@
 services:
+  # ── 既定の作業環境（軽量コンテナデスクトップ・QEMU不要） ──
+  desktop:
+    build:
+      context: ./desktop
+      dockerfile: Dockerfile
+    ports:
+      - "5901:5900"
+    environment:
+      - VNC_GEOMETRY=1280x800
+      - VNC_DEPTH=24
+    shm_size: 1gb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── 重いQEMU VM（KVM必須。`/dev/kvm` がないホストでは起動しない） ──
+  # 起動には kvm プロファイルが必要: ./scripts/up.sh（自動判定）か
+  # docker compose --profile kvm up を使うこと。
   vm:
+    profiles: ["kvm"]
     build:
       context: ./vm
       dockerfile: Dockerfile
-    # KVMアクセラレーション用。ホストに /dev/kvm がない環境では
-    # この2行を削除してください（TCGエミュレーションにフォールバックします）
+    # KVMアクセラレーション用（kvmプロファイルでのみ起動するため常時マウント）
     devices:
       - /dev/kvm:/dev/kvm
     ports:
       - "5900:5900"
     environment:
-      - VM_MEMORY=2048
+      # auto（既定）: /dev/kvm の有無で自動切替。.envでの指定は不要。
+      # 明示指定時はそれに従う（true=必須、false=TCG。TCGは既定で制限）。
+      - USE_KVM=${USE_KVM:-auto}
+      - ALLOW_TCG_VM=${ALLOW_TCG_VM:-false}
+      - VM_MEMORY=4096
+      - VM_CPUS=4
       - VM_VNC_PORT=5900
       - VM_IMAGE=/vm/desktop.qcow2
       - CMDLINE_FILE=/vm/cmdline.txt
-      - USE_KVM=${USE_KVM:-false}
     volumes:
       - ./vm/desktop.qcow2:/vm/desktop.qcow2
       - ./vm/vmlinuz:/vm/vmlinuz:ro
       - ./vm/initrd.img:/vm/initrd.img:ro
       - ./vm/cmdline.txt:/vm/cmdline.txt:ro
+      - ./vm/sockets:/vm/sockets
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
@@ -36,15 +62,16 @@ services:
     env_file:
       - .env
     environment:
-      - VNC_HOST=vm
+      - VNC_HOST=desktop
       - VNC_PORT=5900
       - PORT=8081
     volumes:
       - ./data:/app/data
+      - ./vm/sockets:/vm/sockets
       # デバッグ用VM管理（作り直し機能）に必要。不要なら削除可。
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      vm:
+      desktop:
         condition: service_healthy
     restart: unless-stopped
 
@@ -56,11 +83,26 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  # vm用画面配信（kvmプロファイル時のみ）
   websockify:
+    profiles: ["kvm"]
     build:
       context: ./websockify
       dockerfile: Dockerfile
     command: 0.0.0.0:6080 vm:5900
     ports:
       - "6080:6080"
+    restart: unless-stopped
+
+  # desktop用画面配信（常時）
+  websockify-desktop:
+    build:
+      context: ./websockify
+      dockerfile: Dockerfile
+    command: 0.0.0.0:6081 desktop:5900
+    ports:
+      - "6081:6081"
+    depends_on:
+      desktop:
+        condition: service_healthy
     restart: unless-stopped

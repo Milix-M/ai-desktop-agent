@@ -39,9 +39,25 @@ class ActionType(Enum):
     # ズームワークフロー（新設）
     REGION_SELECT = "region_select"  # 精密クリックの前に領域を拡大表示
 
+    # VM操作（ユーザー許可制）
+    VM_RESTART = "vm_restart"  # VM作り直し（allow_vm_restart 時のみ実行）
+
 
 # 全アクション種別リスト（テスト用）
 ALL_ACTION_TYPES = list(ActionType)
+
+
+def allowed_params(action_type: ActionType) -> set[str]:
+    """指定アクション種別で有効なパラメータ名の集合を返す。"""
+    return set(_REQUIRED_PARAMS.get(action_type, set())) | set(
+        _OPTIONAL_PARAMS.get(action_type, set())
+    )
+
+
+def required_params(action_type: ActionType) -> set[str]:
+    """指定アクション種別の必須パラメータ名の集合を返す。"""
+    return set(_REQUIRED_PARAMS.get(action_type, set()))
+
 
 # クリック系アクション（座標必須）
 CLICK_ACTIONS: frozenset[ActionType] = frozenset(
@@ -78,6 +94,7 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.SCREENSHOT: set(),
     ActionType.SUBTASK_COMPLETE: set(),
     ActionType.REGION_SELECT: {"x", "y", "width", "height"},
+    ActionType.VM_RESTART: {"reason"},
 }
 
 # アクション種別ごとの任意パラメータ
@@ -120,6 +137,7 @@ _ACTION_NAMES: dict[ActionType, str] = {
     ActionType.SCREENSHOT: "スクリーンショット",
     ActionType.SUBTASK_COMPLETE: "サブタスク完了",
     ActionType.REGION_SELECT: "領域拡大要求",
+    ActionType.VM_RESTART: "VM作り直し",
 }
 
 
@@ -194,5 +212,7 @@ def _generate_description(action_type: ActionType, params: dict) -> str:
             f"領域({params.get('x')},{params.get('y')}) "
             f"{params.get('width')}x{params.get('height')}"
         )
+    elif action_type == ActionType.VM_RESTART:
+        return f"{name}: {params.get('reason', '')}"
     else:
         return name

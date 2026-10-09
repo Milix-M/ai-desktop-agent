@@ -1,815 +1,522 @@
 # アーキテクチャ詳細設計
 
+> 本書は実装の実態に合わせた設計書である。コードを読む際の地図として使うこと。
+> 主要モジュール: `src/ai_desktop_agent/` 配下（`server/`・`agent/`・`actions/`・`vm/`）、
+> `frontend/src/`、`vm/`（ゲストコンテナ定義）。
+
 ## 目次
 
-1. [エージェント状態機械](#エージェント状態機械)
-2. [多段階パイプライン](#多段階パイプライン)
-3. [アクション定義](#アクション定義)
-4. [観測モデル](#観測モデル)
-5. [LLMプロバイダ抽象化](#llmプロバイダ抽象化)
-6. [エラー回復戦略](#エラー回復戦略)
-7. [安全性設計](#安全性設計)
+1. [システム概要](#システム概要)
+2. [バックエンド（FastAPI）](#バックエンドfastapi)
+3. [エージェント状態機械と実行フロー](#エージェント状態機械と実行フロー)
+4. [意思決定層（LLM＋決定モデル）](#意思決定層llm決定モデル)
+5. [観測（スクリーンショットとその周辺）](#観測スクリーンショットとその周辺)
+6. [アクション実行（VNC操作層）](#アクション実行vnc操作層)
+7. [VM操作アーキテクチャ](#vm操作アーキテクチャ)
+8. [フロントエンド](#フロントエンド)
+9. [安全性・運用](#安全性運用)
+10. [既知の制限と今後](#既知の制限と今後)
+11. [図の管理](#図の管理)
 
-## エージェント状態機械
+> 図はすべて本文中のMermaidブロックで管理する（別ファイル・画像生成は不要）。
+> GitHub・VS CodeのMarkdownプレビューでそのまま表示できる。
 
-エージェントは単純なループではなく、**有限状態機械**として動作する。各状態でやるべきことが明確に分離されており、異常時は適切な回復状態に遷移する。
+## システム概要
 
-```
-                    ┌─────────────┐
-                    │    IDLE     │  ◄── 指示待ち
-                    └──────┬──────┘
-                           │ ユーザー指示受信
-                           ▼
-                    ┌─────────────┐
-                    │ UNDERSTAND  │  指示の意図解析
-                    └──────┬──────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-              ┌────►│  PLANNING   │  タスク分解・計画立案
-              │     └──────┬──────┘
-              │            │
-              │            ▼
-              │     ┌─────────────┐
-              │     │  EXECUTING  │  アクション実行
-              │     └──────┬──────┘
-              │            │
-              │            ▼
-              │     ┌─────────────┐
-              │     │  WAITING    │  UI変化待ち
-              │     └──────┬──────┘
-              │            │
-              │            ▼
-              │     ┌─────────────┐
-              │ ┌───│  VERIFYING  │  結果検証
-              │ │   └──────┬──────┘
-              │ │          │ success
-              │ │          ▼
-              │ │   ┌─────────────┐
-              │ │   │  COMPLETED  │  全サブタスク完了
-              │ │   └─────────────┘
-              │ │
-              │ │   verification failed
-              │ │          │
-              │ │          ▼
-              │ │   ┌─────────────┐
-              │ └───│  RECOVERING │  エラー回復
-              │     └──────┬──────┘
-              │            │ recovery possible → replan/retry
-              │            │
-              │            │ unrecoverable
-              │            ▼
-              │     ┌─────────────┐
-              │     │   FAILED    │  回復不能
-              └─────┴─────────────┘
-              (RECOVERING→PLANNING で再計画)
+自然言語の指示で仮想マシンのGUIをAIが直接操作する。ユーザーはブラウザから指示を出し、
+AIがVMを操作する様子をnoVNCビューアでリアルタイム視聴できる。
+
+```mermaid
+flowchart LR
+    user["ユーザー<br/>(ブラウザ)"]
+    subgraph host["Docker ホスト"]
+        direction LR
+        fe["frontend<br/>Next.js :3000"]
+        be["backend<br/>FastAPI :8081"]
+        wsd["websockify-desktop<br/>VNC→WS :6081"]
+        desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (既定)"]
+        ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
+        vm["vm<br/>QEMU/KVM :5900 (kvm限定)<br/>KDE / 4vCPU・4GB"]
+        vm2["vm-id / desk-id<br/>動的払い出し :5910+/:6090+"]
+        data["data/<br/>tasks/*.json<br/>vms.json"]
+        docker["Docker<br/>デーモン"]
+    end
+    user -->|指示・視聴<br/>HTTP :3000| fe
+    fe -->|REST / WS<br/>:8081| be
+    user -->|画面配信 WS<br/>:6081（既定）| wsd
+    user -->|画面配信 WS<br/>:6080（KVM時のみ）| ws
+    wsd -->|VNC中継<br/>desktop:5900| desk
+    ws -->|VNC中継<br/>vm:5900| vm
+    be -->|VNC操作（既定）<br/>desktop:5900| desk
+    be -->|VNC操作（KVM時）<br/>vm:5900| vm
+    be -->|履歴保存<br/>data/tasks/*.json| data
+    be -->|VM管理<br/>Docker socket| docker
+    docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナはKVM不要| vm2
 ```
 
-### 状態一覧
-
-| 状態 | 説明 | 遷移先 |
-|------|------|--------|
-| `IDLE` | 指示待ち状態 | → UNDERSTANDING |
-| `UNDERSTANDING` | ユーザー指示を解析、意図と制約を抽出 | → PLANNING |
-| `PLANNING` | タスクをサブタスクに分解、アクション計画を生成 | → EXECUTING |
-| `EXECUTING` | 計画に従いアクションを1つずつ実行 | → WAITING |
-| `WAITING` | アクション後のUI変化を待機（ロード中など） | → VERIFYING |
-| `VERIFYING` | アクションが期待通りの効果を持ったか検証 | → EXECUTING (継続) / RECOVERING (失敗) / COMPLETED (終了) |
-| `RECOVERING` | エラーから回復を試みる | → PLANNING (再計画) / EXECUTING (リトライ) / FAILED |
-| `PAUSED` | ユーザーが一時停止 | → EXECUTING (再開) |
-| `COMPLETED` | タスク正常完了 | → IDLE |
-| `FAILED` | タスク遂行不能 | → IDLE |
-
-### 割り込み
-
-- **ユーザー停止**: どの状態からでも PAUSED → 指示により IDLE へ
-- **タイムアウト**: 各状態に最大滞在時間を設定、超過時は RECOVERING → FAILED
-
-## 多段階パイプライン
-
-### Phase 1: 指示理解 (UNDERSTANDING)
-
-入力：ユーザーの自然言語指示
-出力：構造化されたゴール定義
-
-```python
-@dataclass
-class Goal:
-    """LLMによって抽出された構造化ゴール"""
-    description: str                    # "Excelで売上レポートを作成して"
-    intent: str                         # "スプレッドシート作成"
-    target_application: str | None      # "LibreOffice Calc"
-    constraints: list[str]              # ["A列に日付", "B列に金額"]
-    expected_output: str                # "/home/user/report.ods に保存"
-    deadline_seconds: int | None        # タイムアウト
-    environment_vars: dict[str, str]    # 必要な環境変数
-```
-
-LLMプロンプトでは、指示から以下の情報を抽出させる：
-- 何をしたいのか（意図）
-- どのアプリを使うべきか
-- どのような制約があるか
-- 完了条件は何か
-
-### Phase 2: タスク分解 (PLANNING)
-
-入力：Goal
-出力：サブタスクのリスト
-
-```python
-@dataclass
-class Subtask:
-    id: str
-    description: str                    # "LibreOffice Calcを起動する"
-    preconditions: list[str]            # 前提条件 ["デスクトップが表示されている"]
-    expected_outcome: str               # "Calcの空のスプレッドシートが表示されている"
-    max_retries: int = 3
-    timeout_seconds: int = 30
-    actions: list[Action]               # 実行すべきアクション列（EXECUTINGでLLMが都度生成）
-```
-
-**サブタスク分解の例**:
-
-指示: 「売上データのスプレッドシートを作成し、/home/user/report.ods に保存して」
-
-```
-Subtask 1: アプリ起動
-  → LibreOffice Calcを開く
-
-Subtask 2: ヘッダー入力
-  → A1に「日付」、B1に「商品名」、C1に「金額」を入力
-
-Subtask 3: データ入力
-  → A2:C5 にサンプルデータを入力
-
-Subtask 4: 書式設定
-  → ヘッダー行を太字に、金額列を通貨形式に
-
-Subtask 5: 保存
-  → 名前を付けて保存 → /home/user/report.ods
-```
-
-### Phase 3-5: 実行・待機・検証 (EXECUTING → WAITING → VERIFYING)
-
-各サブタスクに対して、LLMが都度1つのアクションを提案し、それを実行→待機→検証のサイクルで進める。
-
-```
-for each subtask:
-    while subtask not complete:
-        # 1. 現在の画面を観測
-        observation = await capture_observation(vnc)
-
-        # 2. LLMに次のアクションを決定させる
-        action = await llm.decide_next_action(
-            goal=goal,
-            current_subtask=subtask,
-            observation=observation,
-            action_history=context.action_history[-10:],  # 直近10アクション
-        )
-        # LLMは以下を返す:
-        #   - action_type + params
-        #   - expected_effect（何が起こるはずか）
-        #   - confidence（0.0〜1.0）
-
-        # 3. アクションを実行
-        await execute_action(vnc, action)
-        context.action_history.append(action)
-
-        # 4. 待機（UI変化を待つ）
-        await asyncio.sleep(0.5)  # 最小待機
-        await wait_for_settle(vnc, timeout=3.0)  # 画面変化が落ち着くまで
-
-        # 5. 検証
-        new_observation = await capture_observation(vnc)
-        result = await verify_effect(action, observation, new_observation)
-
-        if result.is_success:
-            # サブタスク完了判定
-            if await check_subtask_complete(new_observation, subtask):
-                break  # 次のサブタスクへ
-        else:
-            # 回復フェーズへ
-            recovery_result = await recover(action, result, context)
-            if not recovery_result.recoverable:
-                raise TaskFailedError(subtask, result)
-```
-
-### アクション決定のLLMプロンプト設計
-
-LLMに送るコンテキスト：
-
-```
-【システム】あなたはLinuxデスクトップを操作するAIエージェントです。
-
-【現在のゴール】{goal.description}
-【現在のサブタスク】{subtask.description}
-【期待する結果】{subtask.expected_outcome}
-
-【現在の画面】
-→ 添付のスクリーンショットを参照
-→ OCRテキスト:
-{observation.ocr_text}
-→ アクティブウィンドウ: {observation.active_window}
-→ カーソル位置: {observation.cursor_position}
-
-【直近の操作履歴】
-{action_history_last_10}
-
-【指示】
-次に実行すべき1つのアクションを提案してください。
-以下のJSON形式で返答してください:
-
-{
-  "action_type": "left_click | type | key_combo | scroll | wait | screenshot | subtask_complete",
-  "params": { ... },                  // アクションに応じたパラメータ
-  "expected_effect": "...",           // このアクションで何が起こるか（検証に使用）
-  "confidence": 0.0-1.0,              // このアクションへの確信度
-  "reasoning": "..."                  // なぜこのアクションを選んだか
-}
-```
-
-## アクション定義
-
-### 基本アクション
-
-```python
-class ActionType(StrEnum):
-    # === マウス操作 ===
-    MOUSE_MOVE = "mouse_move"         # カーソル移動
-    LEFT_CLICK = "left_click"         # 左クリック
-    RIGHT_CLICK = "right_click"       # 右クリック
-    DOUBLE_CLICK = "double_click"     # ダブルクリック
-    MIDDLE_CLICK = "middle_click"     # 中クリック
-    DRAG = "drag"                     # ドラッグ (from → to)
-    SCROLL = "scroll"                 # スクロール (direction, amount)
-
-    # === キーボード操作 ===
-    TYPE = "type"                     # 文字列入力
-    KEY_PRESS = "key_press"           # 単一キー押下
-    KEY_COMBO = "key_combo"           # 複合キー (Ctrl+C等)
-    KEY_HOLD = "key_hold"             # キー長押し
-
-    # === 待機 ===
-    WAIT = "wait"                     # 指定秒数待機
-    WAIT_FOR_TEXT = "wait_for_text"   # 特定テキストがOCRで検出されるまで待機
-    WAIT_FOR_STILL = "wait_for_still" # 画面変化が収まるまで待機
-
-    # === 観測（LLM判断用） ===
-    SCREENSHOT = "screenshot"         # 高解像度スクリーンショット取得
-
-    # === メタ ===
-    SUBTASK_COMPLETE = "subtask_complete" # サブタスク完了宣言
-```
-
-### アクションパラメータ
-
-```python
-@dataclass
-class Action:
-    action_type: ActionType
-    params: dict  # 型ごとに異なる
-
-    # マウス操作のparams
-    # MOUSE_MOVE:  {"x": int, "y": int}
-    # LEFT_CLICK:  {"x": int, "y": int} | {}  (省略時は現在位置)
-    # DRAG:        {"start": [x,y], "end": [x,y]}
-    # SCROLL:      {"direction": "up"|"down", "amount": int}
-
-    # キーボード操作のparams
-    # TYPE:        {"text": str}
-    # KEY_PRESS:   {"key": str}  例: "enter", "escape", "tab"
-    # KEY_COMBO:   {"keys": [str]}  例: ["ctrl", "c"]
-    # KEY_HOLD:    {"key": str, "duration_ms": int}
-
-    # 待機のparams
-    # WAIT:              {"seconds": float}
-    # WAIT_FOR_TEXT:     {"text": str, "timeout": float}
-    # WAIT_FOR_STILL:    {"timeout": float, "threshold": float}
-```
-
-### アクション実行時の注意点
-
-1. **座標系**: 左上原点 (0,0)、右方向+x、下方向+y。画面解像度はVMの設定に依存。
-2. **クリック前のカーソル移動**: 明示的に `MOUSE_MOVE` → `LEFT_CLICK` の2段階が安全。
-3. **日本語入力**: VM側のIME状態を考慮。英数字以外の入力時は `TYPE` の前にIME ON/OFFが必要。
-4. **キーコンボ**: 修飾キーは押下順を保証（押下: Ctrl→C、解放: C→Ctrl）。
-
-## 観測モデル
-
-エージェントがVMの状態を把握するための多層的な観測システム。
-
-```python
-@dataclass
-class Observation:
-    # 視覚
-    screenshot: bytes                          # 画面全体のPNG画像
-    screenshot_resized: bytes                  # LLM送信用にリサイズ（1024px幅以下）
-
-    # テキスト (OCR)
-    ocr_full_text: str                         # 画面全体のOCR結果
-    ocr_blocks: list[OCRBlock]                 # ブロック単位（位置情報付き）
-
-    # ウィンドウ情報 (xdotool/wmctrl)
-    active_window_title: str | None            # アクティブウィンドウのタイトル
-    active_window_geometry: Rect | None        # アクティブウィンドウの位置とサイズ
-    all_windows: list[WindowInfo]              # 全ウィンドウ情報
-
-    # カーソル
-    cursor_position: tuple[int, int] | None    # 現在のカーソル位置
-
-    # 差分
-    changed_regions: list[Rect]                # 前回観測からの変化領域
-
-    # メタ
-    timestamp: float                           # 観測時刻
-    frame_number: int                          # 観測シーケンス番号
-
-@dataclass
-class OCRBlock:
-    text: str
-    bbox: Rect        # (x1, y1, x2, y2)
-    confidence: float  # OCR信頼度
-
-@dataclass
-class WindowInfo:
-    title: str
-    pid: int
-    geometry: Rect
-    is_active: bool
-
-@dataclass
-class Rect:
-    x: int
-    y: int
-    width: int
-    height: int
-```
-
-### 観測の流れ
-
-```
-1. VNCフレームバッファ取得 (PIL Image)
-2. 画像差分検出（前回スクショと比較 → changed_regions）
-3. OCR実行（Tesseract/EasyOCR → 全テキスト + ブロック情報）
-4. ウィンドウ情報取得（VM内で xdotool/wmctrl を実行）
-5. カーソル位置取得（VNCプロトコルから）
-6. LLM送信用にリサイズ（長辺1024px、圧縮率80% JPEG）
-```
-
-## LLMプロバイダ抽象化
-
-### インターフェース
-
-```python
-class LLMProvider(ABC):
-    """全LLMプロバイダが実装すべき共通インターフェース"""
-
-    @abstractmethod
-    async def decide_next_action(
-        self,
-        goal: Goal,
-        subtask: Subtask,
-        observation: Observation,
-        action_history: list[ActionRecord],
-        error_context: ErrorContext | None,
-    ) -> ActionDecision:
-        """現在の状態から次のアクションを決定する"""
-        ...
-
-    @abstractmethod
-    async def decompose_task(
-        self,
-        goal: Goal,
-        observation: Observation,
-    ) -> list[Subtask]:
-        """指示をサブタスクに分解する"""
-        ...
-
-    @abstractmethod
-    async def verify_result(
-        self,
-        action: Action,
-        expected_effect: str,
-        before: Observation,
-        after: Observation,
-    ) -> VerificationResult:
-        """アクションの結果を検証する"""
-        ...
-
-    @abstractmethod
-    async def recover_from_error(
-        self,
-        error: ErrorRecord,
-        observation: Observation,
-        action_history: list[ActionRecord],
-    ) -> RecoveryPlan:
-        """エラーからの回復計画を生成する"""
-        ...
-
-class ActionDecision(NamedTuple):
-    action: Action
-    expected_effect: str
-    confidence: float       # 0.0〜1.0
-    reasoning: str          # 判断理由（ログ用）
-```
-
-### プロバイダ実装
-
-| クラス | プロバイダ | モデル例 | 備考 |
-|--------|----------|---------|------|
-| `AnthropicProvider` | Anthropic | `claude-sonnet-4-20250514` | Computer Use ツールネイティブ |
-| `OpenAIProvider` | OpenAI | `gpt-4o`, `gpt-4.1` | Vision API + JSON mode |
-| `GoogleProvider` | Google | `gemini-2.5-pro` | 長コンテキスト、マルチモーダル |
-| `OllamaProvider` | Ollama (ローカル) | `llama3.2-vision`, `qwen2.5-vl` | API費用ゼロ、低レイテンシ |
-| `OpenAICompatProvider` | OpenAI互換 | 任意 (vLLM, LiteLLM等) | 自前GPUで任意モデル |
-
-### プロバイダ選択
-
-```python
-# 環境変数または設定ファイルで指定
-provider = LLMProviderFactory.create(
-    provider_type="anthropic",        # or "openai", "google", "ollama", "openai_compat"
-    model="claude-sonnet-4-20250514",
-    api_key=os.environ["ANTHROPIC_API_KEY"],
-    # プロバイダ固有のオプション
-    max_tokens=4096,
-    temperature=0.0,                  # 決定論的な動作を優先
-)
-```
-
-### Anthropic Computer Use 統合
-
-AnthropicのComputer Use機能を使う場合、ツール定義を利用する：
-
-```python
-# Anthropicのツール定義（computer_use_20250514）
-tools = [
-    {
-        "type": "computer_20250514",
-        "name": "computer",
-        "display_width_px": 1280,
-        "display_height_px": 720,
-        "display_number": 0,
-    },
-    {
-        "type": "text_editor_20250514",
-        "name": "str_replace_editor",
-    },
-    {
-        "type": "bash_20250514",
-        "name": "bash",
-    },
-]
-```
-
-Computer Use APIを使う場合、スクリーンショットのエンコードやツール呼び出しのループ処理がプロバイダ内部にカプセル化される。
-
-## エラー回復戦略
-
-### 回復戦略の種類
-
-```python
-class RecoveryStrategy(StrEnum):
-    WAIT_AND_RETRY = "wait_and_retry"         # 待ってから同じアクションを再実行
-    SCROLL_AND_RETRY = "scroll_and_retry"     # スクロールしてから再実行（対象が画面外の可能性）
-    CLOSE_DIALOG = "close_dialog"             # 予期しないダイアログを閉じる
-    ALT_WINDOW = "alt_window"                 # Alt+Tabでウィンドウ切り替え
-    REFRESH = "refresh"                       # F5やCtrl+Rでリフレッシュ
-    ALTERNATIVE_APPROACH = "alternative"      # 別のUI経路で同じ目標を達成
-    REPLAN_SUBTASK = "replan"                 # サブタスク全体を再計画
-    ASK_USER = "ask_user"                     # ユーザーに判断を仰ぐ
-    GIVE_UP = "give_up"                       # 回復不能、失敗としてマーク
-```
-
-### 回復フロー
-
-```python
-async def recover(
-    action: Action,
-    error: VerificationError,
-    context: AgentContext,
-    observation: Observation,
-) -> RecoveryResult:
-    """エラーからの回復を試みる"""
-
-    # 1. リトライ回数チェック
-    retry_key = f"{context.current_subtask.id}:{action.action_type}"
-    retries = context.retry_counts.get(retry_key, 0)
-
-    if retries >= context.current_subtask.max_retries:
-        # 最大リトライ回数超過 → ユーザーに確認
-        return await escalate_to_user(context, error)
-
-    context.retry_counts[retry_key] = retries + 1
-
-    # 2. エラー種別に応じた回復戦略を選択
-    strategy = classify_error(error, observation)
-
-    # 3. 単純な回復は決定的に処理
-    if strategy == RecoveryStrategy.WAIT_AND_RETRY:
-        await asyncio.sleep(2.0)
-        return RecoveryResult(retry=True, action=action)  # 同じアクションを再実行
-
-    if strategy == RecoveryStrategy.CLOSE_DIALOG:
-        await vnc.key_press("escape")
-        await asyncio.sleep(1.0)
-        return RecoveryResult(retry=True, action=action)
-
-    # 4. 複雑な回復はLLMに判断させる
-    if strategy in (RecoveryStrategy.ALTERNATIVE_APPROACH,
-                    RecoveryStrategy.REPLAN_SUBTASK):
-        recovery_plan = await llm.recover_from_error(
-            error=error,
-            observation=observation,
-            action_history=context.action_history,
-        )
-        return RecoveryResult(
-            retry=True,
-            recovery_actions=recovery_plan.actions,
-        )
-
-    # 5. それでもダメならユーザーに
-    return await escalate_to_user(context, error)
-```
-
-### エラークラス分類
-
-```python
-def classify_error(error: VerificationError, obs: Observation) -> RecoveryStrategy:
-    """エラーの種類に応じて回復戦略を選ぶ"""
-
-    # 要素が見つからない → 画面外かも → スクロール
-    if isinstance(error, ElementNotFoundError):
-        return RecoveryStrategy.SCROLL_AND_RETRY
-
-    # 予期しないダイアログ → 閉じる
-    if isinstance(error, UnexpectedDialogError):
-        return RecoveryStrategy.CLOSE_DIALOG
-
-    # 想定と違うウィンドウがアクティブ → Alt+Tab
-    if isinstance(error, WrongWindowError):
-        return RecoveryStrategy.ALT_WINDOW
-
-    # UIが変わった → LLMに判断させる
-    if isinstance(error, UIStateChangedError):
-        return RecoveryStrategy.REPLAN_SUBTASK
-
-    # タイムアウト → リトライ
-    if isinstance(error, TimeoutError):
-        return RecoveryStrategy.WAIT_AND_RETRY
-
-    # 分類不能 → デフォルトはLLM判断
-    return RecoveryStrategy.ALTERNATIVE_APPROACH
-```
-
-## 安全性設計
-
-### アクションホワイトリスト / ブラックリスト
-
-```python
-# デフォルトでブロックされる危険操作
-BLOCKED_PATTERNS = [
-    # コマンド実行
-    {"type": "type", "pattern": r"rm\s+-rf"},
-    {"type": "type", "pattern": r"sudo\s"},
-    {"type": "type", "pattern": r">\s*/dev/"},
-    {"type": "type", "pattern": r"mkfs\."},
-    {"type": "type", "pattern": r"dd\s+if="},
-    {"type": "type", "pattern": r":\(\)\s*\{",       # fork bomb
-
-    # キーコンボ
-    {"type": "key_combo", "keys": ["ctrl", "alt", "f1"]},  # TTY切替
-    {"type": "key_combo", "keys": ["ctrl", "alt", "delete"]},
-
-    # ネットワーク操作の制限（オプション）
-    # {"type": "type", "pattern": r"curl|wget"},  # 必要に応じて
-]
-```
-
-### レート制限
-
-```python
-@dataclass
-class RateLimiter:
-    max_actions_per_second: float = 2.0     # 1秒あたり最大2アクション
-    max_actions_per_task: int = 200         # 1タスクあたり最大200アクション
-    max_task_duration_seconds: int = 600    # 1タスク最大10分
-    min_interval_between_actions: float = 0.2  # アクション間最小間隔
-```
-
-### ユーザー制御
-
-- **緊急停止**: Web UIの「停止」ボタンで即時中断。VMにSIGSTOPは送らず、実行中のアクションのみキャンセル
-- **一時停止/再開**: PAUSED状態でVMはそのまま維持
-- **ステップ実行**: 1アクションずつ手動で進めるデバッグモード
-- **操作ログの全記録**: 全アクション、全スクリーンショット、LLMの判断理由を保存
-
-### VM隔離
-
-- QEMUは `-sandbox on` オプションでseccomp分離を有効化
-- VMにはホストファイルシステムをマウントしない（共有フォルダなし）
-- ネットワークはNAT（ホストからの外向きのみ許可）
-- VMイメージはスナップショットから起動し、終了時に破棄（イミュータブル運用）
-
-## Docker 配備設計
-
-### コンテナ構成
-
-アプリ全体（vm + backend + frontend + websockify）を1つの `docker-compose.yml` で完結させる。VMコンテナは `/dev/kvm` をマウントしてQEMU/KVMを内部で起動する。
-
-```
-┌── Docker Compose ────────────────────────────────────────┐
-│                                                           │
-│  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │  frontend      │  │  backend      │  │  websockify  │ │
-│  │  Next.js       │──│  FastAPI      │  │  VNC→WS中継  │ │
-│  │  :3000         │  │  :8081        │  │  :6080       │ │
-│  │  (Static →     │  │               │──│       │      │ │
-│  │   backend:8081)│  │               │  │       │      │ │
-│  └────────────────┘  └──────┬────────┘  └───────┼──────┘ │
-│                             │                   │         │
-│                             │ Docker内部ネットワーク        │
-│                             ▼                   ▼         │
-│                    ┌──────────────────────────────┐      │
-│                    │  vm                          │      │
-│                    │  QEMU/KVM (Ubuntu Desktop)   │      │
-│                    │  :5900  ← /dev/kvm マウント   │      │
-│                    └──────────────────────────────┘      │
-└──────────────────────────────────────────────────────────┘
-```
-
-### docker-compose.yml
-
-```yaml
-version: "3.9"
-
-services:
-  vm:
-    build:
-      context: ./vm
-      dockerfile: Dockerfile
-    devices:
-      - /dev/kvm:/dev/kvm          # KVMアクセラレーション
-    ports:
-      - "5900:5900"                 # VNC (内部通信 + デバッグ用)
-    volumes:
-      - vm_data:/vm
-    environment:
-      - VM_IMAGE=/vm/desktop.qcow2
-      - VM_MEMORY=4096
-      - VM_VNC_PORT=5900
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo | ncat localhost 5900"]
-      interval: 10s
-      retries: 5
-
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8081:8081"
-    environment:
-      - VNC_HOST=vm                 # Docker内部ネットワーク
-      - VNC_PORT=5900
-      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
-      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      vm:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8081
-      - NEXT_PUBLIC_WEBSOCKIFY_URL=http://localhost:6080
-    depends_on:
-      - backend
-    restart: unless-stopped
-
-  websockify:
-    image: ghcr.io/novnc/websockify:latest
-    command: vm:5900               # Docker内部ネットワーク
-    ports:
-      - "6080:5900"
-    restart: unless-stopped
-
-volumes:
-  vm_data:
-```
-
-### 環境ごとの起動方法
-
-#### Linux
-
-```bash
-docker compose up -d
-# → http://localhost:3000
-```
-
-#### Windows 11 (WSL2)
-
-```powershell
-wsl --install -d Ubuntu-24.04
-wsl --set-default-version 2
-wsl ls -la /dev/kvm  # KVM確認
-wsl docker compose up -d
-```
-
-### コンテナ間通信
+| コンテナ | 中身 | ポート | 役割 |
+|---------|------|--------|------|
+| frontend | Next.js | 3000 | チャットUI＋noVNCビューア＋VM管理 |
+| backend | FastAPI | 8081 | 指示受付、エージェント実行、タスク永続化 |
+| desktop | Xfce＋TigerVNC | 5901 | 既定の作業環境（QEMU不要の軽量デスクトップ） |
+| websockify-desktop | VNC→WS中継 | 6081 | desktop向け画面配信 |
+| vm | QEMU/KVM | 5900 | 重い隔離デスクトップ（KDE。kvm限定） |
+| websockify | VNC→WS中継 | 6080 | vm向け画面配信（kvm限定） |
+
+動的VM（Plan B）は `5910+`（VNC）/`6090+`（WS）を使い、台数分コンテナが増える。
+`vm`・`websockify` は `kvm` プロファイル配下のため、`./scripts/up.sh`（KVM自動判定）
+または `docker compose --profile kvm up` でのみ起動する。
+詳細は [VM操作アーキテクチャ](#vm操作アーキテクチャ) を参照。
 
 | From | To | 経路 |
 |------|-----|------|
-| frontend (ブラウザ) | backend API | `localhost:8081` |
-| frontend (ブラウザ) | websockify | `localhost:6080` |
-| backend | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
-| websockify | VM (VNC) | `vm:5900` (Docker内部ネットワーク) |
+| ブラウザ | backend API/WS | `:<ホスト>:8081` |
+| ブラウザ | 画面配信 | `:<ホスト>:6081`（desktop既定。KVM時は `:<ホスト>:6080`） |
+| backend | desktop (VNC) | `desktop:5900`（Docker内部ネットワーク） |
+| backend | VM (VNC) | `vm:5900`（KVM時。動的VMは `vm-<id>:5900`） |
+| websockify-desktop | desktop (VNC) | 同上 |
+| websockify | VM (VNC) | 同上 |
+| backend | Docker | `/var/run/docker.sock`（VM作成・再起動用） |
 
-### Dockerfile (vm)
+環境変数（代表）：`LLM_PROVIDER` / `LLM_MODEL` / 各種 `*_API_KEY`、`VNC_HOST`（既定`desktop`）/ `VNC_PORT`、
+`USE_KVM`（既定`auto`。未設定時は `/dev/kvm` の有無で自動切替）/ `ALLOW_TCG_VM`（既定`false`。TCG明示許可）、
+`VM_MEMORY`（既定4096）/ `VM_CPUS`（既定4）、`DATA_DIR`（既定 `./data`）。
 
-```dockerfile
-FROM ubuntu:24.04
+## バックエンド（FastAPI）
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    qemu-system-x86 qemu-utils \
-    netcat-openbsd \
-    && rm -rf /var/lib/apt/lists/*
+`src/ai_desktop_agent/server/app.py` がAPIとWebSocketを提供する。
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+### エンドポイント一覧
 
-EXPOSE 5900
-ENTRYPOINT ["/entrypoint.sh"]
+| メソッド | パス | 用途 |
+|---|---|---|
+| GET | `/health` | 生存確認 |
+| POST | `/tasks` | タスク投入（`{instruction, vm_id?, allow_vm_restart?}`） |
+| GET | `/tasks` | 履歴一覧（新しい順） |
+| GET | `/tasks/{id}` | タスク詳細（操作履歴・推論つき） |
+| DELETE | `/tasks/{id}` | 履歴削除（実行中なら停止して削除） |
+| GET | `/tasks/current` | 最新タスク状態（リロード後の復元用。なければ `idle`） |
+| POST | `/tasks/current/{pause,resume,stop}` | タスク制御 |
+| GET | `/vms` | VM一覧 |
+| POST | `/vms` | VM作成（ディスク複製＋起動） |
+| DELETE | `/vms/{id}` | VM削除（上タスク停止＋コンテナ＋ディスク削除） |
+| GET | `/vm/status` | 既定VMの状態（Docker＋QMP） |
+| POST | `/vm/restart` | 既定VMの作り直し（実行中タスク停止つき） |
+| WS | `/ws` | 状態・操作ログのプッシュ配信 |
+
+### セッション管理
+
+- 1タスク＝1 `TaskSession`（`server/session.py`）。`POST /tasks` ごとに生成し、
+  `_sessions[session.id]` に登録する。`_active_session` は後方互換のための最新1件。
+- セッションは `vm_id` を持ち、指定VMの `VNCClient` に `set_display()` で切り替える。
+  `vm_id` 省略時は稼働中の既定VM（`VmPool.default_vm()`）。
+- WebSocket配送はグローバルレジストリ（`_ws_state_cbs` 等）経由のファンアウトで、
+  全メッセージに `session_id` / `vm_id` を付与する。フロントは選択中のVMで選別する。
+
+### 永続化（`server/store.py`）
+
+- `data/tasks/<task_id>.json` に1タスク1ファイルで保存する。状態遷移・アクション実行のたびにupsert。
+- `TaskRecord` は指示・状態・成否・操作履歴（判断理由・確信度つき）・サブタスク・
+  進捗index・`vm_id`・トークン使用量（prompt/completion/呼出回数）を持つ。
+- 起動時（lifespan）に実行中だった記録を `interrupted` に変える（`mark_interrupted()`）。
+- 保存先が書けない環境では一時ディレクトリに退避して動作継続する。
+
+### VM管理
+
+- `server/kvm.py`（KVM判定の正本）：次の順序で判定する（`USE_KVM` 明示値 → backendの `/dev/kvm` →
+  Docker上の `vm` サービス存在）。KVMなし環境でのVM作成・再起動は
+  `KvmUnavailableError` で拒否する（APIは409。`ALLOW_TCG_VM=true` でのみ明示許可）。
+- `server/vm_control.py`（`VmController`）：既定VMの状態取得・再起動。状態にQMPの
+  `query-status` 結果（`qmp_status`）を添える。Docker不通時は `DockerUnavailableError`→503。
+- `server/vm_pool.py`（`VmPool`）：環境の一覧・作成・再起動・削除＋compose管理の
+  `desktop` 検出（id `desktop`、`managed=False`、既定ポート `5901`/`6081`）。
+  `default_vm()` はソート順で `desktop` を優先する（両方稼働時はdesktop）。
+  `POST /vms` は `kind` で種別を選ぶ（`qemu`＝既定／`container`）。
+  qemu作成時はbase qcow2のフルコピーを払い出し（ロック競合回避のためbacking参照は使わない）、
+  VNC/WSポートを `5910+`/`6090+` から割当て、ポート割当を `data/vms.json` に保存する。
+  container作成時は軽量デスクトップ＋中継の2コンテナを払い出し、KVM不要でどこでも作れる。
+  動的VMのidは `vm-<hex>`、動的コンテナは `desk-<hex>`。上限8台（`MAX_VMS`、両種別の合計）。
+  動的QEMU VMは `/dev/kvm` を常時要求する（KVM必須）。
+  一覧の種別は `kind`（`qemu`／`container`）で返す。`desktop` と既定VM（`vm`）は削除不可。
+  ホストパス解決はbackend自身の `/app/data` マウント元から逆算する（`_host_repo_dir()`）。
+
+## エージェント状態機械と実行フロー
+
+### 状態と遷移（`agent/state.py`・`agent/loop.py`）
+
+有限状態機械。`AgentLoop` が有効遷移のみを通す。不正遷移は `InvalidTransitionError`。
+有効遷移の正本は `_VALID_TRANSITIONS`（`agent/state.py:29`）である。
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> IDLE
+    IDLE --> UNDERSTANDING : start()
+    UNDERSTANDING --> PLANNING : 理解完了
+    UNDERSTANDING --> FAILED : 理解失敗
+    PLANNING --> EXECUTING : 計画ready
+    PLANNING --> FAILED : 分解失敗
+    EXECUTING --> WAITING : アクション実行
+    EXECUTING --> PAUSED : 一時停止
+    EXECUTING --> FAILED : fail_now() 上限・例外・取消
+    EXECUTING --> RECOVERING : 即時回復 (稀)
+    EXECUTING --> COMPLETED : 即時完了 (稀)
+    WAITING --> VERIFYING : 待機完了
+    WAITING --> RECOVERING : タイムアウト
+    VERIFYING --> EXECUTING : 継続
+    VERIFYING --> COMPLETED : 全サブタスク完了
+    VERIFYING --> RECOVERING : 検証失敗
+    VERIFYING --> FAILED : 上限超過
+    RECOVERING --> EXECUTING : リトライ
+    RECOVERING --> PLANNING : 再計画
+    RECOVERING --> FAILED : 回復不能
+    PAUSED --> EXECUTING : 再開
+    PAUSED --> IDLE : 中断
+    COMPLETED --> IDLE : reset
+    FAILED --> IDLE : reset
+
+    note right of VERIFYING
+        クリックは画面変化を検証
+        完了宣言は画像つきLLM検証
+    end note
+
+    note right of RECOVERING
+        エラー情報を次判断へ引継ぎ
+        (_pending_error)
+    end note
+
+    note right of PAUSED
+        pause() は EXECUTING からのみ
+        interrupted は状態ではなく
+        永続化上のマーク
+    end note
 ```
 
-```bash
-#!/bin/bash
-# vm/entrypoint.sh
-qemu-system-x86_64 \
-  -enable-kvm \
-  -cpu host \
-  -m "${VM_MEMORY:-4096}" \
-  -drive file="${VM_IMAGE:-/vm/desktop.qcow2}",if=virtio \
-  -vnc "0.0.0.0:${VM_VNC_PORT:-5900}" \
-  -device virtio-net,netdev=net0 \
-  -netdev user,id=net0 \
-  -daemonize
+状態一覧：`IDLE / UNDERSTANDING / PLANNING / EXECUTING / WAITING / VERIFYING /
+RECOVERING / PAUSED / COMPLETED / FAILED`。`PAUSED` 以外の停止系は終端扱い。
+`interrupted` は状態機械の状態ではなく、再起動後に付け替える永続化上のマーク。
+`pause()` は `EXECUTING` からのみ可能。`fail_now()` は上限・例外・キャンセル時に打ち切るための遷移である。
 
-# VNC起動を確認
-sleep 3
-exec tail -f /dev/null  # コンテナを生かし続ける
+### TaskSessionの実行フロー（`server/session.py:run()`）
+
+```mermaid
+sequenceDiagram
+    actor U as ユーザー
+    participant FE as frontend
+    participant BE as backend (TaskSession)
+    participant LLM as LLM
+    participant VM as VM
+    U->>FE: 自然言語の指示
+    FE->>BE: POST /tasks
+    activate BE
+    BE->>LLM: understand_instruction()
+    LLM-->>BE: Goal（意図・対象・制約）
+    BE->>LLM: decompose_task()
+    LLM-->>BE: サブタスク列
+    loop サブタスク消化
+        BE->>VM: スクリーンショット取得
+        VM-->>BE: 生画像
+        BE->>BE: グリッド重畳＋OCR＋黒画面ウェイク
+        BE->>LLM: decide_next_action()（画像＋OCR＋履歴＋エラー情報）
+        LLM-->>BE: Action＋期待効果＋確信度
+        alt vm_restart要求
+            BE->>BE: allow_vm_restart判定（未許可は却下して回復へ）
+            BE->>VM: VM作り直し＋60秒待機（許可時のみ）
+        else 操作なし完了宣言
+            BE->>LLM: 却下して再問い合わせ（最大2回）
+        else 低確信度・連打
+            BE->>LLM: region_select→拡大画像で再判断
+        else 同一操作3連続
+            BE->>BE: waitに置換
+        end
+        BE->>VM: マウス・キー実行（vncdotool）
+        BE->>VM: 画面安定待ち（視覚系は wait_for_still）
+        alt クリック系
+            BE->>VM: 変化の有無をハッシュ比較（無変化はRECOVERING）
+        else 完了宣言
+            BE->>LLM: 画像つき達成検証（未達は上限まで回復）
+        else 機械的失敗
+            BE->>BE: RECOVERINGへ（_pending_error引継ぎ）
+        end
+        BE->>FE: WSで状態・操作ログをプッシュ
+    end
+    BE->>FE: 完了通知＋履歴更新
+    BE->>BE: data/tasks/*.jsonに保存
+    deactivate BE
 ```
 
-### Dockerfile (backend)
+1. **UNDERSTANDING**：`understand_instruction()` で指示→`Goal`（意図・対象アプリ・制約）。
+2. **PLANNING**：`decompose_task()` でサブタスク列に分解（ID・説明・期待結果つき）。
+3. **EXECUTING→WAITING→VERIFYING** のループ（`_execute_phase()`）：
+   - 画面取得（オーバーレイ付き。真っ黒ならShiftキーを送って復帰させ、再取得）
+   - 無変化検出：前ターンと同一画面なら「待機か別手段を」のヒントをLLMに渡す
+   - アクション決定。操作なし完了宣言は最大2回まで却下して再問い合わせ
+     （`MAX_EMPTY_COMPLETE_REFUSALS`、`_is_empty_complete()`）
+   - 低確信度クリック・同一座標連打は `region_select` 拡大フローへ迂回
+   - 同一アクション3連続は `wait` に置換（足踏みブレーカー）
+   - `vm_restart` は専用フロー（後述）
+   - 座標クランプ→実行→視覚系操作後は画面安定待ち（`wait_for_still`）
+   - ステップ上限200（`MAX_ACTIONS_PER_TASK`）超過で `fail_now()`
+4. **VERIFYING**（`_verify_phase()`）：
+   - 機械的失敗→RECOVERING（エラー情報を次判断へ引継ぎ）
+   - クリック系→画面変化の有無をハッシュ比較（無変化は空振りとしてRECOVERING）
+   - `subtask_complete`→期待結果の達成を**画像つきでLLM検証**
+     （`_verify_subtask_phase()`）。未達は上限（`max_retries`）まで回復、
+     超過で `fail_now()`
+5. **RECOVERING**：`recover_from_error()` で回復計画。`recoverable` ならリトライ、
+   さもなくば失敗。計画の `strategy` は現状リトライ可否のみに使う。
+6. 例外・キャンセル時は必ず `FAILED` に遷移させて保存する（記録なしに終わらせない）。
+   一時停止中は遷移前に `_wait_if_paused()` で再開を待つ。
 
-```dockerfile
-FROM python:3.12-slim
+### エージェント判断のVM作り直し（許可制）
 
-WORKDIR /app
+- アクション `vm_restart {reason}`（`actions/primitives.py`）。
+- タスク投入時の `allow_vm_restart`（UIのチェックボックス）が真の場合のみ実行。
+  未許可なら却下して回復フローへ（別手段を促す）。
+- 実行後は環境初期化として回復フローに戻し、新画面で再判断する。
+  再起動後は `RESTART_SETTLE_SECONDS`（60秒）待ってから続行する。
 
-# uv で依存解決
-COPY pyproject.toml uv.lock* ./
-RUN pip install uv && uv sync --frozen
+## 意思決定層（LLM＋決定モデル）
 
-COPY src/ ./src/
+判断は「生成系LLM」と「決定モデル（確定的な分類・判定）」の分担を方針とする。
+生成（座標・文章・計画）はLLM、定型判断（成否・戦略選択）は決定モデルに寄せる。
 
-EXPOSE 8081
-CMD ["uv", "run", "python", "-m", "ai_desktop_agent"]
+### LLMプロバイダ（`agent/llm/`）
+
+- `factory.py` の `create_llm_provider()` が全プロバイダを `OpenAICompatProvider` に束ねる。
+  対応：`openai / anthropic / openrouter / opencode（Zen） / opencode-go（Go） / ollama / mock`。
+  既定モデル例：`gpt-4o`、`deepseek-v4.1-flash`。`LLM_PROVIDER` / `LLM_MODEL` / 各種APIキーで切替。
+- `openai_compat_provider.py` の仕様：
+  - 画像は同一解像度JPEG（q80）＋ `detail: high` で送信（座標系不変・軽量）。
+  - Structured Output（`response_format: json_schema`）で出力を強制。
+    非対応モデルでは通常JSONモードへ自動フォールバック（`_structured_output` 退避）。
+  - 不正paramsのサニタイズ（`_sanitize_params()`）と画面内クランプ（`_clamp_params()`）。
+    必須項目の欠落は `Action` のバリデーションでエラーにする。
+  - OpenCode系には `User-Agent: ai-desktop-agent/0.1.0` を付与し、
+    タスクIDを `x-opencode-session` で送る（`session_id`）。
+  - 呼出ごとのトークン使用量を累積し（`_record_usage()`）、タスク記録に保存する。
+    `max_tokens` は1500に絞っている（出力は小さいJSONのみのため）。
+- システムプロンプト方針（座標グリッドの読み方、2段階クリック、
+  **アプリ起動はキーボード優先**、**不足アプリは端末で導入**、
+  `subtask_complete` は操作後のみ）。OCRテキストは参考情報として添付する。
+
+### 決定モデル（Clef / SystemOne）組込位置【計画】
+
+未実装。以下の位置に `agent/decision/`（仮称）として差す設計とする。
+インターフェースは `noul`（成否）・`choice`（戦略選択）・`score`（評価）の3型を受け、
+Jev互換API（現行はZenの `jev` 系、Clef本体はWorkers AI）を背負わせる。
+
+| # | 組込点 | 置換対象 | 期待効果 |
+|---|---|---|---|
+| 1 | 回復戦略の選択 | `_recover_phase()` のLLM呼出 | 数百msで戦略確定。テキスト生成が不要な分類は決定モデル向き |
+| 2 | サブタスク達成検証 | `_verify_subtask_phase()` の画像つきLLM検証 | 高確信で前進・低確信で回復・中間でLLM検証にエスカレーション（確率閾値設計） |
+| 3 | 評価ハーネス | なし（新設） | 永続化タスク記録を正解セット化し、Clef-flash→Clefの順で精度・分布を測定 |
+
+置換しないもの：`decide_next_action`（座標＋JSON生成）、タスク分解、OCR読解。
+判断は決定モデル、実行内容の生成はLLMの分担を維持する。
+注意：ベンチマークは提供元申告のため、自タスクでの精度×レイテンシ×単価で選定すること。
+利用可否の検討内容は `docs/research/clef.md` に残す。
+
+## 観測（スクリーンショットとその周辺）
+
+LLMに渡すのは生画像ではなく、座標ヒントを重畳した画像＋テキスト情報である。
+
+- `vm/screenshot.py`：値オブジェクト。`with_overlay()`・`crop_with_meta()` を持つ。
+- `vm/overlay.py`：50pxグリッド（100pxごとに太線）＋上端・左端の座標数字＋
+  カーソル十字＋外周枠を描画。フォント12pt。ズーム画像には25pxグリッド。
+- 領域ズーム（`crop_region_with_meta()`）：`region_select` に対し2倍拡大画像を返し、
+  **実倍率も返す**。逆変換は必ず `absolute = origin + zoomed_coord / actual_scale`
+  で行う（`_handle_region_zoom()`）。入れ子は深さ1まで。
+- `vm/ocr.py`：tesseractで画面テキスト抽出（英字、`max_chars=2000`、8件キャッシュ）。
+  グリッド数字の混入を避けるため、生画像にOCRをかける。`WAIT_FOR_TEXT` の実体でもある。
+- カーソル情報（`VNCClient.cursor_position`／`has_custom_cursor`）：
+  プロトコル層の座標を優先し、取れなければ内部追跡にフォールバック。
+  オーバーレイの十字もこの値を使う。
+- `vm/matcher.py`：PILのみの正規化相互相関（単色はSAD併用、粗密2段階）。
+  `executor.locate()` から利用できる。テンプレート供給元は今後の課題。
+- 黒画面ウェイク：DPMS消灯などで全面真っ黒（平均輝度<2.0）を検出したら
+  Shiftキーを送って復帰させ、再取得する（最大1回）。`_is_black_screen()`。
+- 無変化検出：前ターンのハッシュ比較で「画面が変わっていない」旨を次判断に伝える。
+
+## アクション実行（VNC操作層）
+
+- 定義（`actions/primitives.py`）：マウス7種・キー4種・待機3種・`screenshot`（内部用）・
+  `region_select`・`subtask_complete`・`vm_restart`。クリック系は座標必須。
+  `allowed_params()`／`required_params()` で検証する。
+- 実行（`actions/executor.py`）：`Action`→バックエンド操作に変換。`REGION_SELECT`・
+  `VM_RESTART` はセッション側で処理するため、実行器に届いた場合は警告のみ出す。
+  安定待ち（`wait_for_still()`）、テキスト待機（OCR利用）を持つ。
+- VNC実装（`vm/vnc_client.py`、vncdotoolラップ）。既知の落とし穴と対策：
+  - `paste()`（クリップボード）はQEMU標準VNCに無視されるため不使用。
+    `type_text()` は1文字ずつキーイベントを送信する。
+  - QEMUはShift合成を復元しないため、`_SHIFT_PAIRS` 表で明示合成する。
+    ただし **大文字A-Zはそのまま通す**（手動合成すると小文字化する。実測）。
+  - vncdotool KEYMAPに無い名前（`backspace`等）は起動時に補完する。
+  - **ThreadedVNCClientProxyは戻り値Noneのメソッド呼び出しで後続の呼び出しが正しく動かなくなる**
+    （deferred連鎖に前回戻り値が流れる）。`keyEvent`・`mouseDrag` の直接利用は禁止。
+    `mouseDrag` は `mouseMove` 連打の自前ステップに置換済み。
+  - クリックは移動→整定待ち→押下（50ms）→解放。ダブルクリックは同座標明示。
+    コンボは20ms間隔。座標は画面内にクランプする。
+
+## VM操作アーキテクチャ
+
+### 実行環境の2本立て
+
+- `desktop`（`desktop/`、既定）：Xfce＋TigerVNCの軽量コンテナ。QEMU不要で常時起動する。
+  VNCは `desktop:5900`（ホスト公開 `5901`）、画面配信は `websockify-desktop`（`:6081`）。
+  解像度 `1280x800`（`VNC_GEOMETRY`）、認証なし（隔離ネットワーク前提）。
+  Firefox・LibreOffice（Writer/Calc）・`xdotool`・`wmctrl` 同梱。
+- `vm`（`vm/`、kvm限定）：QEMU/KVMの重い隔離デスクトップ（KDE）。
+  `kvm` プロファイルでのみ起動する（`./scripts/up.sh` が `/dev/kvm` の有無で自動判定）。
+  backendの既定接続先は `desktop` であり、`VmPool.default_vm()` も `desktop` を優先する。
+
+### KVM自動切替とVM起動制限
+
+- `USE_KVM` 未設定時は `auto` として `/dev/kvm` の有無で自動切替する（`.env` 指定不要）。
+  明示値 `true`（必須）/`false`（TCG扱い）も可。
+- KVMがない環境でのVM作成・再起動は制限する（TCGは実用速度が出ないため）。
+  次の3層で制限する：backendの `KvmUnavailableError`（API 409）→
+  `vm/entrypoint.sh` の起動拒否（`ALLOW_TCG_VM=true` でのみ明示許可）→
+  composeで `vm`・`websockify` を `kvm` プロファイル配下に配置。
+- エージェント判断の `vm_restart` が制限環境で要求された場合は失敗として
+  `_pending_error` に渡し、別手段での継続を促す。
+
+動的VM・コンテナ（Plan B）のライフサイクル全体は以下の通り。`VmPool`（`server/vm_pool.py`）が
+Docker経由で本体コンテナとwebsockifyコンテナを対で払い出す（QEMU VMはKVM必須、コンテナは不要）。
+
+```mermaid
+sequenceDiagram
+    actor U as ユーザー
+    participant FE as frontend
+    participant POOL as backend (VmPool)
+    participant DOCKER as Docker
+    participant VM as vm-id / desk-id
+    participant WS as ws-id (websockify)
+    U->>FE: + VM追加 / + コンテナ追加
+    FE->>POOL: POST /vms {kind}
+    activate POOL
+    POOL->>DOCKER: base qcow2をフルコピー (cp --sparse=always、qemuのみ)
+    DOCKER-->>POOL: /vm/overlays/id.qcow2
+    POOL->>DOCKER: 本体コンテナ起動 (QEMUはVNC 5910+、QMP/QGAソケット)
+    POOL->>DOCKER: websockify起動 (WS 6090+、中継先は名前:5900)
+    POOL-->>FE: id, vnc_port, ws_port (status creating)
+    deactivate POOL
+    FE->>FE: 定期的に /vms を追跡 (一覧15秒/監視2〜5秒) healthyまで
+    FE->>POOL: POST /tasks (vm_idつき)
+    POOL->>VM: VNC接続・エージェント実行 (vm:5900 / vm-id:5900)
+    VM-->>POOL: 画面・操作
+    opt 作り直し（任意）
+        FE->>POOL: POST /vm/restart または agent vm_restart (許可制)
+        POOL->>DOCKER: コンテナ再起動 (実行中タスク停止つき)
+        POOL->>POOL: 60秒待機して続行 (RESTART_SETTLE_SECONDS)
+    end
+    FE->>POOL: DELETE /vms/id
+    activate POOL
+    POOL->>POOL: 上タスク停止
+    POOL->>DOCKER: コンテナ停止・削除
+    POOL->>DOCKER: ディスク削除 (qemuのみ)
+    POOL-->>FE: deleted
+    deactivate POOL
+    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)<br/>kind=container はKVM不要
 ```
 
-### Dockerfile (frontend)
+### QEMU起動構成（`vm/entrypoint.sh`）
 
-```dockerfile
-FROM node:22-alpine AS builder
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM node:22-alpine AS runner
-WORKDIR /app
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-EXPOSE 3000
-CMD ["npm", "start"]
+```
+qemu-system-x86_64 -enable-kvm -cpu host -smp $VM_CPUS -m $VM_MEMORY
+  -kernel /vm/vmlinuz -initrd /vm/initrd.img -append "$CMDLINE"
+  -drive file=$VM_IMAGE,if=virtio,format=qcow2
+  -vnc 0.0.0.0:$VNC_DISPLAY -device virtio-net,netdev=net0 -netdev user,id=net0
+  -serial stdio -display none
+  -chardev socket,path=$QMP_SOCK,... -mon chardev=...,mode=control
+  -chardev socket,... -device virtio-serial-pci -device virtserialport,...,name=org.qemu.guest_agent.0
 ```
 
-### 設計上の判断
+- KVM＋host CPU＋4vCPU／4GB（既定。`VM_CPUS`／`VM_MEMORY` で可変）。
+  マシンタイプは変えない（NIC名 `ens3` がnetplanに固定のため）。
+  `USE_KVM=auto` 時は `/dev/kvm` の有無でKVM/TCGを自動選択するが、
+  TCG側は既定で起動拒否する（`ALLOW_TCG_VM=true` でのみ許可）。
+- ストレージはvirtio、ネットワークはslirp（user-mode NAT）、VNC直結、
+  シリアルは起動ログ用。QMP・guest-agent用ソケットは `/vm/sockets/` 配下
+  （`QMP_SOCK`／`QGA_SOCK` 環境変数で per-VM 変更可）。
 
-- **VMはDockerコンテナ内**: `/dev/kvm` をマウントすることでQEMU/KVMをコンテナ内でネイティブ動作させる。特権モード不要（`--device /dev/kvm` のみで十分）。`docker compose up` 一発で全コンポーネントが起動する。
-- **websockifyをコンテナに含める**: noVNC + websockifyはDockerイメージが公開されているため、自前ビルド不要。
-- **Docker内部ネットワーク**: backend→vm、websockify→vm の通信はDockerの内部DNS（`vm` というサービス名）で解決。ホストネットワークスタックに依存しない。
+### ゲストイメージ構築（`vm/build-vm-image.sh`）
+
+debootstrapでUbuntu 24.04＋KDE Plasma＋SDDMを構築し、qcow2化する。
+主な設定内容（再ビルド時の必須項目）：
+
+- ユーザー `agent`（NOPASSWD sudo）、SDDM自動ログイン（セッション自動検出）
+- 画面ロック無効・電源管理のサスペンド／画面OFF無効
+- ログイン時DPMS無効化（`disable-dpms.desktop`。XのDPMS 600秒消灯が残るため）
+- netplanで `ens3` をDHCP化（NetworkManager単独ではunmanagedになるため）
+- `/etc/resolv.conf` をQEMU内蔵DNS（10.0.2.3）直書き、`/etc/hosts` に自ホスト名
+- ディスク下限15GB（KDE＋snap導入で3〜4GBでは枯渇するため）
+- `qemu-guest-agent`・`xdotool`・`wmctrl` を同梱
+- 注意：Ubuntu 24.04の `firefox` パッケージはsnap移行スタブ。
+  エージェントが `sudo snap install firefox` で導入する運用（要ネット）。
+
+### ゲスト内ネットワーク
+
+- QEMU slirp：`10.0.2.0/24`、ゲートウェイ `.2`、DNS `.3`。
+- 過去の落とし穴：NIC DOWN、NM unmanaged、resolv.confのstub迷子、ディスク枯渇。
+  いずれも上記設定で解消済み。再発時は `ip -brief addr`・`getent hosts` から切り分ける。
+
+### ストレージ方式
+
+- base qcow2（`vm/desktop.qcow2`）は共有・読取専用扱い。
+- 動的VMは**フルコピー**を払い出す（backing参照はロック競合するため不採用）。
+  1台あたり数GBを消費する。不要VMは削除して回収する。
+
+### 監視・管理面
+
+- ヘルスチェック：VNCポート疎通（compose）。
+- **QMP**（`vm/qmp.py`）：`query-status` 等。`/vm/status` の `qmp_status` に反映。
+- **guest agent**（`vm/qga.py`）：`guest-ping`／`get-osinfo`／`guest-exec`（コマンド実行・入出力取得）。
+  エージェントが `xdotool` 等を直接実行する将来経路。現状は診断・検証用。
+- **websockify**：VNC→WebSocket中継。既定VMは `:6080`、動的VMは per-VM コンテナ（`6090+`）。
+  ブラウザはnoVNC（`VncViewer.tsx`）で視聴する。
+- **VmController／VmPool**：前者は既定VMの状態・再起動、後者は動的VMの
+  一覧・作成・再起動・削除（Dockerソケット経由、ポート割当は `data/vms.json` に保存する）。
+
+## フロントエンド
+
+Next.js（App Router）。主要パネル：
+
+- `InstructionInput`（指示＋VM作り直し許可チェック）／`StatusPanel`（状態＋サブタスク進捗）
+  ／`ConnectionPanel`（バックエンド/VNC/VMの接続状態。旧下部ステータスバーを右パネルに組み込んだもの）
+  ／`ControlPanel`（タスク操作）／`VMControls`（VM作り直し）／`TaskHistory`
+  （履歴・削除。表示は日付＋タイトルのみ）／`LogPanel`／`VmTabs`
+  （VM切替・追加・削除）／`VncViewer`（noVNC埋め込み、切断時のみ再接続UI）。
+- デバッグ系は `CollapsibleSection` で折畳み。サイドバー幅はドラッグ可
+  （`useSidebarWidth`、280〜720px、localStorage保存）。
+- WebSocket（`/ws`、自動再接続）は `state / action / error / complete` を送る。
+  全メッセージに `session_id`／`vm_id` を含み、表示は選択中のVMで選別する。
+- リロード対応：`GET /tasks/current`＋`GET /tasks/{id}` でログ・進捗を復元する。
+  ログ・状態・進捗はVM単位で保持し、VM間で共有しない。
+
+## 安全性・運用
+
+- **隔離**（VM/コンテナ。ホスト非共有、NAT外向きのみ）。操作は隔離環境の外に出ない
+- **ステップ上限**: 1タスク200アクションで打ち切る。同じVMへの後発タスクは先行タスクを停止させる
+  （同一VMへの同時実行は避ける設計。別VMなら並列可）
+- エージェント判断のVM作り直しは **事前許可制**（`allow_vm_restart`）。
+  未許可の要求は却下して別手段へ誘導する
+- 全アクション＋判断理由＋トークン使用量を永続化し、履歴から監査できる
+- 未実装：アクションレート制限、危険操作ホワイトリスト（予定）
+
+## 既知の制限と今後
+
+- OCRは英字のみ。日本語UIには `tesseract-ocr-jpn` 追加が必要。
+- テンプレート照合の供給元（アイコンDB等）が未整備。
+- 決定モデル（Clef/SystemOne）は計画段階。「意思決定層」節の表の通り、
+  回復戦略→達成検証→評価ハーネスの順で組込む。
+- マルチVMのUIはタブ切替＋単一ビューア。同時監視グリッド等は未対応。
+- モデル依存のゆらぎ（空応答・非JSON）はリトライ＋フォールバックで吸収しているが、
+  応答の安定したモデル選定が最も効く。
+
+## 図の管理
+
+- 図は本書のMermaidブロックが正本である（画像ファイルの生成・管理はしない）。
+- 状態遷移を変えたら `agent/state.py` の `_VALID_TRANSITIONS` と `agent/loop.py` を先に直し、
+  「エージェント状態機械」のMermaidに合わせる。図だけを先に変えないこと。
+- シーケンスを変えたら `server/session.py`・`server/vm_pool.py`・`server/app.py` の順で裏取りする。

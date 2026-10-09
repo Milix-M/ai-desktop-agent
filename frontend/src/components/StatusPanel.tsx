@@ -1,9 +1,12 @@
 "use client";
 
+import type { SubtaskInfo } from "@/lib/types";
+
 interface Props {
   state: string;
   subtaskIndex: number;
   subtaskCount: number;
+  subtasks?: SubtaskInfo[];
 }
 
 const STATE_CLASSES: Record<string, string> = {
@@ -24,7 +27,12 @@ export default function StatusPanel({
   state,
   subtaskIndex,
   subtaskCount,
+  subtasks = [],
 }: Props) {
+  const doneCount =
+    state === "completed"
+      ? subtasks.length
+      : Math.min(subtaskIndex, subtasks.length);
   return (
     <div className="section">
       <h2>状態</h2>
@@ -38,10 +46,27 @@ export default function StatusPanel({
         </span>
         {subtaskCount > 0 && (
           <span className="subtask-info">
-            サブタスク {subtaskIndex + 1}/{subtaskCount}
+            サブタスク {Math.min(subtaskIndex + 1, subtaskCount)}/{subtaskCount}
           </span>
         )}
       </div>
+      {subtasks.length > 0 && (
+        <ul className="subtask-list" data-testid="subtask-list">
+          {subtasks.map((st, i) => {
+            const done = i < doneCount;
+            const current = i === doneCount && state !== "completed";
+            return (
+              <li
+                key={st.id}
+                className={`subtask-item${done ? " done" : ""}${current ? " current" : ""}`}
+              >
+                <span className="subtask-mark">{done ? "✓" : current ? "▶" : "○"}</span>
+                <span className="subtask-desc">{st.description}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

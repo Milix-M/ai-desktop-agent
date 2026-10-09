@@ -577,3 +577,102 @@ class TestLLMProviderFactory:
         ):
             p = create_llm_provider(provider="openai", api_key="sk")
         assert p.model_name == "custom-model"
+
+
+class TestSanitizeParams:
+    """ゴミパラメータの除去テスト。"""
+
+    def test_junk_params_dropped(self):
+        from ai_desktop_agent.actions.primitives import ActionType
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        out = OpenAICompatProvider._sanitize_params(
+            ActionType.SUBTASK_COMPLETE, {"reasoning": "x", ", ": "y"}
+        )
+        assert out == {}
+
+    def test_valid_params_kept(self):
+        from ai_desktop_agent.actions.primitives import ActionType
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        out = OpenAICompatProvider._sanitize_params(
+            ActionType.LEFT_CLICK, {"x": 1, "y": 2, "junk": 3}
+        )
+        assert out == {"x": 1, "y": 2}
+
+    @pytest.mark.asyncio
+    async def test_decide_survives_junk_complete(self):
+        """subtask_completeのゴミparamsでも決定が作れる。"""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+        from ai_desktop_agent.agent.state import Goal, Subtask
+        from ai_desktop_agent.vm.screenshot import Screenshot
+
+        with patch("openai.AsyncOpenAI", autospec=True):
+            provider = OpenAICompatProvider(api_key="k")
+        import json as _json
+
+        choice = MagicMock()
+        choice.message.content = _json.dumps(
+            {
+                "action_type": "subtask_complete",
+                "params": {"reasoning": "done", ", ": "?"},
+                "expected_effect": "done",
+                "confidence": 0.9,
+                "reasoning": "done",
+            }
+        )
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[choice])
+        )
+        ss = Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+        result = await provider.decide_next_action(
+            Goal(description="t"), Subtask(id="s", description="d"), [], ss
+        )
+        assert result.action.action_type.value == "subtask_complete"
+
+
+class TestTokenUsage:
+    """トークン使用量の記録テスト。"""
+
+    @staticmethod
+    def _provider():
+        from unittest.mock import patch
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ):
+            return OpenAICompatProvider(api_key="k")
+
+    def test_record_usage_accumulates(self):
+        from unittest.mock import MagicMock
+
+        provider = self._provider()
+
+        usage = MagicMock(prompt_tokens=100, completion_tokens=20)
+        provider._record_usage(MagicMock(usage=usage))
+        provider._record_usage(MagicMock(usage=usage))
+        assert provider.total_prompt_tokens == 200
+        assert provider.total_completion_tokens == 40
+        assert provider.total_tokens == 240
+        assert provider.call_count == 2
+
+    def test_record_usage_missing_is_safe(self):
+        from unittest.mock import MagicMock
+
+        provider = self._provider()
+        provider._record_usage(MagicMock(usage=None))
+        provider._record_usage(object())
+        assert provider.total_tokens == 0

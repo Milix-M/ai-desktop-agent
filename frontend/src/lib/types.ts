@@ -1,3 +1,8 @@
+export interface SubtaskInfo {
+  id: string;
+  description: string;
+}
+
 export interface TaskStatus {
   session_id: string | null;
   state: string;
@@ -5,18 +10,38 @@ export interface TaskStatus {
   action_count: number;
   success_count: number;
   failure_count: number;
+  subtasks: SubtaskInfo[];
+  current_subtask_index: number;
+  vm_id?: string | null;
+}
+
+export interface VmInfo {
+  id: string;
+  name: string;
+  status: string;
+  health: string | null;
+  vnc_port: number;
+  ws_port: number;
+  vnc_host: string;
+  managed: boolean;
+  kind?: string; // qemu | container（旧APIでは欠落）
 }
 
 export interface WsStateMessage {
   type: "state";
+  session_id?: string | null;
+  vm_id?: string | null;
   state: string;
   subtask_index: number;
   subtask_count: number;
   action_count: number;
+  subtasks?: SubtaskInfo[];
 }
 
 export interface WsActionMessage {
   type: "action";
+  session_id?: string | null;
+  vm_id?: string | null;
   action_type: string;
   description: string;
   success: boolean;
@@ -24,11 +49,15 @@ export interface WsActionMessage {
 
 export interface WsErrorMessage {
   type: "error";
+  session_id?: string | null;
+  vm_id?: string | null;
   message: string;
 }
 
 export interface WsCompleteMessage {
   type: "complete";
+  session_id?: string | null;
+  vm_id?: string | null;
   success: boolean;
 }
 
@@ -63,6 +92,10 @@ export interface TaskHistoryItem {
   success_count: number;
   failure_count: number;
   updated_at: number;
+  vm_id?: string | null;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  llm_calls?: number;
 }
 
 export interface TaskAction {
@@ -80,6 +113,7 @@ export interface TaskAction {
 export interface TaskDetail extends TaskHistoryItem {
   actions: TaskAction[];
   subtasks: { id: string; description: string; expected_outcome: string }[];
+  current_subtask_index: number;
   goal: Record<string, unknown>;
   created_at: number;
 }

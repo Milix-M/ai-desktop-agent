@@ -1,4 +1,4 @@
-import type { TaskDetail, TaskHistoryItem, TaskStatus, VmStatus } from "./types";
+import type { TaskDetail, TaskHistoryItem, TaskStatus, VmInfo, VmStatus } from "./types";
 
 const BACKEND_URL =
   typeof window !== "undefined"
@@ -6,12 +6,14 @@ const BACKEND_URL =
     : "http://localhost:8081";
 
 export async function createTask(
-  instruction: string
+  instruction: string,
+  vmId?: string | null,
+  allowVmRestart?: boolean
 ): Promise<TaskStatus> {
   const resp = await fetch(`${BACKEND_URL}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction }),
+    body: JSON.stringify({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
@@ -40,10 +42,33 @@ export function getWsUrl(): string {
   return `${protocol}//${window.location.hostname}:8081/ws`;
 }
 
-export function getVncWsUrl(): string {
-  if (typeof window === "undefined") return "ws://localhost:6080";
+export function getVncWsUrl(wsPort?: number): string {
+  const port = wsPort ?? 6080;
+  if (typeof window === "undefined") return `ws://localhost:${port}`;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:6080`;
+  return `${protocol}//${window.location.hostname}:${port}`;
+}
+
+export async function getVms(): Promise<VmInfo[]> {
+  const resp = await fetch(`${BACKEND_URL}/vms`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function createVm(name?: string, kind?: string): Promise<VmInfo> {
+  const resp = await fetch(`${BACKEND_URL}/vms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name ?? null, kind: kind ?? null }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function deleteVm(vmId: string): Promise<{ status: string }> {
+  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
 }
 
 export async function getVmStatus(): Promise<VmStatus> {
@@ -66,6 +91,12 @@ export async function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
 
 export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
   const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function deleteTask(taskId: string): Promise<{ status: string }> {
+  const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`, { method: "DELETE" });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
 }
