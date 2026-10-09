@@ -31,6 +31,9 @@ COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 KIND_QEMU = "qemu"
 KIND_CONTAINER = "container"
+KIND_ANDROID = "android"
+#: 動的環境IDの接頭辞
+ID_PREFIX = {KIND_QEMU: "vm", KIND_CONTAINER: "desk", KIND_ANDROID: "and"}
 
 BASE_VM_SERVICE = "vm"
 #: 軽量コンテナ実行環境（QEMU不要のVNCデスクトップ）。既定の作業環境。
@@ -42,6 +45,7 @@ OVERLAYS_DIR = "/vm/overlays"  # backendコンテナ内のマウント先
 BASE_IMAGE_IN_VM = "/vm/desktop.qcow2"  # vmコンテナ内から見たbase
 VNC_START_PORT = 5910
 WS_START_PORT = 6090
+ADB_START_PORT = 5570
 MAX_VMS = 8
 
 
@@ -57,7 +61,8 @@ class VmInfo:
     ws_port: int = 6080  # ホスト側公開ポート
     vnc_host: str = ""  # backend からの接続先ホスト名
     managed: bool = True  # False: compose管理の既定VM・desktop
-    kind: str = KIND_QEMU  # KIND_QEMU / KIND_CONTAINER
+    kind: str = KIND_QEMU  # KIND_QEMU / KIND_CONTAINER / KIND_ANDROID
+    adb_port: int = 0  # ホスト側ADB公開ポート（androidのみ）
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -134,11 +139,15 @@ class VmPool:
         return None
 
     def default_vm(self) -> VmInfo | None:
-        """タスク投入先の既定VM（稼働中の最初の1台）。なければ None。"""
-        for vm in self.list_vms():
-            if vm.status == "running":
+        """タスク投入先の既定VM（稼働中の最初の1台）。なければ None。
+
+        compose管理の `desktop` が稼働していれば優先する。
+        """
+        running = [vm for vm in self.list_vms() if vm.status == "running"]
+        for vm in running:
+            if vm.id == DESKTOP_SERVICE:
                 return vm
-        return None
+        return running[0] if running else None
 
     # ── 作成・削除 ──────────────────────────────────
 
@@ -148,6 +157,8 @@ class VmPool:
         kind=qemu: QEMU VM（overlay + 2コンテナ）。KVM必須のため、KVMが
         利用できない環境では作成を制限する（`KvmUnavailableError`）。
         kind=container: 軽量デスクトップコンテナ。KVM不要でどこでも作れる。
+        kind=android: Android端末コンテナ（Redroid）。KVM不要。
+        Androidの画面視聴（noVNC相当）は未対応のため中継は作らない。
         """
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
@@ -156,8 +167,8 @@ class VmPool:
             resolve_use_kvm,
         )
 
-        if kind not in (KIND_QEMU, KIND_CONTAINER):
-            raise ValueError(f"kind は qemu/container のいずれか: {kind}")
+        if kind not in (KIND_QEMU, KIND_CONTAINER, KIND_ANDROID):
+            raise ValueError(f"kind は qemu/container/android のいずれか: {kind}")
 
         docker = self._docker()
         if kind == KIND_QEMU and not is_tcg_allowed() and not is_kvm_available(docker):
@@ -165,7 +176,7 @@ class VmPool:
         if len([v for v in self.list_vms() if v.managed]) >= MAX_VMS:
             raise ValueError(f"VM数の上限に達しています（{MAX_VMS}）")
 
-        prefix = "vm" if kind == KIND_QEMU else "desk"
+        prefix = ID_PREFIX[kind]
         vm_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
         vnc_port = self._alloc_port(VNC_START_PORT, lambda v: v.vnc_port)
         ws_port = self._alloc_port(WS_START_PORT, lambda v: v.ws_port)
@@ -174,6 +185,46 @@ class VmPool:
         common_labels = {LABEL_VM_ID: vm_id, LABEL_KIND: kind}
         vm_name = f"ai-desktop-agent-{vm_id}"
         logger.info("VM作成: %s kind=%s (vnc=%d ws=%d)", vm_id, kind, vnc_port, ws_port)
+
+        adb_port = 0
+        if kind == KIND_ANDROID:
+            adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
+            image = self._android_image_ref(docker)
+            docker.containers.run(
+                image,
+                name=vm_name,
+                detach=True,
+                privileged=True,
+                ports={"5555/tcp": adb_port},
+                environment={
+                    "androidboot.redroid_width": os.environ.get("ANDROID_WIDTH", "1080"),
+                    "androidboot.redroid_height": os.environ.get("ANDROID_HEIGHT", "1920"),
+                    "androidboot.redroid_dpi": os.environ.get("ANDROID_DPI", "480"),
+                },
+                labels=common_labels,
+                network=network,
+                restart_policy={"Name": "unless-stopped"},
+            )
+            self._save_state(
+                vm_id,
+                {
+                    "vnc_port": vnc_port,
+                    "ws_port": ws_port,
+                    "adb_port": adb_port,
+                    "name": name or vm_id,
+                },
+            )
+            return VmInfo(
+                id=vm_id,
+                name=name or vm_id,
+                status="creating",
+                vnc_port=vnc_port,
+                ws_port=ws_port,
+                vnc_host=vm_name,
+                managed=True,
+                kind=kind,
+                adb_port=adb_port,
+            )
 
         if kind == KIND_QEMU:
             overlay_host = self._create_overlay(vm_id)
@@ -366,10 +417,11 @@ class VmPool:
         if saved:
             vnc_port = int(saved.get("vnc_port", 5900))
             ws_port = int(saved.get("ws_port", 6080))
+            adb_port = int(saved.get("adb_port", 0))
         elif vm_id == DESKTOP_SERVICE:
-            vnc_port, ws_port = DESKTOP_VNC_PORT, DESKTOP_WS_PORT
+            vnc_port, ws_port, adb_port = DESKTOP_VNC_PORT, DESKTOP_WS_PORT, 0
         else:
-            vnc_port, ws_port = 5900, 6080
+            vnc_port, ws_port, adb_port = 5900, 6080, 0
         return VmInfo(
             id=vm_id,
             name=name,
@@ -380,6 +432,7 @@ class VmPool:
             vnc_host=container.name,
             managed=managed,
             kind=kind,
+            adb_port=adb_port,
         )
 
     def _alloc_port(self, start: int, key) -> int:
@@ -433,6 +486,12 @@ class VmPool:
             if LABEL_WS_FOR not in self._labels(c):
                 return self._labels(c).get(LABEL_KIND, KIND_QEMU)
         return KIND_QEMU
+
+    def _android_image_ref(self, docker: Any) -> str:
+        """Android端末イメージの参照。環境変数優先、なければ既定タグ。"""
+        if os.environ.get("ANDROID_IMAGE_REF"):
+            return os.environ["ANDROID_IMAGE_REF"]
+        return "redroid/redroid:13.0.0-latest"
 
     def _desktop_image_ref(self, docker: Any) -> str:
         """軽量デスクトップ実行イメージの参照。環境変数優先、なければ既定から検出。"""

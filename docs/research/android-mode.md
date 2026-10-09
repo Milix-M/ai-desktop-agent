@@ -1,5 +1,8 @@
-# Android操作モード 構成案（検討のみ・未実装）
+# Android操作モード（Phase 0/1 実装済み。視聴は未対応）
 
+- 実装状態: `AdbBackend`（`vm/adb_backend.py`）＋`VmPool` の `kind=android` 動的払い出し＋
+  compose `android` サービス（`android` プロファイル）まで実装済み。
+  ライブ視聴（noVNC相当）は未対応のため、以下は構成案の記録として残す。
 - 目的: 現行 Linux（KDE / Xfce）＋VNC 構成を温存しつつ、Android 端末操作モードを追加する。
 - 非目標: iOS 対応、実機接続、Play 課金アプリの自動購入。
 - 前提: `VNCClient`（汎用 VNC）＋座標グリッド＋OCR＋`VmPool` のポート払い思想は流用する。

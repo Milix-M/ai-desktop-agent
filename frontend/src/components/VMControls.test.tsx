@@ -13,12 +13,6 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-function stubConfirm(value: boolean) {
-  (window as unknown as { confirm: (msg: string) => boolean }).confirm = vi
-    .fn()
-    .mockReturnValue(value);
-}
-
 describe("VMControls", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -34,7 +28,6 @@ describe("VMControls", () => {
       health: null,
       name: "vm-1",
     });
-    stubConfirm(true);
   });
 
   it("shows running status", async () => {
@@ -57,7 +50,7 @@ describe("VMControls", () => {
     });
   });
 
-  it("restarts VM on button click", async () => {
+  it("restarts VM after inline confirm", async () => {
     const onLog = vi.fn();
     vi.mocked(api.restartVm).mockResolvedValue({
       running: true,
@@ -68,6 +61,9 @@ describe("VMControls", () => {
     render(<VMControls onLog={onLog} pollIntervalMs={60000} />);
 
     await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    // 1クリックでは実行されない
+    expect(api.restartVm).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "作り直す" }));
 
     await waitFor(() => {
       expect(api.restartVm).toHaveBeenCalled();
@@ -76,13 +72,12 @@ describe("VMControls", () => {
   });
 
   it("tracks restart until healthy", async () => {
-    let calls = 0;
+    let done = false;
     vi.mocked(api.getVmStatus).mockImplementation(async () => {
-      calls += 1;
-      if (calls <= 3) {
-        return { running: true, status: "restarting", health: "starting", name: "vm-1" };
+      if (done) {
+        return { running: true, status: "running", health: "healthy", name: "vm-1" };
       }
-      return { running: true, status: "running", health: "healthy", name: "vm-1" };
+      return { running: true, status: "restarting", health: "starting", name: "vm-1" };
     });
     let resolveRestart!: (v: import("@/lib/types").VmStatus) => void;
     vi.mocked(api.restartVm).mockImplementation(
@@ -91,10 +86,12 @@ describe("VMControls", () => {
     render(<VMControls pollIntervalMs={10} />);
 
     await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    await userEvent.click(screen.getByRole("button", { name: "作り直す" }));
     // 指示応答待ちの間は作り直し中表示
     await waitFor(() => {
       expect(screen.getByTestId("vm-status")).toHaveTextContent("作り直し中");
     });
+    done = true;
     resolveRestart({ running: true, status: "restarting", health: null, name: "vm-1" });
     // healthy 検出で通常表示に戻ること
     await waitFor(() => {
@@ -102,11 +99,12 @@ describe("VMControls", () => {
     });
   });
 
-  it("does nothing when confirm is cancelled", async () => {
-    stubConfirm(false);
+  it("cancels restart", async () => {
     render(<VMControls pollIntervalMs={60000} />);
 
     await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    await userEvent.click(screen.getByRole("button", { name: "やめる" }));
     expect(api.restartVm).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "VM作り直し" })).toBeInTheDocument();
   });
 });

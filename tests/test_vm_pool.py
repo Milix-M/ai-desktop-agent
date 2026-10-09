@@ -457,3 +457,77 @@ class TestContainerProvisioning:
                 assert (await c.post("/vms", json={"kind": "qemu"})).status_code == 409
         finally:
             server_app._pool = None
+
+
+class TestAndroidProvisioning:
+    def test_create_android_without_kvm(self, pool, monkeypatch):
+        pool, client = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        monkeypatch.setenv("ANDROID_IMAGE_REF", "test-android-image:latest")
+        info = pool.create_vm(name="droid", kind="android")
+        assert info.id.startswith("and-")
+        assert info.kind == "android"
+        assert info.adb_port == 5570
+        # 本体のみの1 run（中継なし、overlayなし）
+        assert len(client.containers.runs) == 1
+        run = client.containers.runs[0]
+        assert run["image"] == "test-android-image:latest"
+        assert run.get("privileged") is True
+        assert run["ports"] == {"5555/tcp": 5570}
+        assert run["labels"]["ai-desktop-agent.kind"] == "android"
+        assert pool.get_vm(info.id).kind == "android"
+
+    def test_android_adb_port_allocation(self, pool, monkeypatch):
+        pool, _ = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        a = pool.create_vm(kind="android")
+        b = pool.create_vm(kind="android")
+        assert (a.adb_port, b.adb_port) == (5570, 5571)
+
+    def test_restart_android_without_kvm(self, pool, monkeypatch):
+        pool, client = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        info = pool.create_vm(kind="android")
+        main = next(c for c in client.containers.items if c.name == f"ai-desktop-agent-{info.id}")
+        out = pool.restart_vm(info.id)
+        assert out.id == info.id
+        assert main.restarted is True
+
+    def test_remove_android(self, pool, monkeypatch):
+        pool, _ = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        info = pool.create_vm(kind="android")
+        assert pool.remove_vm(info.id) is True
+        assert pool.get_vm(info.id) is None
+
+    @pytest.mark.asyncio
+    async def test_create_android_endpoint(self, tmp_path, monkeypatch):
+        from httpx import ASGITransport, AsyncClient
+
+        from ai_desktop_agent.server import app as server_app
+        from ai_desktop_agent.server.vm_pool import VmPool as Pool
+
+        monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
+        monkeypatch.setenv("ANDROID_IMAGE_REF", "test-android-image:latest")
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        monkeypatch.delenv("BACKEND_NETWORK", raising=False)
+        client = _FakeDocker()
+        server_app._pool = Pool(
+            client=client,
+            state_file=tmp_path / "vms.json",
+            overlays_dir=str(tmp_path / "vm" / "overlays"),
+        )
+        try:
+            transport = ASGITransport(app=server_app.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                created = (await c.post("/vms", json={"kind": "android"})).json()
+                assert created["id"].startswith("and-")
+                assert created["kind"] == "android"
+                assert created["adb_port"] == 5570
+        finally:
+            server_app._pool = None

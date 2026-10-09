@@ -560,3 +560,29 @@ class TestUpScript:
         content = (PROJECT_ROOT / "scripts" / "up.sh").read_text()
         assert "/dev/kvm" in content
         assert "--profile kvm" in content
+
+
+class TestAndroidCompose:
+    """android サービス（Redroid）の compose 定義を検証する。"""
+
+    @staticmethod
+    def _compose_data():
+        import yaml
+
+        return yaml.safe_load((PROJECT_ROOT / "docker-compose.yml").read_text())
+
+    def test_android_behind_profile(self):
+        android = self._compose_data()["services"]["android"]
+        assert "android" in (android.get("profiles") or []), (
+            "android サービスは android プロファイルに属する必要があります"
+        )
+
+    def test_android_privileged_and_adb(self):
+        android = self._compose_data()["services"]["android"]
+        assert android.get("privileged") is True, "Redroid には privileged が必要です"
+        assert "5555:5555" in android.get("ports", [])
+        assert "redroid" in str(android.get("image", ""))
+
+    def test_backend_has_adb(self):
+        content = (PROJECT_ROOT / "Dockerfile").read_text()
+        assert "android-tools-adb" in content, "backend に adb が必要です"

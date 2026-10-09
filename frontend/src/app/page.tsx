@@ -306,27 +306,22 @@ export default function Home() {
     [addLog]
   );
 
-  const handleCreateVm = useCallback(async (kind: "qemu" | "container") => {
-    const label = kind === "container" ? "コンテナ名（空可）" : "VM名（空可）";
-    const name = typeof window !== "undefined" ? window.prompt(label) : null;
-    if (name === null) return; // キャンセル
+  const handleCreateVm = useCallback(async (kind: "qemu" | "container" | "android", name?: string) => {
+    const kindLabel = kind === "container" ? "コンテナ" : kind === "android" ? "Android" : "VM";
     setCreatingVm(true);
     try {
       const vm = await createVm(name || undefined, kind);
-      addLog(`${kind === "container" ? "コンテナ" : "VM"}作成開始: ${vm.name}`, "action");
+      addLog(`${kindLabel}作成開始: ${vm.name}`, "action");
       await refreshVms();
       setSelectedVmId(vm.id);
     } catch (e: unknown) {
-      addLog(`${kind === "container" ? "コンテナ" : "VM"}作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
+      addLog(`${kindLabel}作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
     } finally {
       setCreatingVm(false);
     }
   }, [addLog, refreshVms]);
 
   const handleDeleteVm = useCallback(async (vmId: string) => {
-    if (typeof window !== "undefined" && !window.confirm("このVMを削除しますか？上のタスクは停止します。")) {
-      return;
-    }
     try {
       await deleteVm(vmId);
       addLog("VM削除", "state");
@@ -350,7 +345,16 @@ export default function Home() {
         creating={creatingVm}
       />
       <div className="main-layout">
-        <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+        {selectedVm?.kind === "android" ? (
+          <div className="vnc-panel">
+            <div className="vnc-placeholder" data-testid="android-noviewer">
+              Android端末はADB操作のみです（ライブ視聴は未対応）。
+              指示を出すとエージェントが操作します。
+            </div>
+          </div>
+        ) : (
+          <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+        )}
 
         <div
           className="sidebar-resizer"

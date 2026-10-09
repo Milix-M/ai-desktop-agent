@@ -37,7 +37,8 @@ flowchart LR
         desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (既定)"]
         ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
         vm["vm<br/>QEMU/KVM :5900 (kvm限定)<br/>KDE / 4vCPU・4GB"]
-        vm2["vm-id / desk-id<br/>動的払い出し :5910+/:6090+"]
+        and["android<br/>Redroid :5555<br/>(android限定、視聴なし)"]
+        vm2["vm-id / desk-id / and-id<br/>動的払い出し :5910+/:6090+"]
         data["data/<br/>tasks/*.json<br/>vms.json"]
         docker["Docker<br/>デーモン"]
     end
@@ -49,6 +50,7 @@ flowchart LR
     ws -->|VNC中継<br/>vm:5900| vm
     be -->|VNC操作（既定）<br/>desktop:5900| desk
     be -->|VNC操作（KVM時）<br/>vm:5900| vm
+    be -->|ADB操作<br/>android:5555| and
     be -->|履歴保存<br/>data/tasks/*.json| data
     be -->|VM管理<br/>Docker socket| docker
     docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナはKVM不要| vm2
@@ -62,6 +64,7 @@ flowchart LR
 | websockify-desktop | VNC→WS中継 | 6081 | desktop向け画面配信 |
 | vm | QEMU/KVM | 5900 | 重い隔離デスクトップ（KDE。kvm限定） |
 | websockify | VNC→WS中継 | 6080 | vm向け画面配信（kvm限定） |
+| android | Redroid | 5555 | Android端末（android限定。ADB操作のみ、視聴なし） |
 
 動的VM（Plan B）は `5910+`（VNC）/`6090+`（WS）を使い、台数分コンテナが増える。
 `vm`・`websockify` は `kvm` プロファイル配下のため、`./scripts/up.sh`（KVM自動判定）
@@ -131,13 +134,13 @@ flowchart LR
 - `server/vm_pool.py`（`VmPool`）：環境の一覧・作成・再起動・削除＋compose管理の
   `desktop` 検出（id `desktop`、`managed=False`、既定ポート `5901`/`6081`）。
   `default_vm()` はソート順で `desktop` を優先する（両方稼働時はdesktop）。
-  `POST /vms` は `kind` で種別を選ぶ（`qemu`＝既定／`container`）。
+  `POST /vms` は `kind` で種別を選ぶ（`qemu`＝既定／`container`／`android`）。
   qemu作成時はbase qcow2のフルコピーを払い出し（ロック競合回避のためbacking参照は使わない）、
   VNC/WSポートを `5910+`/`6090+` から割当て、ポート割当を `data/vms.json` に保存する。
   container作成時は軽量デスクトップ＋中継の2コンテナを払い出し、KVM不要でどこでも作れる。
   動的VMのidは `vm-<hex>`、動的コンテナは `desk-<hex>`。上限8台（`MAX_VMS`、両種別の合計）。
   動的QEMU VMは `/dev/kvm` を常時要求する（KVM必須）。
-  一覧の種別は `kind`（`qemu`／`container`）で返す。`desktop` と既定VM（`vm`）は削除不可。
+  一覧の種別は `kind`（`qemu`／`container`／`android`）で返す。`desktop` と既定VM（`vm`）は削除不可。
   ホストパス解決はbackend自身の `/app/data` マウント元から逆算する（`_host_repo_dir()`）。
 
 ## エージェント状態機械と実行フロー
@@ -360,7 +363,7 @@ LLMに渡すのは生画像ではなく、座標ヒントを重畳した画像�
 
 ## VM操作アーキテクチャ
 
-### 実行環境の2本立て
+### 実行環境の3本立て
 
 - `desktop`（`desktop/`、既定）：Xfce＋TigerVNCの軽量コンテナ。QEMU不要で常時起動する。
   VNCは `desktop:5900`（ホスト公開 `5901`）、画面配信は `websockify-desktop`（`:6081`）。
@@ -369,6 +372,11 @@ LLMに渡すのは生画像ではなく、座標ヒントを重畳した画像�
 - `vm`（`vm/`、kvm限定）：QEMU/KVMの重い隔離デスクトップ（KDE）。
   `kvm` プロファイルでのみ起動する（`./scripts/up.sh` が `/dev/kvm` の有無で自動判定）。
   backendの既定接続先は `desktop` であり、`VmPool.default_vm()` も `desktop` を優先する。
+- `android`（Redroid、動的払い出し＋`android` プロファイル）：ADB操作のAndroid端末。
+  KVM不要（ホストの binder / ashmem または `use_memfd` が必要）。
+  `vm/adb_backend.py`（`AdbBackend`）が `DisplayBackend` 互換で接続し、
+  タップ・スワイプ・キー・文字入力と画面取得を行う。
+  ライブ視聴（noVNC相当）は未対応のため中継コンテナは作らない。
 
 ### KVM自動切替とVM起動制限
 
@@ -390,9 +398,9 @@ sequenceDiagram
     participant FE as frontend
     participant POOL as backend (VmPool)
     participant DOCKER as Docker
-    participant VM as vm-id / desk-id
+    participant VM as vm-id / desk-id / and-id
     participant WS as ws-id (websockify)
-    U->>FE: + VM追加 / + コンテナ追加
+    U->>FE: + VM追加 / + コンテナ追加 / + Android追加
     FE->>POOL: POST /vms {kind}
     activate POOL
     POOL->>DOCKER: base qcow2をフルコピー (cp --sparse=always、qemuのみ)
@@ -417,7 +425,7 @@ sequenceDiagram
     POOL->>DOCKER: ディスク削除 (qemuのみ)
     POOL-->>FE: deleted
     deactivate POOL
-    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)<br/>kind=container はKVM不要
+    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)<br/>kind=container / android はKVM不要
 ```
 
 ### QEMU起動構成（`vm/entrypoint.sh`）
@@ -486,7 +494,8 @@ Next.js（App Router）。主要パネル：
   ／`ConnectionPanel`（バックエンド/VNC/VMの接続状態。旧下部ステータスバーを右パネルに組み込んだもの）
   ／`ControlPanel`（タスク操作）／`VMControls`（VM作り直し）／`TaskHistory`
   （履歴・削除。表示は日付＋タイトルのみ）／`LogPanel`／`VmTabs`
-  （VM切替・追加・削除）／`VncViewer`（noVNC埋め込み、切断時のみ再接続UI）。
+  （環境切替・追加・削除。追加はVM／コンテナ／Androidの3種、削除は2段階確認）／
+  `VncViewer`（noVNC埋め込み、切断時のみ再接続UI。Android選択時は案内表示）。
 - デバッグ系は `CollapsibleSection` で折畳み。サイドバー幅はドラッグ可
   （`useSidebarWidth`、280〜720px、localStorage保存）。
 - WebSocket（`/ws`、自動再接続）は `state / action / error / complete` を送る。

@@ -541,6 +541,97 @@ body {
   cursor: wait;
 }
 
+/* ── VM create form (popup代替) ── */
+.vm-create-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent, #4da3ff);
+  border-radius: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.vm-create-label {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.vm-create-input {
+  width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1b2a;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.vm-create-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.vm-create-submit,
+.vm-create-cancel {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1b2a;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vm-create-submit:hover:not(:disabled),
+.vm-create-cancel:hover:not(:disabled) {
+  background: #1a3a5c;
+}
+
+/* ── VM delete confirm (popup代替) ── */
+.vm-tab-confirm {
+  display: flex;
+  align-items: stretch;
+}
+
+.vm-tab-confirm-yes,
+.vm-tab-confirm-no {
+  border: none;
+  padding: 0 8px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vm-tab-confirm-yes {
+  background: transparent;
+  color: var(--error, #f85149);
+  border-left: 1px solid var(--border);
+}
+
+.vm-tab-confirm-yes:hover {
+  background: #5c1a1a;
+  color: #fff;
+}
+
+.vm-tab-confirm-no {
+  background: transparent;
+  color: var(--dim);
+}
+
+.vm-tab-confirm-no:hover {
+  background: #1a3a5c;
+  color: var(--text);
+}
+
+.vm-confirm-label {
+  color: var(--dim);
+  font-size: 12px;
+  align-self: center;
+}
+
 /* ── Collapsible ── */
 .collapsible-toggle {
   display: flex;

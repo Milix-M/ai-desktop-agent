@@ -134,11 +134,12 @@ class VmInfoModel(BaseModel):
     vnc_host: str = ""
     managed: bool = True
     kind: str = "qemu"
+    adb_port: int = 0
 
 
 class CreateVmRequest(BaseModel):
     name: str | None = None
-    kind: str | None = None  # qemu（既定） / container。省略時は qemu
+    kind: str | None = None  # qemu（既定） / container / android。省略時は qemu
 
 
 class StoredActionItem(BaseModel):
@@ -253,15 +254,21 @@ def _resolve_vm(vm_id: str | None):
 
 
 def _connect_vm_display(vm):
-    """VMへのVNC接続を作る。"""
+    """環境への操作接続を作る。android は ADB、それ以外は VNC。"""
     from fastapi import HTTPException
 
     try:
+        if getattr(vm, "kind", "qemu") == "android":
+            from ai_desktop_agent.vm.adb_backend import AdbBackend
+
+            display = AdbBackend()
+            display.connect(vm.vnc_host or "android", 5555)
+            return display
         display = VNCClient()
         display.connect(vm.vnc_host or "vm", 5900)
         return display
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"VMへのVNC接続に失敗: {e}") from e
+        raise HTTPException(status_code=502, detail=f"環境への接続に失敗: {e}") from e
 
 
 @app.get("/vms", response_model=list[VmInfoModel])
@@ -286,8 +293,8 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
     kind = (req.kind or "qemu").lower()
-    if kind not in ("qemu", "container"):
-        raise HTTPException(status_code=400, detail="kind は qemu/container のいずれか")
+    if kind not in ("qemu", "container", "android"):
+        raise HTTPException(status_code=400, detail="kind は qemu/container/android のいずれか")
     try:
         info = get_pool().create_vm(name=req.name, kind=kind)
     except DockerUnavailableError as e:

@@ -15,7 +15,8 @@ flowchart LR
         desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (既定)"]
         ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
         vm["vm<br/>QEMU/KVM :5900 (kvm限定)<br/>KDE / 4vCPU・4GB"]
-        vm2["vm-id<br/>動的VM :5910+/:6090+"]
+        and["android<br/>Redroid :5555<br/>(android限定、視聴なし)"]
+        vm2["vm-id / desk-id / and-id<br/>動的払い出し :5910+/:6090+"]
         data["data/<br/>tasks/*.json<br/>vms.json"]
         docker["Docker<br/>デーモン"]
     end
@@ -27,9 +28,10 @@ flowchart LR
     ws -->|VNC中継<br/>vm:5900| vm
     be -->|VNC操作（既定）<br/>desktop:5900| desk
     be -->|VNC操作（KVM時）<br/>vm:5900| vm
+    be -->|ADB操作<br/>android:5555| and
     be -->|履歴保存<br/>data/tasks/*.json| data
     be -->|VM管理<br/>Docker socket| docker
-    docker -->|コンテナ払い出し<br/>qcow2フルコピー| vm2
+    docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナ・AndroidはKVM不要| vm2
 ```
 
 ユーザーがWebのチャット画面から自然言語で指示を出すと、AIエージェントがVMのスクリーンショットを取得し、マルチモーダルLLMで状況を判断してマウス・キーボード操作を実行する。その様子は埋め込みnoVNCビューアを通じてリアルタイムで確認できる。
@@ -48,6 +50,7 @@ flowchart LR
 | websockify-desktop | Dockerコンテナ | desktop用VNC→WebSocket中継（`:6081`） |
 | vm (QEMU/KVM) | Dockerコンテナ（kvm限定） | 重い隔離デスクトップ（KDE）。`/dev/kvm` をマウント |
 | websockify | Dockerコンテナ（kvm限定） | vm用VNC→WebSocket中継（`:6080`） |
+| android (Redroid) | Dockerコンテナ（android限定） | Android端末（ADB操作のみ、視聴なし） |
 
 ブラウザ → `localhost:3000`（frontend）。frontend→backend (`:8081`)、backend→desktop (`desktop:5900`) はDocker内部ネットワークで通信。画面配信は `:6081`（desktop既定、KVM時は `:6080`）。
 
@@ -217,7 +220,7 @@ cp .env.example .env   # APIキーを設定（KVM指定は不要・自動判定�
 | GET | `/tasks/current` | 最新タスク状態（リロード後の復元用） |
 | POST | `/tasks/current/{pause,resume,stop}` | タスク制御 |
 | GET | `/vms` | VM/コンテナ一覧（既定desktop優先） |
-| POST | `/vms` | 環境作成（`{name?, kind?}`。kindはqemu既定/container。非対応環境のqemuは409） |
+| POST | `/vms` | 環境作成（`{name?, kind?}`。kindはqemu既定/container/android。非対応環境のqemuは409） |
 | GET | `/vm/status` | VMコンテナ状態 |
 | POST | `/vm/restart` | VM作り直し（再起動。非対応環境は409） |
 | WS | `/ws` | 状態・操作ログのプッシュ配信 |
@@ -244,7 +247,7 @@ cd frontend && npm test   # frontendテスト（vitest）
 - [ ] 定型タスクのテンプレート機能
 - [ ] 同時監視グリッド（現状はタブ切替＋単一ビューア）
 - [ ] 決定モデル組込み（回復戦略→達成検証→評価ハーネスの順。詳細は `docs/architecture.md`）
-- [ ] Android操作モード（検討のみ。詳細は `docs/research/`）
+- [ ] Android画面視聴（現状はADB操作のみ。scrcpy→VNC中継の検討は `docs/research/android-mode.md`）
 
 ## ライセンス
 

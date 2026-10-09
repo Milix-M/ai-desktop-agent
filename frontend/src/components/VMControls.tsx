@@ -12,6 +12,7 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
   const [status, setStatus] = useState("取得中...");
   const [restarting, setRestarting] = useState(false);
   const [watching, setWatching] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -37,9 +38,7 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
   }, [refresh, pollIntervalMs, watching]);
 
   const handleRestart = useCallback(async () => {
-    if (typeof window !== "undefined" && !window.confirm("VMを作り直しますか？実行中のタスクは停止します。")) {
-      return;
-    }
+    setConfirming(false);
     setRestarting(true);
     setWatching(true);
     onLog?.("VM作り直し開始", "action");
@@ -61,11 +60,23 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
       <div className="vm-status" data-testid="vm-status">
         {restarting ? "作り直し中..." : status}
       </div>
-      <div className="controls">
-        <button disabled={restarting} onClick={handleRestart}>
-          VM作り直し
-        </button>
-      </div>
+      {confirming ? (
+        <div className="controls">
+          <span className="vm-confirm-label">実行中のタスクは停止します</span>
+          <button disabled={restarting} onClick={handleRestart}>
+            作り直す
+          </button>
+          <button onClick={() => setConfirming(false)}>
+            やめる
+          </button>
+        </div>
+      ) : (
+        <div className="controls">
+          <button disabled={restarting} onClick={() => setConfirming(true)}>
+            VM作り直し
+          </button>
+        </div>
+      )}
     </>
   );
 }

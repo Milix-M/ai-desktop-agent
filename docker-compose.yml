@@ -106,3 +106,21 @@ services:
       desktop:
         condition: service_healthy
     restart: unless-stopped
+
+  # ── Android端末（Redroid。画面視聴は未対応、ADB操作のみ） ──
+  # KVM不要だがホストの binder / ashmem（または use_memfd）が必要。
+  # 起動: docker compose --profile android up
+  # 動的払い出し: POST /vms {"kind": "android"}（profile不要）
+  android:
+    profiles: ["android"]
+    image: redroid/redroid:13.0.0-latest
+    privileged: true
+    tty: true
+    stdin_open: true
+    ports:
+      - "5555:5555"
+    command:
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=1920
+      - androidboot.redroid_dpi=480
+    restart: unless-stopped
