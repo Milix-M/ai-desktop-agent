@@ -627,16 +627,11 @@ body {
   color: var(--success);
 }
 
-/* ── Status Bar ── */
-.status-bar {
+/* ── Connection (sidebar) ── */
+.conn-list {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  height: 28px;
-  min-height: 28px;
-  background: #0d1b2a;
-  border-top: 1px solid var(--border);
-  padding: 0 16px;
+  flex-direction: column;
+  gap: 8px;
   font-size: 12px;
   color: var(--dim);
 }

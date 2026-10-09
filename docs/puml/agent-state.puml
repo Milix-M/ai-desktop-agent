@@ -1,0 +1,52 @@
+@startuml agent-state
+!theme plain
+skinparam defaultFontName "Noto Sans JP"
+skinparam state {
+  BackgroundColor white
+  BorderColor #333333
+}
+left to right direction
+
+title エージェント状態機械（破線は稀な遷移）
+
+[*] --> IDLE
+IDLE --> UNDERSTANDING : start()
+UNDERSTANDING --> PLANNING : 理解完了
+UNDERSTANDING --> FAILED : 理解失敗
+PLANNING --> EXECUTING : 計画ready
+PLANNING --> FAILED : 分解失敗
+EXECUTING --> WAITING : アクション実行
+EXECUTING --> PAUSED : 一時停止
+EXECUTING --> FAILED : fail_now()\n上限・例外・取消
+EXECUTING -[dashed]-> RECOVERING : 即時回復
+EXECUTING -[dashed]-> COMPLETED : 即時完了
+WAITING --> VERIFYING : 待機完了
+WAITING --> RECOVERING : タイムアウト
+VERIFYING --> EXECUTING : 継続
+VERIFYING --> COMPLETED : 全サブタスク完了
+VERIFYING --> RECOVERING : 検証失敗
+VERIFYING --> FAILED : 上限超過
+RECOVERING --> EXECUTING : リトライ
+RECOVERING --> PLANNING : 再計画
+RECOVERING --> FAILED : 回復不能
+PAUSED --> EXECUTING : 再開
+PAUSED --> IDLE : 中断
+COMPLETED --> IDLE : reset
+FAILED --> IDLE : reset
+
+note right of VERIFYING
+  クリックは画面変化を検証
+  完了宣言は画像つきLLM検証
+end note
+
+note right of RECOVERING
+  エラー情報を次判断へ引継ぎ
+  (_pending_error)
+end note
+
+note bottom of PAUSED
+  pause() は EXECUTING からのみ
+  interrupted は状態ではなく
+  永続化上のマーク
+end note
+@enduml

@@ -55,11 +55,11 @@ export async function getVms(): Promise<VmInfo[]> {
   return resp.json();
 }
 
-export async function createVm(name?: string): Promise<VmInfo> {
+export async function createVm(name?: string, kind?: string): Promise<VmInfo> {
   const resp = await fetch(`${BACKEND_URL}/vms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name ?? null }),
+    body: JSON.stringify({ name: name ?? null, kind: kind ?? null }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();

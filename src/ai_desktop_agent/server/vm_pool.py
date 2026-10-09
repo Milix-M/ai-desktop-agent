@@ -26,9 +26,18 @@ from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E
 
 LABEL_VM_ID = "ai-desktop-agent.vm-id"
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
+LABEL_KIND = "ai-desktop-agent.kind"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
+KIND_QEMU = "qemu"
+KIND_CONTAINER = "container"
+
 BASE_VM_SERVICE = "vm"
+#: 軽量コンテナ実行環境（QEMU不要のVNCデスクトップ）。既定の作業環境。
+DESKTOP_SERVICE = "desktop"
+#: compose管理サービスの既定ポート（ホスト公開用。保存値がない場合）。
+DESKTOP_VNC_PORT = 5901
+DESKTOP_WS_PORT = 6081
 OVERLAYS_DIR = "/vm/overlays"  # backendコンテナ内のマウント先
 BASE_IMAGE_IN_VM = "/vm/desktop.qcow2"  # vmコンテナ内から見たbase
 VNC_START_PORT = 5910
@@ -47,7 +56,8 @@ class VmInfo:
     vnc_port: int = 5900  # ホスト側公開ポート
     ws_port: int = 6080  # ホスト側公開ポート
     vnc_host: str = ""  # backend からの接続先ホスト名
-    managed: bool = True  # False: compose管理の既定VM
+    managed: bool = True  # False: compose管理の既定VM・desktop
+    kind: str = KIND_QEMU  # KIND_QEMU / KIND_CONTAINER
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -76,11 +86,11 @@ class VmPool:
     # ── 一覧・取得 ──────────────────────────────────
 
     def list_vms(self) -> list[VmInfo]:
-        """実行中・停止中の全VMを返す（compose既定VMを含む）。"""
+        """実行中・停止中の全VMを返す（compose既定VM・desktopを含む）。"""
         docker = self._docker()
         found: dict[str, VmInfo] = {}
 
-        # compose管理の既定VM（サービス名 vm）
+        # compose管理の既定VM（サービス名 vm。kvmプロファイル時のみ存在）
         try:
             legacy = docker.containers.list(
                 all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
@@ -88,7 +98,21 @@ class VmPool:
         except Exception:
             legacy = []
         for c in legacy:
-            found[BASE_VM_SERVICE] = self._from_container(c, BASE_VM_SERVICE, managed=False)
+            found[BASE_VM_SERVICE] = self._from_container(
+                c, BASE_VM_SERVICE, managed=False, kind=KIND_QEMU
+            )
+
+        # compose管理の軽量コンテナ環境（サービス名 desktop。常時起動が既定）
+        try:
+            desktops = docker.containers.list(
+                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={DESKTOP_SERVICE}"}
+            )
+        except Exception:
+            desktops = []
+        for c in desktops:
+            found[DESKTOP_SERVICE] = self._from_container(
+                c, DESKTOP_SERVICE, managed=False, kind=KIND_CONTAINER
+            )
 
         # 動的VM
         try:
@@ -118,54 +142,90 @@ class VmPool:
 
     # ── 作成・削除 ──────────────────────────────────
 
-    def create_vm(self, name: str | None = None) -> VmInfo:
-        """新しいVMを作成して起動する。overlay + 2コンテナ。"""
+    def create_vm(self, name: str | None = None, kind: str = KIND_QEMU) -> VmInfo:
+        """新しい環境を作成して起動する。本体 + 中継の2コンテナ。
+
+        kind=qemu: QEMU VM（overlay + 2コンテナ）。KVM必須のため、KVMが
+        利用できない環境では作成を制限する（`KvmUnavailableError`）。
+        kind=container: 軽量デスクトップコンテナ。KVM不要でどこでも作れる。
+        """
+        from ai_desktop_agent.server.kvm import (
+            KvmUnavailableError,
+            is_kvm_available,
+            is_tcg_allowed,
+            resolve_use_kvm,
+        )
+
+        if kind not in (KIND_QEMU, KIND_CONTAINER):
+            raise ValueError(f"kind は qemu/container のいずれか: {kind}")
+
         docker = self._docker()
+        if kind == KIND_QEMU and not is_tcg_allowed() and not is_kvm_available(docker):
+            raise KvmUnavailableError()
         if len([v for v in self.list_vms() if v.managed]) >= MAX_VMS:
             raise ValueError(f"VM数の上限に達しています（{MAX_VMS}）")
 
-        vm_id = f"vm-{uuid.uuid4().hex[:8]}"
+        prefix = "vm" if kind == KIND_QEMU else "desk"
+        vm_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
         vnc_port = self._alloc_port(VNC_START_PORT, lambda v: v.vnc_port)
         ws_port = self._alloc_port(WS_START_PORT, lambda v: v.ws_port)
 
-        overlay_host = self._create_overlay(vm_id)
-        image = self._vm_image_ref(docker)
         network = self._backend_network(docker)
-        use_kvm = os.environ.get("USE_KVM", "false")
-        memory = os.environ.get("VM_MEMORY", "4096")
-        cpus = os.environ.get("VM_CPUS", "4")
-
-        common_labels = {LABEL_VM_ID: vm_id}
+        common_labels = {LABEL_VM_ID: vm_id, LABEL_KIND: kind}
         vm_name = f"ai-desktop-agent-{vm_id}"
-        logger.info("VM作成: %s (vnc=%d ws=%d)", vm_id, vnc_port, ws_port)
+        logger.info("VM作成: %s kind=%s (vnc=%d ws=%d)", vm_id, kind, vnc_port, ws_port)
 
-        host_repo = self._host_repo_dir()
-        volumes = {
-            overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
-            f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
-            **self._ro_vm_files(),
-        }
-        docker.containers.run(
-            image,
-            name=vm_name,
-            detach=True,
-            devices=["/dev/kvm:/dev/kvm"] if os.path.exists("/dev/kvm") else [],
-            ports={"5900/tcp": vnc_port},
-            environment={
-                "VM_MEMORY": memory,
-                "VM_CPUS": cpus,
-                "VM_VNC_PORT": "5900",
-                "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
-                "CMDLINE_FILE": "/vm/cmdline.txt",
-                "USE_KVM": use_kvm,
-                "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
-                "QGA_SOCK": f"/vm/sockets/{vm_id}-qga.sock",
-            },
-            volumes=volumes,
-            labels=common_labels,
-            network=network,
-            restart_policy={"Name": "unless-stopped"},
-        )
+        if kind == KIND_QEMU:
+            overlay_host = self._create_overlay(vm_id)
+            image = self._vm_image_ref(docker)
+            # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
+            use_kvm = resolve_use_kvm()
+            memory = os.environ.get("VM_MEMORY", "4096")
+            cpus = os.environ.get("VM_CPUS", "4")
+
+            host_repo = self._host_repo_dir()
+            volumes = {
+                overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
+                f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
+                **self._ro_vm_files(),
+            }
+            docker.containers.run(
+                image,
+                name=vm_name,
+                detach=True,
+                # QEMU VMはKVM必須。非対応ホストでは起動前段で弾くため常時要求する。
+                devices=["/dev/kvm:/dev/kvm"],
+                ports={"5900/tcp": vnc_port},
+                environment={
+                    "VM_MEMORY": memory,
+                    "VM_CPUS": cpus,
+                    "VM_VNC_PORT": "5900",
+                    "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
+                    "CMDLINE_FILE": "/vm/cmdline.txt",
+                    "USE_KVM": use_kvm,
+                    "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
+                    "QGA_SOCK": f"/vm/sockets/{vm_id}-qga.sock",
+                },
+                volumes=volumes,
+                labels=common_labels,
+                network=network,
+                restart_policy={"Name": "unless-stopped"},
+            )
+        else:
+            image = self._desktop_image_ref(docker)
+            docker.containers.run(
+                image,
+                name=vm_name,
+                detach=True,
+                ports={"5900/tcp": vnc_port},
+                environment={
+                    "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
+                    "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
+                },
+                labels=common_labels,
+                network=network,
+                restart_policy={"Name": "unless-stopped"},
+            )
 
         ws_image = os.environ.get("WEBSOCKIFY_IMAGE", "ai-desktop-agent-websockify")
         docker.containers.run(
@@ -188,11 +248,28 @@ class VmPool:
             ws_port=ws_port,
             vnc_host=vm_name,
             managed=True,
+            kind=kind,
         )
 
     def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
-        """VMコンテナを再起動する（ゲストOSごと作り直し）。中継は触らない。"""
+        """VMコンテナを再起動する（ゲストOSごと作り直し）。中継は触らない。
+
+        QEMU VMはKVM必須のため、KVMが利用できない環境では再起動を制限する
+        （`KvmUnavailableError`）。コンテナ環境の再起動はどこでもできる。
+        """
+        from ai_desktop_agent.server.kvm import (
+            KvmUnavailableError,
+            is_kvm_available,
+            is_tcg_allowed,
+        )
+
         docker = self._docker()
+        if (
+            self._target_kind(vm_id, docker) == KIND_QEMU
+            and not is_tcg_allowed()
+            and not is_kvm_available(docker)
+        ):
+            raise KvmUnavailableError()
         if vm_id == BASE_VM_SERVICE:
             targets = docker.containers.list(
                 all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
@@ -216,9 +293,9 @@ class VmPool:
         return info
 
     def remove_vm(self, vm_id: str) -> bool:
-        """VMと中継コンテナを削除し、ディスクを消す。既定VMは不可。"""
-        if vm_id == BASE_VM_SERVICE:
-            raise ValueError("既定VMは削除できません")
+        """VMと中継コンテナを削除し、ディスクを消す。既定VM・desktopは不可。"""
+        if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE):
+            raise ValueError("既定VM・コンテナ環境は削除できません")
         docker = self._docker()
         targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
         if not targets:
@@ -264,7 +341,9 @@ class VmPool:
         except Exception:
             return {}
 
-    def _from_container(self, container: Any, vm_id: str, managed: bool) -> VmInfo:
+    def _from_container(
+        self, container: Any, vm_id: str, managed: bool, kind: str | None = None
+    ) -> VmInfo:
         import contextlib
 
         with contextlib.suppress(Exception):
@@ -282,15 +361,25 @@ class VmPool:
         name = container.name if managed else vm_id
         if saved and saved.get("name"):
             name = saved["name"]
+        if kind is None:
+            kind = self._labels(container).get(LABEL_KIND, KIND_QEMU)
+        if saved:
+            vnc_port = int(saved.get("vnc_port", 5900))
+            ws_port = int(saved.get("ws_port", 6080))
+        elif vm_id == DESKTOP_SERVICE:
+            vnc_port, ws_port = DESKTOP_VNC_PORT, DESKTOP_WS_PORT
+        else:
+            vnc_port, ws_port = 5900, 6080
         return VmInfo(
             id=vm_id,
             name=name,
             status=status,
             health=health,
-            vnc_port=int(saved.get("vnc_port", 5900)) if saved else 5900,
-            ws_port=int(saved.get("ws_port", 6080)) if saved else 6080,
+            vnc_port=vnc_port,
+            ws_port=ws_port,
             vnc_host=container.name,
             managed=managed,
+            kind=kind,
         )
 
     def _alloc_port(self, start: int, key) -> int:
@@ -329,6 +418,41 @@ class VmPool:
             remove=True,
         )
         return overlay_host
+
+    def _target_kind(self, vm_id: str, docker: Any) -> str:
+        """再起動・削除対象の種別を返す。不明時は qemu 扱い（従来動作）。"""
+        if vm_id == DESKTOP_SERVICE:
+            return KIND_CONTAINER
+        if vm_id == BASE_VM_SERVICE:
+            return KIND_QEMU
+        try:
+            targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
+        except Exception:
+            return KIND_QEMU
+        for c in targets:
+            if LABEL_WS_FOR not in self._labels(c):
+                return self._labels(c).get(LABEL_KIND, KIND_QEMU)
+        return KIND_QEMU
+
+    def _desktop_image_ref(self, docker: Any) -> str:
+        """軽量デスクトップ実行イメージの参照。環境変数優先、なければ既定から検出。"""
+        if os.environ.get("DESKTOP_IMAGE_REF"):
+            return os.environ["DESKTOP_IMAGE_REF"]
+        try:
+            candidates = docker.containers.list(
+                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={DESKTOP_SERVICE}"}
+            )
+            if candidates:
+                tags = (
+                    (candidates[0].image.attrs.get("RepoTags") or [])
+                    if hasattr(candidates[0], "image")
+                    else []
+                )
+                image = candidates[0].attrs.get("Image", "")
+                return tags[0] if tags else image
+        except Exception:
+            logger.debug("desktopイメージ検出に失敗", exc_info=True)
+        return "ai-desktop-agent-desktop:latest"
 
     def _vm_image_ref(self, docker: Any) -> str:
         """QEMU実行イメージの参照。環境変数優先、なければ既定VMから検出。"""

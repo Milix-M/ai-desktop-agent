@@ -36,11 +36,10 @@ describe("TaskHistory", () => {
     expect(screen.getByText("履歴なし")).toBeInTheDocument();
   });
 
-  it("renders items with state labels", () => {
+  it("renders items with titles", () => {
     render(<TaskHistory items={ITEMS} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />);
     expect(screen.getByText("テスト指示1")).toBeInTheDocument();
-    expect(screen.getByText("完了")).toBeInTheDocument();
-    expect(screen.getByText("中断")).toBeInTheDocument();
+    expect(screen.getByText("テスト指示2")).toBeInTheDocument();
   });
 
   it("calls onSelect with task id", async () => {

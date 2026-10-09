@@ -133,10 +133,12 @@ class VmInfoModel(BaseModel):
     ws_port: int = 6080
     vnc_host: str = ""
     managed: bool = True
+    kind: str = "qemu"
 
 
 class CreateVmRequest(BaseModel):
     name: str | None = None
+    kind: str | None = None  # qemu（既定） / container。省略時は qemu
 
 
 class StoredActionItem(BaseModel):
@@ -275,13 +277,23 @@ async def list_vms() -> list[VmInfoModel]:
 
 @app.post("/vms", response_model=VmInfoModel)
 async def create_vm(req: CreateVmRequest) -> VmInfoModel:
-    """新しいVMを作成して起動する。"""
+    """新しい環境を作成して起動する。kind=qemu（既定・KVM必須）/ container。
+
+    KVM非対応環境での qemu 作成は409。container はどこでも作れる。
+    """
     from fastapi import HTTPException
 
+    from ai_desktop_agent.server.kvm import KvmUnavailableError
+
+    kind = (req.kind or "qemu").lower()
+    if kind not in ("qemu", "container"):
+        raise HTTPException(status_code=400, detail="kind は qemu/container のいずれか")
     try:
-        info = get_pool().create_vm(name=req.name)
+        info = get_pool().create_vm(name=req.name, kind=kind)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+    except KvmUnavailableError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return VmInfoModel(**info.to_dict())
@@ -437,8 +449,11 @@ async def vm_restart() -> VmStatus:
 
     実行中のエージェントタスクがあれば先に停止する。
     再起動自体は即時戻り、デスクトップが使えるまで数分かかる。
+    KVMが利用できない環境では409（コンテナ環境を使用すること）。
     """
     from fastapi import HTTPException
+
+    from ai_desktop_agent.server.kvm import KvmUnavailableError
 
     global _active_session
 
@@ -450,6 +465,8 @@ async def vm_restart() -> VmStatus:
         info = _get_vm_controller().restart()
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+    except KvmUnavailableError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return VmStatus(
         running=info.running,
         status=info.status,

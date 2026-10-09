@@ -6,7 +6,7 @@ interface Props {
   vms: VmInfo[];
   selectedId: string | null;
   onSelect: (vmId: string) => void;
-  onCreate: () => void;
+  onCreate: (kind: "qemu" | "container") => void;
   onDelete: (vmId: string) => void;
   creating: boolean;
 }
@@ -23,6 +23,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
             <span className={`vm-dot ${vm.status === "running" ? "green" : "red"}`} />
             <span className="vm-tab-name">{vm.name}</span>
             <span className="vm-tab-sub">
+              {vm.kind === "container" ? "コンテナ・" : ""}
               {vm.status}
               {vm.health ? ` (${vm.health})` : ""}
             </span>
@@ -40,10 +41,17 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
       ))}
       <button
         className="vm-tab-add"
-        onClick={onCreate}
+        onClick={() => onCreate("qemu")}
         disabled={creating}
       >
         {creating ? "作成中..." : "+ VM追加"}
+      </button>
+      <button
+        className="vm-tab-add"
+        onClick={() => onCreate("container")}
+        disabled={creating}
+      >
+        {creating ? "作成中..." : "+ コンテナ追加"}
       </button>
     </div>
   );

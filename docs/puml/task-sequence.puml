@@ -1,0 +1,51 @@
+@startuml task-sequence
+!theme plain
+skinparam defaultFontName "Noto Sans JP"
+title タスク実行シーケンス（正常系＋ガード）
+
+actor ユーザー
+participant "frontend" as fe
+participant "backend\n(TaskSession)" as be
+participant "LLM" as llm
+participant "VM" as vm
+
+ユーザー -> fe : 自然言語の指示
+fe -> be : POST /tasks
+activate be
+be -> llm : understand_instruction()
+llm --> be : Goal（意図・対象・制約）
+be -> llm : decompose_task()
+llm --> be : サブタスク列
+
+loop サブタスク消化
+  be -> vm : スクリーンショット取得
+  vm --> be : 生画像
+  be -> be : グリッド重畳＋OCR＋黒画面ウェイク
+  be -> llm : decide_next_action()\n(画像＋OCR＋履歴＋エラー情報)
+  llm --> be : Action＋期待効果＋確信度
+  alt vm_restart 要求
+    be -> be : allow_vm_restart 判定\n未許可は却下して回復へ
+    be -> vm : VM作り直し＋60秒待機\n(許可時のみ)
+  else 操作なし完了宣言
+    be -> llm : 却下して再問い合わせ\n(最大2回)
+  else 低確信度・連打
+    be -> llm : region_select → 拡大画像で再判断
+  else 同一操作3連続
+    be -> be : wait に置換
+  end
+  be -> vm : マウス・キー実行\n(vncdotool)
+  be -> vm : 画面安定待ち\n(視覚系は wait_for_still)
+  alt クリック系
+    be -> vm : 変化の有無をハッシュ比較\n(無変化はRECOVERING)
+  else 完了宣言
+    be -> llm : 画像つき達成検証\n(未達は上限まで回復)
+  else 機械的失敗
+    be -> be : RECOVERINGへ\n(_pending_error 引継ぎ)
+  end
+  be -> fe : WSで状態・操作ログをプッシュ
+end
+
+be -> fe : 完了通知＋履歴更新
+be -> be : data/tasks/*.json に保存
+deactivate be
+@enduml

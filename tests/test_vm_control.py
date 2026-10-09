@@ -75,22 +75,25 @@ class TestVmControllerStatus:
 
 
 class TestVmControllerRestart:
-    def test_restart_calls_docker(self):
+    def test_restart_calls_docker(self, monkeypatch):
+        monkeypatch.setenv("USE_KVM", "true")
         c = _FakeContainer()
         ctrl = VmController(client=_FakeDockerClient([c]))
         info = ctrl.restart()
         assert c.restarted is True
         assert info.status == "restarting"
 
-    def test_restart_not_found_raises(self):
+    def test_restart_not_found_raises(self, monkeypatch):
+        monkeypatch.setenv("USE_KVM", "true")
         ctrl = VmController(client=_FakeDockerClient([]))
         with pytest.raises(DockerUnavailableError):
             ctrl.restart()
 
 
 @pytest.fixture
-def _vm_app():
+def _vm_app(monkeypatch):
     """_get_vm_controller をフェイクに差し替える。"""
+    monkeypatch.setenv("USE_KVM", "true")
     server_app._active_session = None
     fake = VmController(client=_FakeDockerClient([_FakeContainer()]))
     orig = server_app._get_vm_controller

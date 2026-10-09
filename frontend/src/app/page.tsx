@@ -10,7 +10,7 @@ import VmTabs from "@/components/VmTabs";
 import CollapsibleSection from "@/components/CollapsibleSection";
 import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
-import StatusBar from "@/components/StatusBar";
+import ConnectionPanel from "@/components/ConnectionPanel";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useSidebarWidth } from "@/hooks/useSidebarWidth";
 import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, getVncWsUrl } from "@/lib/api";
@@ -306,17 +306,18 @@ export default function Home() {
     [addLog]
   );
 
-  const handleCreateVm = useCallback(async () => {
-    const name = typeof window !== "undefined" ? window.prompt("VM名（空可）") : null;
+  const handleCreateVm = useCallback(async (kind: "qemu" | "container") => {
+    const label = kind === "container" ? "コンテナ名（空可）" : "VM名（空可）";
+    const name = typeof window !== "undefined" ? window.prompt(label) : null;
     if (name === null) return; // キャンセル
     setCreatingVm(true);
     try {
-      const vm = await createVm(name || undefined);
-      addLog(`VM作成開始: ${vm.name}`, "action");
+      const vm = await createVm(name || undefined, kind);
+      addLog(`${kind === "container" ? "コンテナ" : "VM"}作成開始: ${vm.name}`, "action");
       await refreshVms();
       setSelectedVmId(vm.id);
     } catch (e: unknown) {
-      addLog(`VM作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
+      addLog(`${kind === "container" ? "コンテナ" : "VM"}作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
     } finally {
       setCreatingVm(false);
     }
@@ -386,11 +387,13 @@ export default function Home() {
             subtasks={subtasks}
           />
 
+          <ConnectionPanel
+            vncConnected={vncConnected}
+            vmResolution={vmResolution}
+          />
+
           <CollapsibleSection title="VM管理（デバッグ）">
-            <div className="vm-subsection">
-              <h3>タスク操作</h3>
-              <ControlPanel onControl={handleControl} state={state} />
-            </div>
+            <ControlPanel onControl={handleControl} state={state} />
             <div className="vm-subsection vm-status-block">
               <VMControls onLog={(message, level) => addLog(message, level)} />
             </div>
@@ -400,7 +403,6 @@ export default function Home() {
             items={history}
             selectedId={selectedTaskId}
             onSelect={showTaskDetail}
-            vmNames={Object.fromEntries(vms.map((v) => [v.id, v.name]))}
             onDelete={async (taskId) => {
               try {
                 const target = history.find((t) => t.id === taskId);
@@ -426,12 +428,6 @@ export default function Home() {
           <LogPanel entries={logs} />
         </div>
       </div>
-
-      <StatusBar
-        vncConnected={vncConnected}
-        agentState={state}
-        vmResolution={vmResolution}
-      />
     </div>
   );
 }

@@ -24,6 +24,7 @@ export interface VmInfo {
   ws_port: number;
   vnc_host: string;
   managed: boolean;
+  kind?: string; // qemu | container（旧APIでは欠落）
 }
 
 export interface WsStateMessage {

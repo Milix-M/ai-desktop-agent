@@ -78,6 +78,7 @@ class _FakeDocker:
 def pool(tmp_path, monkeypatch):
     monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
     monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
+    monkeypatch.setenv("USE_KVM", "true")
     monkeypatch.delenv("BACKEND_NETWORK", raising=False)
     client = _FakeDocker()
     return VmPool(
@@ -186,6 +187,7 @@ class TestVmEndpoints:
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
+        monkeypatch.setenv("USE_KVM", "true")
         monkeypatch.delenv("BACKEND_NETWORK", raising=False)
         client = _FakeDocker()
         server_app._pool = Pool(
@@ -264,3 +266,194 @@ class TestRestartVm:
         pool, _ = pool
         with __import__("pytest").raises(ValueError, match="見つかりません"):
             pool.restart_vm("vm-nope")
+
+
+class TestDesktopDiscovery:
+    def test_discovers_desktop_with_default_ports(self, pool):
+        from ai_desktop_agent.server.vm_pool import DESKTOP_SERVICE
+
+        pool, client = pool
+        client.containers.items.append(
+            _FakeContainer(
+                name="ai-desktop-agent-desktop-1",
+                labels={"com.docker.compose.service": "desktop"},
+                health="healthy",
+            )
+        )
+        vms = pool.list_vms()
+        assert len(vms) == 1
+        assert vms[0].id == DESKTOP_SERVICE
+        assert vms[0].managed is False
+        assert vms[0].vnc_port == 5901
+        assert vms[0].ws_port == 6081
+
+    def test_default_prefers_desktop(self, pool):
+        pool, client = pool
+        client.containers.items.append(
+            _FakeContainer(
+                name="ai-desktop-agent-vm-1",
+                labels={"com.docker.compose.service": "vm"},
+            )
+        )
+        client.containers.items.append(
+            _FakeContainer(
+                name="ai-desktop-agent-desktop-1",
+                labels={"com.docker.compose.service": "desktop"},
+            )
+        )
+        assert pool.default_vm().id == "desktop"
+
+    def test_remove_desktop_forbidden(self, pool):
+        pool, _ = pool
+        with pytest.raises(ValueError, match="既定VM"):
+            pool.remove_vm("desktop")
+
+
+class TestKvmGate:
+    def test_create_blocked_without_kvm(self, pool, monkeypatch):
+        from ai_desktop_agent.server.kvm import KvmUnavailableError
+
+        pool, _ = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        with pytest.raises(KvmUnavailableError):
+            pool.create_vm()
+
+    def test_create_allowed_with_tcg_override(self, pool, monkeypatch):
+        pool, client = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.setenv("ALLOW_TCG_VM", "true")
+        info = pool.create_vm()
+        assert info.id.startswith("vm-")
+
+    def test_restart_blocked_without_kvm(self, pool, monkeypatch):
+        from ai_desktop_agent.server.kvm import KvmUnavailableError
+
+        pool, client = pool
+        client.containers.items.append(
+            _FakeContainer(
+                name="ai-desktop-agent-vm-1",
+                labels={"com.docker.compose.service": "vm"},
+            )
+        )
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        with pytest.raises(KvmUnavailableError):
+            pool.restart_vm("vm")
+
+    @pytest.mark.asyncio
+    async def test_create_vm_409_without_kvm(self, tmp_path, monkeypatch):
+        from httpx import ASGITransport, AsyncClient
+
+        from ai_desktop_agent.server import app as server_app
+        from ai_desktop_agent.server.vm_pool import VmPool as Pool
+
+        monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
+        monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        monkeypatch.delenv("BACKEND_NETWORK", raising=False)
+        client = _FakeDocker()
+        server_app._pool = Pool(
+            client=client,
+            state_file=tmp_path / "vms.json",
+            overlays_dir=str(tmp_path / "vm" / "overlays"),
+        )
+        try:
+            transport = ASGITransport(app=server_app.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.post("/vms", json={"name": "e2e"})
+                assert resp.status_code == 409
+        finally:
+            server_app._pool = None
+
+
+class TestContainerProvisioning:
+    def test_create_container_without_kvm(self, pool, monkeypatch):
+        pool, client = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        info = pool.create_vm(name="c1", kind="container")
+        assert info.id.startswith("desk-")
+        assert info.kind == "container"
+        assert info.vnc_port == 5910
+        assert info.ws_port == 6090
+        # overlay複製なしのため本体 + 中継の2 run のみ
+        assert len(client.containers.runs) == 2
+        desk_run = client.containers.runs[0]
+        assert "devices" not in desk_run, "コンテナ作成で /dev/kvm を要求してはいけない"
+        assert desk_run["labels"]["ai-desktop-agent.kind"] == "container"
+        assert desk_run["environment"]["VNC_GEOMETRY"] == "1280x800"
+        ws_run = client.containers.runs[1]
+        assert ws_run["ports"] == {"6080/tcp": 6090}
+        assert pool.get_vm(info.id).kind == "container"
+
+    def test_create_invalid_kind(self, pool):
+        pool, _ = pool
+        with pytest.raises(ValueError, match="kind"):
+            pool.create_vm(kind="lxc")
+
+    def test_qemu_still_blocked_without_kvm(self, pool, monkeypatch):
+        from ai_desktop_agent.server.kvm import KvmUnavailableError
+
+        pool, _ = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        with pytest.raises(KvmUnavailableError):
+            pool.create_vm(kind="qemu")
+
+    def test_restart_container_without_kvm(self, pool, monkeypatch):
+        pool, client = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        info = pool.create_vm(kind="container")
+        main = next(c for c in client.containers.items if c.name == f"ai-desktop-agent-{info.id}")
+        out = pool.restart_vm(info.id)
+        assert out.id == info.id
+        assert main.restarted is True
+
+    def test_remove_container(self, pool, monkeypatch):
+        pool, _ = pool
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        info = pool.create_vm(kind="container")
+        assert pool.remove_vm(info.id) is True
+        assert pool.get_vm(info.id) is None
+
+    def test_kind_label_fallback(self, pool):
+        pool, client = pool
+        # kindラベルなしの旧コンテナは qemu 扱い（後方互換）
+        client.containers.items.append(
+            _FakeContainer(name="x", labels={"ai-desktop-agent.vm-id": "vm-old"})
+        )
+        assert pool.get_vm("vm-old").kind == "qemu"
+
+    @pytest.mark.asyncio
+    async def test_create_container_endpoint(self, tmp_path, monkeypatch):
+        from httpx import ASGITransport, AsyncClient
+
+        from ai_desktop_agent.server import app as server_app
+        from ai_desktop_agent.server.vm_pool import VmPool as Pool
+
+        monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
+        monkeypatch.setenv("DESKTOP_IMAGE_REF", "test-desktop-image:latest")
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.delenv("ALLOW_TCG_VM", raising=False)
+        monkeypatch.delenv("BACKEND_NETWORK", raising=False)
+        client = _FakeDocker()
+        server_app._pool = Pool(
+            client=client,
+            state_file=tmp_path / "vms.json",
+            overlays_dir=str(tmp_path / "vm" / "overlays"),
+        )
+        try:
+            transport = ASGITransport(app=server_app.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                created = (await c.post("/vms", json={"kind": "container"})).json()
+                assert created["id"].startswith("desk-")
+                assert created["kind"] == "container"
+                assert (await c.post("/vms", json={"kind": "lxc"})).status_code == 400
+                # qemu は KVMなしで409
+                assert (await c.post("/vms", json={"kind": "qemu"})).status_code == 409
+        finally:
+            server_app._pool = None

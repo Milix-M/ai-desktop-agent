@@ -37,10 +37,31 @@ describe("VmTabs", () => {
     expect(onDelete).toHaveBeenCalledWith("vm-ab12");
   });
 
-  it("disables add while creating", () => {
+  it("creates qemu and container kinds", async () => {
+    const onCreate = vi.fn();
+    render(
+      <VmTabs vms={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate} onDelete={vi.fn()} creating={false} />
+    );
+    await userEvent.click(screen.getByText("+ コンテナ追加"));
+    expect(onCreate).toHaveBeenCalledWith("container");
+    await userEvent.click(screen.getByText("+ VM追加"));
+    expect(onCreate).toHaveBeenCalledWith("qemu");
+  });
+
+  it("shows container badge", () => {
+    const vms: VmInfo[] = [
+      { id: "desk-ab12", name: "c1", status: "running", health: null, vnc_port: 5911, ws_port: 6091, vnc_host: "x", managed: true, kind: "container" },
+    ];
+    render(
+      <VmTabs vms={vms} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={false} />
+    );
+    expect(screen.getByText(/コンテナ・/)).toBeInTheDocument();
+  });
+
+  it("disables adds while creating", () => {
     render(
       <VmTabs vms={VMS} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={true} />
     );
-    expect(screen.getByRole("button", { name: "作成中..." })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "作成中..." })).toHaveLength(2);
   });
 });

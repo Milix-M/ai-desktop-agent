@@ -7,16 +7,7 @@ interface Props {
   selectedId: string | null;
   onSelect: (taskId: string) => void;
   onDelete: (taskId: string) => void;
-  vmNames?: Record<string, string>;
 }
-
-const STATE_LABEL: Record<string, string> = {
-  completed: "完了",
-  failed: "失敗",
-  interrupted: "中断",
-  executing: "実行中",
-  paused: "一時停止",
-};
 
 function timeStr(epochSec: number): string {
   if (!epochSec) return "--:--";
@@ -28,7 +19,7 @@ function timeStr(epochSec: number): string {
   });
 }
 
-export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmNames = {} }: Props) {
+export default function TaskHistory({ items, selectedId, onSelect, onDelete }: Props) {
   return (
     <div className="section">
       <h2>履歴（{items.length}件）</h2>
@@ -43,21 +34,13 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete, vmN
           >
             <button className="history-main" onClick={() => onSelect(item.id)} title={item.instruction || undefined}>
               <span className="history-row">
-                <span className="history-state">
-                  {STATE_LABEL[item.state] ?? item.state}
-                </span>
                 <span className="history-instruction">
                   {item.instruction || "(指示なし)"}
                 </span>
               </span>
               <span className="history-row">
                 <span className="history-meta">
-                  {item.vm_id && vmNames[item.vm_id] ? `[${vmNames[item.vm_id]}] ` : ""}
-                  {item.action_count}操作・成功{item.success_count}・失敗{item.failure_count}
-                  {(item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0) > 0
-                    ? `・tok${((item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0)).toLocaleString()}`
-                    : ""}
-                  ・{timeStr(item.updated_at)}
+                  {timeStr(item.updated_at)}
                 </span>
               </span>
             </button>

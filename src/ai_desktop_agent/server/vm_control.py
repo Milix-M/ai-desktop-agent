@@ -73,9 +73,19 @@ class VmController:
     def restart(self, timeout: int = 30) -> VmStatusInfo:
         """VMコンテナを再起動する（ゲストOSごと作り直し）。
 
+        KVMが利用できない環境ではTCG実行が遅すぎるため再起動を制限する
+        （`KvmUnavailableError`）。デバッグ用の明示許可は `ALLOW_TCG_VM=true`。
         `docker restart` はコンテナ再起動の完了で戻る。
         ゲストのデスクトップが使えるようになるまで数分かかる。
         """
+        from ai_desktop_agent.server.kvm import (
+            KvmUnavailableError,
+            is_kvm_available,
+            is_tcg_allowed,
+        )
+
+        if not is_tcg_allowed() and not is_kvm_available(self._client):
+            raise KvmUnavailableError()
         container = self._find_container()
         if container is None:
             raise DockerUnavailableError("vm コンテナが見つかりません")
