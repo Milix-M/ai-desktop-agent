@@ -37,7 +37,7 @@ flowchart LR
         desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (既定)"]
         ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
         vm["vm<br/>QEMU/KVM :5900 (kvm限定)<br/>KDE / 4vCPU・4GB"]
-        vm2["vm-id<br/>動的VM :5910+/:6090+"]
+        vm2["vm-id / desk-id<br/>動的払い出し :5910+/:6090+"]
         data["data/<br/>tasks/*.json<br/>vms.json"]
         docker["Docker<br/>デーモン"]
     end
@@ -51,7 +51,7 @@ flowchart LR
     be -->|VNC操作（KVM時）<br/>vm:5900| vm
     be -->|履歴保存<br/>data/tasks/*.json| data
     be -->|VM管理<br/>Docker socket| docker
-    docker -->|コンテナ払い出し<br/>qcow2フルコピー| vm2
+    docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナはKVM不要| vm2
 ```
 
 | コンテナ | 中身 | ポート | 役割 |
@@ -390,15 +390,15 @@ sequenceDiagram
     participant FE as frontend
     participant POOL as backend (VmPool)
     participant DOCKER as Docker
-    participant VM as vm-id (QEMU)
+    participant VM as vm-id / desk-id
     participant WS as ws-id (websockify)
-    U->>FE: + VM追加
-    FE->>POOL: POST /vms
+    U->>FE: + VM追加 / + コンテナ追加
+    FE->>POOL: POST /vms {kind}
     activate POOL
-    POOL->>DOCKER: base qcow2をフルコピー (cp --sparse=always)
+    POOL->>DOCKER: base qcow2をフルコピー (cp --sparse=always、qemuのみ)
     DOCKER-->>POOL: /vm/overlays/id.qcow2
-    POOL->>DOCKER: QEMUコンテナ起動 (VNC 5910+, QMP/QGAソケット)
-    POOL->>DOCKER: websockify起動 (WS 6090+, 中継先 vm-id:5900)
+    POOL->>DOCKER: 本体コンテナ起動 (QEMUはVNC 5910+、QMP/QGAソケット)
+    POOL->>DOCKER: websockify起動 (WS 6090+、中継先は名前:5900)
     POOL-->>FE: id, vnc_port, ws_port (status creating)
     deactivate POOL
     FE->>FE: 定期的に /vms を追跡 (一覧15秒/監視2〜5秒) healthyまで
@@ -414,10 +414,10 @@ sequenceDiagram
     activate POOL
     POOL->>POOL: 上タスク停止
     POOL->>DOCKER: コンテナ停止・削除
-    POOL->>DOCKER: ディスク削除
+    POOL->>DOCKER: ディスク削除 (qemuのみ)
     POOL-->>FE: deleted
     deactivate POOL
-    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)
+    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)<br/>kind=container はKVM不要
 ```
 
 ### QEMU起動構成（`vm/entrypoint.sh`）

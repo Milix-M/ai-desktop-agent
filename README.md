@@ -242,6 +242,8 @@ cd frontend && npm test   # frontendテスト（vitest）
 ## ロードマップ
 
 - [ ] 定型タスクのテンプレート機能
+- [ ] 日本語OCR（`tesseract-ocr-jpn` 追加）
+- [ ] アクションレート制限・危険操作ホワイトリスト
 - [ ] 同時監視グリッド（現状はタブ切替＋単一ビューア）
 - [ ] 決定モデル組込み（回復戦略→達成検証→評価ハーネスの順。詳細は `docs/architecture.md`）
 - [ ] Android操作モード（検討のみ。詳細は `docs/research/`）
