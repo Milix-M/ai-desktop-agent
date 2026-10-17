@@ -151,3 +151,77 @@ class TestPauseResumeStop:
             resp = await client.post("/tasks/current/stop")
             data = resp.json()
             assert data["status"] == "no_session"
+
+
+@pytest.mark.asyncio
+class TestWasteReduction:
+    def _session(self, llm) -> TaskSession:
+        return TaskSession(llm=llm, display=FakeDisplayBackend())
+
+    async def test_ocr_prompt_disabled_skips_extractor(self, monkeypatch):
+        import ai_desktop_agent.server.session as sess
+
+        calls = []
+        monkeypatch.setattr(sess, "_ocr_text", lambda b: calls.append(b) or "text")
+        monkeypatch.setenv("USE_OCR_PROMPT", "0")
+        s = self._session(MockLLMProvider())
+        await s._capture_screenshot()
+        assert s._last_ocr_text == ""
+        assert calls == []
+        monkeypatch.setenv("USE_OCR_PROMPT", "1")
+        await s._capture_screenshot()
+        assert len(calls) == 1
+
+    async def test_empty_storm_short_circuits_second_turn(self):
+        from ai_desktop_agent.agent.state import Subtask
+
+        class _Empty(MockLLMProvider):
+            def __init__(self):
+                super().__init__()
+                self.decide_calls = 0
+
+            async def decide_next_action(self, *a, **k):
+                self.decide_calls += 1
+                raise ValueError("応答が空です")
+
+        llm = _Empty()
+        s = self._session(llm)
+        sub = Subtask(id="s1", description="d")
+        shot = s.display.capture_screen()
+        with pytest.raises(ValueError):
+            await s._decide_action(sub, shot)
+        assert llm.decide_calls == 6  # 初回は従来通り上限まで吸収
+        with pytest.raises(ValueError):
+            await s._decide_action(sub, shot)
+        assert llm.decide_calls == 6 + 2  # 連続失敗時は早期打切り
+        assert s._consec_empty_decides == 2
+
+    async def test_success_resets_empty_counter(self):
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import Subtask
+
+        class _Flaky(MockLLMProvider):
+            def __init__(self):
+                super().__init__()
+                self.n = 0
+
+            async def decide_next_action(self, *a, **k):
+                self.n += 1
+                if self.n == 1:
+                    raise ValueError("応答が空です")
+                return ActionDecision(
+                    action=Action(action_type=ActionType.WAIT, params={"seconds": 0.1}),
+                    expected_effect="e",
+                    confidence=0.9,
+                    reasoning="r",
+                )
+
+        llm = _Flaky()
+        s = self._session(llm)
+        s._consec_empty_decides = 1
+        sub = Subtask(id="s1", description="d")
+        # 前回失敗扱いのため最大2試行。1回失敗→2回目成功で復帰する
+        out = await s._decide_action(sub, s.display.capture_screen())
+        assert out.action.action_type == ActionType.WAIT
+        assert s._consec_empty_decides == 0
