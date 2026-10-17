@@ -84,6 +84,17 @@ ZOOM_MAX_SIZE = 500
 MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
 MAX_EMPTY_RETRIES = 5  # 空応答の決定再試行上限（一時不調の吸収用）
+EMPTY_RETRY_SHORT_ATTEMPTS = 2  # 前ターンも失敗時の試行上限（障害時の空費防止用）
+
+
+def _use_ocr_prompt() -> bool:
+    """プロンプト添付用OCRの有効無効（既定有効）。無効時はOCR自体を走らせない。"""
+    return (os.environ.get("USE_OCR_PROMPT") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
 RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
@@ -179,6 +190,8 @@ class TaskSession:
         self._pending_error: ErrorContext | None = None
         # 前ターンの画面ハッシュ（無変化検出用）
         self._prev_turn_hash: str | None = None
+        # 連続する決定取得の失敗回数（空応答ストーム時の早期打切り用）
+        self._consec_empty_decides: int = 0
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
@@ -1152,12 +1165,17 @@ class TaskSession:
 
         空応答・JSON破損は通信路の一時不調として上限まで再試行する
         （履歴を汚さないよう決定取得の内側で吸収する）。
+        前ターンも失敗している場合は試行を絞って早期に打ち切る
+        （障害時の長時間空費を防ぐ。結論のFAILEDは変わらない）。
         アクション検証エラー（必須パラメータ不足など）は決定的なため即時送出する。
         """
+        max_attempts = (
+            EMPTY_RETRY_SHORT_ATTEMPTS if self._consec_empty_decides > 0 else MAX_EMPTY_RETRIES + 1
+        )
         last_error: Exception | None = None
-        for attempt in range(MAX_EMPTY_RETRIES + 1):
+        for attempt in range(max_attempts):
             try:
-                return await self.llm.decide_next_action(
+                decision = await self.llm.decide_next_action(
                     goal=self.loop.context.goal or Goal(description=""),
                     current_subtask=subtask,
                     action_history=self.loop.context.action_history,
@@ -1166,15 +1184,18 @@ class TaskSession:
                     ocr_text=self._last_ocr_text or None,
                     platform=self._platform(),
                 )
+                self._consec_empty_decides = 0
+                return decision
             except ValueError as e:
                 retryable = isinstance(e, json.JSONDecodeError) or "応答が空" in str(e)
-                if not retryable or attempt >= MAX_EMPTY_RETRIES:
+                if not retryable or attempt >= max_attempts - 1:
+                    self._consec_empty_decides += 1
                     raise
                 last_error = e
                 logger.warning(
                     "決定応答の不備のため再試行します (%d/%d): %s",
                     attempt + 1,
-                    MAX_EMPTY_RETRIES,
+                    max_attempts,
                     str(e)[:80],
                 )
                 await asyncio.sleep(2.0 * (attempt + 1))
@@ -1205,7 +1226,7 @@ class TaskSession:
             screenshot = self.display.capture_screen()
         try:
             capture_raw = getattr(self.display, "capture_raw", None)
-            if callable(capture_raw):
+            if callable(capture_raw) and _use_ocr_prompt():
                 self._last_ocr_text = _ocr_text(capture_raw().image_bytes)
         except Exception:
             logger.debug("OCRテキスト取得に失敗", exc_info=True)
