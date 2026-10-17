@@ -152,7 +152,6 @@ class TestAllActionTypesValid:
         ActionType.KEY_COMBO: {"keys": ["ctrl", "c"]},
         ActionType.KEY_HOLD: {"key": "shift", "duration_ms": 500},
         ActionType.WAIT: {"seconds": 1.0},
-        ActionType.WAIT_FOR_TEXT: {"text": "Loading...", "timeout": 10.0},
         ActionType.WAIT_FOR_STILL: {"timeout": 5.0},
         ActionType.SCREENSHOT: {},
         ActionType.REGION_SELECT: {"x": 0, "y": 0, "width": 200, "height": 200},

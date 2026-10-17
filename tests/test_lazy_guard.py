@@ -399,7 +399,7 @@ class TestWakeOnBlack:
         disp = _BlackThenNormal()
         session = TaskSession(llm=MockLLMProvider(), display=disp)
         ss = await session._capture_screenshot()
-        assert disp.calls == 3  # 黒→ウェイク→再取得→OCR用raw
+        assert disp.calls == 2  # 黒→ウェイク→再取得
         assert "shift" in disp.key_presses
         # 返るのは2枚目（明るい方）
         import io

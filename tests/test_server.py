@@ -158,20 +158,6 @@ class TestWasteReduction:
     def _session(self, llm) -> TaskSession:
         return TaskSession(llm=llm, display=FakeDisplayBackend())
 
-    async def test_ocr_prompt_disabled_skips_extractor(self, monkeypatch):
-        import ai_desktop_agent.server.session as sess
-
-        calls = []
-        monkeypatch.setattr(sess, "_ocr_text", lambda b: calls.append(b) or "text")
-        monkeypatch.setenv("USE_OCR_PROMPT", "0")
-        s = self._session(MockLLMProvider())
-        await s._capture_screenshot()
-        assert s._last_ocr_text == ""
-        assert calls == []
-        monkeypatch.setenv("USE_OCR_PROMPT", "1")
-        await s._capture_screenshot()
-        assert len(calls) == 1
-
     async def test_empty_storm_short_circuits_second_turn(self):
         from ai_desktop_agent.agent.state import Subtask
 

@@ -2,10 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# OCR用（tesseract + 英語データ）・Android操作用（adb）
+# Android操作用（adb）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    tesseract-ocr-eng \
     android-tools-adb \
     && rm -rf /var/lib/apt/lists/*
 

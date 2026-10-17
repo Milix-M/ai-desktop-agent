@@ -29,7 +29,6 @@ class ActionType(Enum):
 
     # 制御
     WAIT = "wait"
-    WAIT_FOR_TEXT = "wait_for_text"
     WAIT_FOR_STILL = "wait_for_still"
     # 注意: SCREENSHOT は毎ターン自動撮影されるため LLM には提示しない
     # （プロンプト・スキーマから除外済み）。enumと実行器は互換のため残す。
@@ -89,7 +88,6 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.KEY_COMBO: {"keys"},
     ActionType.KEY_HOLD: {"key", "duration_ms"},
     ActionType.WAIT: {"seconds"},
-    ActionType.WAIT_FOR_TEXT: {"text", "timeout"},
     ActionType.WAIT_FOR_STILL: {"timeout"},
     ActionType.SCREENSHOT: set(),
     ActionType.SUBTASK_COMPLETE: set(),
@@ -111,7 +109,6 @@ _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
     ActionType.KEY_COMBO: set(),
     ActionType.KEY_HOLD: set(),
     ActionType.WAIT: set(),
-    ActionType.WAIT_FOR_TEXT: set(),
     ActionType.WAIT_FOR_STILL: set(),
     ActionType.SCREENSHOT: set(),
     ActionType.SUBTASK_COMPLETE: set(),
@@ -132,7 +129,6 @@ _ACTION_NAMES: dict[ActionType, str] = {
     ActionType.KEY_COMBO: "キーコンボ",
     ActionType.KEY_HOLD: "キー長押し",
     ActionType.WAIT: "待機",
-    ActionType.WAIT_FOR_TEXT: "テキスト待機",
     ActionType.WAIT_FOR_STILL: "画面安定待機",
     ActionType.SCREENSHOT: "スクリーンショット",
     ActionType.SUBTASK_COMPLETE: "サブタスク完了",
