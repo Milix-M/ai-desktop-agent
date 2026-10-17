@@ -46,7 +46,9 @@ class LLMProvider(ABC):
     # ── 判断メソッド ───────────────────────────────────
 
     @abstractmethod
-    async def understand_instruction(self, goal: Goal) -> UnderstandingResult:
+    async def understand_instruction(
+        self, goal: Goal, platform: str = "linux"
+    ) -> UnderstandingResult:
         """ユーザー指示を解析し、意図・制約を抽出する。
 
         UNDERSTANDING フェーズで呼ばれる。
@@ -54,7 +56,9 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def decompose_task(self, goal: Goal, subtask_count: int) -> DecompositionResult:
+    async def decompose_task(
+        self, goal: Goal, subtask_count: int, platform: str = "linux"
+    ) -> DecompositionResult:
         """ゴールをサブタスクに分解する。
 
         PLANNING フェーズで呼ばれる。
@@ -82,6 +86,7 @@ class LLMProvider(ABC):
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
         ocr_text: str | None = None,
+        platform: str = "linux",
     ) -> ActionDecision:
         """現在の状態から次のアクションを決定する。
 
@@ -106,6 +111,7 @@ class LLMProvider(ABC):
         expected_effect: str,
         screenshot: Screenshot | None = None,
         expected_outcome: str | None = None,
+        platform: str = "linux",
     ) -> VerificationResult:
         """アクションの実行結果を検証する。
 
@@ -129,6 +135,7 @@ class LLMProvider(ABC):
         error: ErrorContext,
         action_history: list[ActionRecord],
         subtask: Subtask,
+        platform: str = "linux",
     ) -> RecoveryPlan:
         """エラーからの回復計画を生成する。
 

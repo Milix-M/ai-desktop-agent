@@ -61,6 +61,8 @@ class TaskRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     llm_calls: int = 0
+    decision_calls: int = 0  # 決定モデル（完了確認・回復方針）の呼出回数
+    decision_escalations: int = 0  # 中間・失敗でLLMに退避した回数
     goal: dict = dataclasses.field(default_factory=dict)
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -78,6 +80,8 @@ class TaskRecord:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "llm_calls": self.llm_calls,
+            "decision_calls": self.decision_calls,
+            "decision_escalations": self.decision_escalations,
             "goal": self.goal,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -100,6 +104,8 @@ class TaskRecord:
             prompt_tokens=int(d.get("prompt_tokens", 0)),
             completion_tokens=int(d.get("completion_tokens", 0)),
             llm_calls=int(d.get("llm_calls", 0)),
+            decision_calls=int(d.get("decision_calls", 0)),
+            decision_escalations=int(d.get("decision_escalations", 0)),
             goal=dict(d.get("goal", {})),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),

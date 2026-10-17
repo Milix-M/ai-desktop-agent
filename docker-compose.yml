@@ -1,6 +1,9 @@
 services:
   # ── 既定の作業環境（軽量コンテナデスクトップ・QEMU不要） ──
+  # container プロファイル配下。KVMなし環境で ./scripts/up.sh が起動する。
+  # KVMあり環境では vm のみ起動し、こちらは起動しない（1つに絞って軽量化）。
   desktop:
+    profiles: ["container"]
     build:
       context: ./desktop
       dockerfile: Dockerfile
@@ -62,17 +65,22 @@ services:
     env_file:
       - .env
     environment:
-      - VNC_HOST=desktop
+      - VNC_HOST=${VNC_HOST:-desktop}
       - VNC_PORT=5900
       - PORT=8081
     volumes:
       - ./data:/app/data
       - ./vm/sockets:/vm/sockets
+      # Android動的払い出しのISO存在確認用（backend内からの参照。Dockerボリューム元はホストパス）。
+      - ./android:/app/android-host:ro
       # デバッグ用VM管理（作り直し機能）に必要。不要なら削除可。
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       desktop:
         condition: service_healthy
+        # 初期起動は作業環境を1つに絞る（scripts/up.sh が明示指定）。
+        # KVMあり時は desktop が起動対象外のため、依存解決で巻き添え起動しない。
+        required: false
     restart: unless-stopped
 
   frontend:
@@ -94,8 +102,9 @@ services:
       - "6080:6080"
     restart: unless-stopped
 
-  # desktop用画面配信（常時）
+  # desktop用画面配信（containerプロファイル時のみ）
   websockify-desktop:
+    profiles: ["container"]
     build:
       context: ./websockify
       dockerfile: Dockerfile
@@ -107,20 +116,49 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Android端末（Redroid。画面視聴は未対応、ADB操作のみ） ──
-  # KVM不要だがホストの binder / ashmem（または use_memfd）が必要。
-  # 起動: docker compose --profile android up
-  # 動的払い出し: POST /vms {"kind": "android"}（profile不要）
+  # ── Android端末（Android-x86 on QEMU。VNC操作は通常VMと同一） ──
+  # KVM必須のため kvm プロファイル配下。ISOは android/android-x86_64.iso を配置する。
+  # 動的払い出し: POST /vms {"kind": "android"}（KVM必須）
   android:
-    profiles: ["android"]
-    image: redroid/redroid:13.0.0-latest
-    privileged: true
-    tty: true
-    stdin_open: true
+    profiles: ["kvm"]
+    build:
+      context: ./android
+      dockerfile: Dockerfile
+    devices:
+      - /dev/kvm:/dev/kvm
     ports:
-      - "5555:5555"
-    command:
-      - androidboot.redroid_width=1080
-      - androidboot.redroid_height=1920
-      - androidboot.redroid_dpi=480
+      - "5590:5900"
+    environment:
+      - ANDROID_ISO=/android/boot.iso
+      - ANDROID_MEMORY=2048
+      - ANDROID_CPUS=4
+      - ANDROID_VNC_PORT=5900
+      - USE_KVM=${USE_KVM:-auto}
+      - ALLOW_TCG_VM=${ALLOW_TCG_VM:-false}
+    volumes:
+      - ./android/android-x86_64.iso:/android/boot.iso:ro
+      - ./android/kernel:/android/kernel:ro
+      - ./android/initrd.img:/android/initrd.img:ro
+      # 永続dataイメージ（初回は空作成。backendの機械的プロビジョニングが設定する）
+      - ./android/android-data.img:/android/data.img
+      # APK持ち込み（なければUSBなし。取得は ./scripts/fetch-apks.sh）
+      - ./android/apks:/android/apks:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
+      interval: 10s
+      retries: 10
+      start_period: 180s
+
+  websockify-android:
+    profiles: ["kvm"]
+    build:
+      context: ./websockify
+      dockerfile: Dockerfile
+    command: 0.0.0.0:6070 android:5900
+    ports:
+      - "6070:6070"
+    depends_on:
+      android:
+        condition: service_healthy
     restart: unless-stopped

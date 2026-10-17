@@ -11,6 +11,8 @@ interface Props {
   onSelect: (vmId: string) => void;
   onCreate: (kind: Kind, name?: string) => void;
   onDelete: (vmId: string) => void;
+  onStop?: (vmId: string) => void;
+  onStart?: (vmId: string) => void;
   creating: boolean;
 }
 
@@ -20,10 +22,16 @@ const KIND_LABEL: Record<Kind, string> = {
   android: "Android",
 };
 
-export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, creating }: Props) {
+/** 削除ボタン表示対象: 動的環境＋固定 vm/desktop/android。 */
+function canDelete(vm: VmInfo): boolean {
+  return vm.managed || vm.id === "vm" || vm.id === "desktop" || vm.id === "android";
+}
+
+export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, onStop, onStart, creating }: Props) {
   const [formKind, setFormKind] = useState<Kind | null>(null);
   const [name, setName] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
 
   const submitCreate = () => {
     if (formKind === null || creating) return;
@@ -48,7 +56,54 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
               {vm.health ? ` (${vm.health})` : ""}
             </span>
           </button>
-          {vm.managed &&
+          {vm.status === "running" ? (
+            confirmStopId === vm.id ? (
+              <span className="vm-tab-confirm">
+                <button
+                  className="vm-tab-confirm-yes"
+                  aria-label={`${vm.name}の停止を実行`}
+                  onClick={() => {
+                    setConfirmStopId(null);
+                    setConfirmDeleteId(null);
+                    onStop?.(vm.id);
+                  }}
+                >
+                  停止する
+                </button>
+                <button
+                  className="vm-tab-confirm-no"
+                  aria-label="停止をやめる"
+                  onClick={() => setConfirmStopId(null)}
+                >
+                  やめる
+                </button>
+              </span>
+            ) : (
+              <button
+                className="vm-tab-stop"
+                aria-label={`${vm.name}を停止`}
+                onClick={() => {
+                  setConfirmStopId(vm.id);
+                  setConfirmDeleteId(null);
+                }}
+              >
+                ■
+              </button>
+            )
+          ) : (
+            <button
+              className="vm-tab-start"
+              aria-label={`${vm.name}を起動`}
+              onClick={() => {
+                setConfirmStopId(null);
+                setConfirmDeleteId(null);
+                onStart?.(vm.id);
+              }}
+            >
+              ▶
+            </button>
+          )}
+          {canDelete(vm) &&
             (confirmDeleteId === vm.id ? (
               <span className="vm-tab-confirm">
                 <button
@@ -56,6 +111,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
                   aria-label={`${vm.name}の削除を実行`}
                   onClick={() => {
                     setConfirmDeleteId(null);
+                    setConfirmStopId(null);
                     onDelete(vm.id);
                   }}
                 >
@@ -73,7 +129,10 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
               <button
                 className="vm-tab-delete"
                 aria-label={`${vm.name}を削除`}
-                onClick={() => setConfirmDeleteId(vm.id)}
+                onClick={() => {
+                  setConfirmDeleteId(vm.id);
+                  setConfirmStopId(null);
+                }}
               >
                 ×
               </button>
@@ -87,6 +146,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
           onClick={() => {
             setFormKind(kind);
             setConfirmDeleteId(null);
+            setConfirmStopId(null);
           }}
           disabled={creating}
         >

@@ -134,6 +134,14 @@ class FakeDisplayBackend(DisplayBackend):
     def key_up(self, key: str) -> None:
         self.key_presses.append(f"up:{key}")
 
+    def wake_android(self) -> None:
+        """テスト用Androidウェイク（ESC/Menu長押し＋中央タップを記録）。"""
+        self.key_down("escape")
+        self.key_up("escape")
+        self.key_down("menu")
+        self.key_up("menu")
+        self.mouse_click(self._screen_width // 2, self._screen_height // 2)
+
     def key_combo(self, keys: list[str]) -> None:
         self.key_combos.append(keys)
 

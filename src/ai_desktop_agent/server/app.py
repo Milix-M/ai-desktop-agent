@@ -47,14 +47,43 @@ def _default_create_session() -> TaskSession:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """起動時に中断タスクをマークする。"""
+    """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
+    import faulthandler
+    import signal
+
+    # 固着診断用：SIGUSR1 で全スレッドのスタックをdocker logsへ出す（プロセスは継続）。
+    # seccompでptrace/py-spyが使えない環境向け。
+    with contextlib.suppress(Exception):
+        faulthandler.register(signal.SIGUSR1)
     try:
         marked = get_store().mark_interrupted()
         if marked:
             logger.info("起動時に中断タスク %d 件をマーク", marked)
     except Exception:
         logger.exception("タスクストアの初期化に失敗")
-    yield
+    from ai_desktop_agent.server.android_provision import AndroidProvisioner
+
+    def _android_busy(vm_id: str) -> bool:
+        for sess in list(_sessions.values()):
+            try:
+                if getattr(sess, "vm_id", None) == vm_id and sess.is_running:
+                    return True
+            except Exception:
+                continue
+        if _active_session is not None:
+            try:
+                if getattr(_active_session, "vm_id", None) == vm_id and _active_session.is_running:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    provisioner = AndroidProvisioner(is_running_check=_android_busy)
+    await provisioner.start()
+    try:
+        yield
+    finally:
+        await provisioner.stop()
 
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
@@ -167,6 +196,8 @@ class TaskSummary(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     llm_calls: int = 0
+    decision_calls: int = 0
+    decision_escalations: int = 0
 
 
 class TaskDetail(TaskSummary):
@@ -191,6 +222,8 @@ def _to_summary(d: dict) -> TaskSummary:
         prompt_tokens=d.get("prompt_tokens", 0),
         completion_tokens=d.get("completion_tokens", 0),
         llm_calls=d.get("llm_calls", 0),
+        decision_calls=d.get("decision_calls", 0),
+        decision_escalations=d.get("decision_escalations", 0),
     )
 
 
@@ -254,21 +287,15 @@ def _resolve_vm(vm_id: str | None):
 
 
 def _connect_vm_display(vm):
-    """環境への操作接続を作る。android は ADB、それ以外は VNC。"""
+    """環境へのVNC接続を作る（Android-x86もQEMU/VNCのため同一）。"""
     from fastapi import HTTPException
 
     try:
-        if getattr(vm, "kind", "qemu") == "android":
-            from ai_desktop_agent.vm.adb_backend import AdbBackend
-
-            display = AdbBackend()
-            display.connect(vm.vnc_host or "android", 5555)
-            return display
         display = VNCClient()
         display.connect(vm.vnc_host or "vm", 5900)
         return display
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"環境への接続に失敗: {e}") from e
+        raise HTTPException(status_code=502, detail=f"環境へのVNC接続に失敗: {e}") from e
 
 
 @app.get("/vms", response_model=list[VmInfoModel])
@@ -308,17 +335,15 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
 
 @app.delete("/vms/{vm_id}")
 async def delete_vm(vm_id: str) -> dict[str, str]:
-    """VMを削除する（上のタスクは停止する）。"""
+    """VM/コンテナを削除する（上のタスクは停止する）。
+
+    動的環境＋固定 vm/desktop/android が対象。
+    固定androidと同一ラベルを持つ手動コンテナも対象になる点に注意。
+    存在しなければ404。
+    """
     from fastapi import HTTPException
 
-    global _active_session
-
-    for sid, sess in list(_sessions.items()):
-        if getattr(sess, "vm_id", None) == vm_id:
-            sess.stop()
-            del _sessions[sid]
-    if _active_session and getattr(_active_session, "vm_id", None) == vm_id:
-        _active_session = None
+    _stop_sessions_for_vm(vm_id)
 
     try:
         ok = get_pool().remove_vm(vm_id)
@@ -329,6 +354,55 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
     if not ok:
         raise HTTPException(status_code=404, detail="vm not found")
     return {"status": "deleted"}
+
+
+@app.post("/vms/{vm_id}/stop", response_model=VmInfoModel)
+async def stop_vm(vm_id: str) -> VmInfoModel:
+    """VM/コンテナを停止する（固定・動的とも可）。上のタスクは停止する。"""
+    from fastapi import HTTPException
+
+    _stop_sessions_for_vm(vm_id)
+
+    try:
+        info = get_pool().stop_vm(vm_id)
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return VmInfoModel(**info.to_dict())
+
+
+@app.post("/vms/{vm_id}/start", response_model=VmInfoModel)
+async def start_vm(vm_id: str) -> VmInfoModel:
+    """VM/コンテナを起動する（固定・動的とも可）。
+
+    KVM非対応環境での QEMU系（VM・Android）起動は409。
+    """
+    from fastapi import HTTPException
+
+    from ai_desktop_agent.server.kvm import KvmUnavailableError
+
+    try:
+        info = get_pool().start_vm(vm_id)
+    except DockerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except KvmUnavailableError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return VmInfoModel(**info.to_dict())
+
+
+def _stop_sessions_for_vm(vm_id: str) -> None:
+    """指定VMに紐づく実行中セッションを停止する。"""
+    global _active_session
+
+    for sid, sess in list(_sessions.items()):
+        if getattr(sess, "vm_id", None) == vm_id:
+            sess.stop()
+            del _sessions[sid]
+    if _active_session and getattr(_active_session, "vm_id", None) == vm_id:
+        _active_session = None
 
 
 @app.get("/tasks/current", response_model=TaskStatus)
@@ -502,55 +576,57 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     # セッションのイベントを WebSocket に転送する。
     # 先頭引数にセッションを受け取り、送信先の選別用IDを付与する。
+    # 送信は5秒で打ち切る（死んだ接続へのsend_json無限待ちで
+    # セッション全体が固まるのを防ぐ。実測で発生済み）。
     async def on_state(session, state, ctx):
-        with contextlib.suppress(Exception):
-            await ws.send_json(
-                {
-                    "type": "state",
-                    "session_id": session.id,
-                    "vm_id": getattr(session, "vm_id", None),
-                    "state": state.value,
-                    "subtask_index": ctx.current_subtask_index,
-                    "subtask_count": len(ctx.subtasks),
-                    "action_count": len(ctx.action_history),
-                    "subtasks": _subtask_list(ctx),
-                }
-            )
+        await _send_json(
+            ws,
+            {
+                "type": "state",
+                "session_id": session.id,
+                "vm_id": getattr(session, "vm_id", None),
+                "state": state.value,
+                "subtask_index": ctx.current_subtask_index,
+                "subtask_count": len(ctx.subtasks),
+                "action_count": len(ctx.action_history),
+                "subtasks": _subtask_list(ctx),
+            },
+        )
 
     async def on_action(session, action, success):
-        with contextlib.suppress(Exception):
-            await ws.send_json(
-                {
-                    "type": "action",
-                    "session_id": session.id,
-                    "vm_id": getattr(session, "vm_id", None),
-                    "action_type": action.action_type.value,
-                    "description": action.description,
-                    "success": success,
-                }
-            )
+        await _send_json(
+            ws,
+            {
+                "type": "action",
+                "session_id": session.id,
+                "vm_id": getattr(session, "vm_id", None),
+                "action_type": action.action_type.value,
+                "description": action.description,
+                "success": success,
+            },
+        )
 
     async def on_error(session, error):
-        with contextlib.suppress(Exception):
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "session_id": session.id,
-                    "vm_id": getattr(session, "vm_id", None),
-                    "message": error,
-                }
-            )
+        await _send_json(
+            ws,
+            {
+                "type": "error",
+                "session_id": session.id,
+                "vm_id": getattr(session, "vm_id", None),
+                "message": error,
+            },
+        )
 
     async def on_complete(session, success):
-        with contextlib.suppress(Exception):
-            await ws.send_json(
-                {
-                    "type": "complete",
-                    "session_id": session.id,
-                    "vm_id": getattr(session, "vm_id", None),
-                    "success": success,
-                }
-            )
+        await _send_json(
+            ws,
+            {
+                "type": "complete",
+                "session_id": session.id,
+                "vm_id": getattr(session, "vm_id", None),
+                "success": success,
+            },
+        )
 
     # グローバルレジストリに登録（常に）
     _ws_state_cbs.append(on_state)
@@ -586,6 +662,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 # ── ヘルパー ──────────────────────────────────────────
 
 
+async def _send_json(ws: WebSocket, payload: dict, timeout: float = 5.0) -> None:
+    """WebSocketへ送信する（打ち切り付き）。
+
+    死んだ接続への ``send_json`` 無限待ちでセッション全体が固まるのを防ぐ。
+    タイムアウト・送信エラーは黙って捨てる（切断検出は受信側で行う）。
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(ws.send_json(payload), timeout=timeout)
+
+
 async def _fanout(cbs: list, *args) -> None:
     """WSレジストリの全コールバックに配送する。"""
     for cb in list(cbs):
@@ -596,7 +682,16 @@ async def _fanout(cbs: list, *args) -> None:
 
 
 def _forward_registrations(session: TaskSession) -> None:
-    """セッションのイベントをWSレジストリへ転送するラッパを登録する。"""
+    """セッションのイベントをWSレジストリへ転送するラッパを登録する。
+
+    WS接続ごとに呼ばれるが、同一セッションへの重複登録は
+    ログ二重表示の原因になるため初回のみ登録する。
+    ラッパはグローバルレジストリを参照するため、1組あれば
+    後から接続したWSにも配送される。
+    """
+    if getattr(session, "_ws_forwarded", False):
+        return
+    session._ws_forwarded = True  # type: ignore[attr-defined]
 
     async def _st(st, cx):
         await _fanout(_ws_state_cbs, session, st, cx)

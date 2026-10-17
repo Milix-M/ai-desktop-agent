@@ -525,6 +525,26 @@ body {
   color: #fff;
 }
 
+.vm-tab-stop,
+.vm-tab-start {
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--dim);
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.vm-tab-stop:hover {
+  background: #5c1a1a;
+  color: #fff;
+}
+
+.vm-tab-start:hover {
+  background: #1a3a1a;
+  color: #fff;
+}
+
 .vm-tab-add {
   padding: 6px 12px;
   border: 1px dashed var(--border);

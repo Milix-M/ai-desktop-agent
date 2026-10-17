@@ -1,30 +1,26 @@
 # アーキテクチャ詳細設計
 
-> 本書は実装の実態に合わせた設計書である。コードを読む際の地図として使うこと。
-> 主要モジュール: `src/ai_desktop_agent/` 配下（`server/`・`agent/`・`actions/`・`vm/`）、
-> `frontend/src/`、`vm/`（ゲストコンテナ定義）。
+本書は実装の実態に合わせた設計書である。コードを読む際の地図として使う。主要モジュールはsrc/ai_desktop_agent/配下のserverとagentとactionsとvm、frontend/src/、vm/のゲストコンテナ定義とする。
 
 ## 目次
 
 1. [システム概要](#システム概要)
-2. [バックエンド（FastAPI）](#バックエンドfastapi)
-3. [エージェント状態機械と実行フロー](#エージェント状態機械と実行フロー)
-4. [意思決定層（LLM＋決定モデル）](#意思決定層llm決定モデル)
-5. [観測（スクリーンショットとその周辺）](#観測スクリーンショットとその周辺)
-6. [アクション実行（VNC操作層）](#アクション実行vnc操作層)
-7. [VM操作アーキテクチャ](#vm操作アーキテクチャ)
+2. [バックエンド](#バックエンド)
+3. [状態機械と実行フロー](#状態機械と実行フロー)
+4. [意思決定層](#意思決定層)
+5. [観測](#観測)
+6. [アクション実行](#アクション実行)
+7. [VM操作](#vm操作)
 8. [フロントエンド](#フロントエンド)
-9. [安全性・運用](#安全性運用)
-10. [既知の制限と今後](#既知の制限と今後)
+9. [安全性](#安全性)
+10. [制限と今後](#制限と今後)
 11. [図の管理](#図の管理)
 
-> 図はすべて本文中のMermaidブロックで管理する（別ファイル・画像生成は不要）。
-> GitHub・VS CodeのMarkdownプレビューでそのまま表示できる。
+図は本文中のMermaidブロックで管理する。別ファイルや画像生成は不要とする。GitHubとVS CodeのMarkdownプレビューでそのまま表示できる。
 
 ## システム概要
 
-自然言語の指示で仮想マシンのGUIをAIが直接操作する。ユーザーはブラウザから指示を出し、
-AIがVMを操作する様子をnoVNCビューアでリアルタイム視聴できる。
+自然言語の指示で仮想マシンのGUIをAIが直接操作する。利用者はブラウザから指示を出し、AIがVMを操作する様子をnoVNCビューアで見ることができる。
 
 ```mermaid
 flowchart LR
@@ -33,122 +29,105 @@ flowchart LR
         direction LR
         fe["frontend<br/>Next.js :3000"]
         be["backend<br/>FastAPI :8081"]
-        wsd["websockify-desktop<br/>VNC→WS :6081"]
-        desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (既定)"]
+        wsd["websockify-desktop<br/>VNC→WS :6081<br/>(container限定)"]
+        desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (KVMなし時)"]
         ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
-        vm["vm<br/>QEMU/KVM :5900 (kvm限定)<br/>KDE / 4vCPU・4GB"]
-        and["android<br/>Redroid :5555<br/>(android限定、視聴なし)"]
+        vm["vm<br/>QEMU/KVM :5900 (KVMあり時)<br/>KDE / 4vCPU・4GB"]
+        and["android<br/>Android-x86 :5590<br/>(kvm限定・手動起動、VNC操作)"]
         vm2["vm-id / desk-id / and-id<br/>動的払い出し :5910+/:6090+"]
         data["data/<br/>tasks/*.json<br/>vms.json"]
         docker["Docker<br/>デーモン"]
     end
     user -->|指示・視聴<br/>HTTP :3000| fe
     fe -->|REST / WS<br/>:8081| be
-    user -->|画面配信 WS<br/>:6081（既定）| wsd
-    user -->|画面配信 WS<br/>:6080（KVM時のみ）| ws
+    user -->|画面配信 WS<br/>:6081（KVMなし時）| wsd
+    user -->|画面配信 WS<br/>:6080（KVMあり時）| ws
     wsd -->|VNC中継<br/>desktop:5900| desk
     ws -->|VNC中継<br/>vm:5900| vm
-    be -->|VNC操作（既定）<br/>desktop:5900| desk
-    be -->|VNC操作（KVM時）<br/>vm:5900| vm
-    be -->|ADB操作<br/>android:5555| and
+    be -->|VNC操作（KVMなし時）<br/>desktop:5900| desk
+    be -->|VNC操作（KVMあり時）<br/>vm:5900| vm
+    be -->|VNC操作<br/>android:5900| and
     be -->|履歴保存<br/>data/tasks/*.json| data
     be -->|VM管理<br/>Docker socket| docker
     docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナはKVM不要| vm2
 ```
 
-| コンテナ | 中身 | ポート | 役割 |
-|---------|------|--------|------|
-| frontend | Next.js | 3000 | チャットUI＋noVNCビューア＋VM管理 |
-| backend | FastAPI | 8081 | 指示受付、エージェント実行、タスク永続化 |
-| desktop | Xfce＋TigerVNC | 5901 | 既定の作業環境（QEMU不要の軽量デスクトップ） |
-| websockify-desktop | VNC→WS中継 | 6081 | desktop向け画面配信 |
-| vm | QEMU/KVM | 5900 | 重い隔離デスクトップ（KDE。kvm限定） |
-| websockify | VNC→WS中継 | 6080 | vm向け画面配信（kvm限定） |
-| android | Redroid | 5555 | Android端末（android限定。ADB操作のみ、視聴なし） |
+| 名称 | 中身 | ポート | 役割 |
+|---|---|---|---|
+| frontend | Next.js | 3000 | チャットUIとnoVNCビューアとVM管理 |
+| backend | FastAPI | 8081 | 指示受付とエージェント実行とタスク保存 |
+| desktop | XfceとTigerVNC | 5901 | KVMなし時の作業環境。QEMUは不要でcontainer限定 |
+| websockify-desktop | VNCからWSへの中継 | 6081 | desktop向け画面配信でcontainer限定 |
+| vm | QEMUとKVM | 5900 | KVMあり時の作業環境。KDEでkvm限定 |
+| websockify | VNCからWSへの中継 | 6080 | vm向け画面配信でkvm限定 |
+| android | Android-x86とQEMU | 5590 | Android端末でkvm限定の手動起動。VNC操作は通常VMと同じ |
+| websockify-android | VNCからWSへの中継 | 6070 | android向け画面配信でkvm限定の手動起動 |
 
-動的VM（Plan B）は `5910+`（VNC）/`6090+`（WS）を使い、台数分コンテナが増える。
-`vm`・`websockify` は `kvm` プロファイル配下のため、`./scripts/up.sh`（KVM自動判定）
-または `docker compose --profile kvm up` でのみ起動する。
-詳細は [VM操作アーキテクチャ](#vm操作アーキテクチャ) を参照。
+動的環境は5910番台のVNCと6090番台のWSを使い、台数分コンテナが増える。vmとwebsockifyとandroidとwebsockify-androidはkvmプロファイル配下にある。このためKVMあり時の./scripts/up.shかdocker compose --profile kvm upでのみ起動する。desktopとwebsockify-desktopはcontainerプロファイル配下にある。このためKVMなし時の./scripts/up.shかdocker compose --profile container upでのみ起動する。初期起動の作業環境は1つに絞る。up.shはKVMありでvm系のみ、なしでdesktop系のみを起動する。androidは初期起動に含まない。詳細はVM操作の節を参照する。
 
-| From | To | 経路 |
-|------|-----|------|
-| ブラウザ | backend API/WS | `:<ホスト>:8081` |
-| ブラウザ | 画面配信 | `:<ホスト>:6081`（desktop既定。KVM時は `:<ホスト>:6080`） |
-| backend | desktop (VNC) | `desktop:5900`（Docker内部ネットワーク） |
-| backend | VM (VNC) | `vm:5900`（KVM時。動的VMは `vm-<id>:5900`） |
-| websockify-desktop | desktop (VNC) | 同上 |
-| websockify | VM (VNC) | 同上 |
-| backend | Docker | `/var/run/docker.sock`（VM作成・再起動用） |
-
-環境変数（代表）：`LLM_PROVIDER` / `LLM_MODEL` / 各種 `*_API_KEY`、`VNC_HOST`（既定`desktop`）/ `VNC_PORT`、
-`USE_KVM`（既定`auto`。未設定時は `/dev/kvm` の有無で自動切替）/ `ALLOW_TCG_VM`（既定`false`。TCG明示許可）、
-`VM_MEMORY`（既定4096）/ `VM_CPUS`（既定4）、`DATA_DIR`（既定 `./data`）。
-
-## バックエンド（FastAPI）
-
-`src/ai_desktop_agent/server/app.py` がAPIとWebSocketを提供する。
-
-### エンドポイント一覧
-
-| メソッド | パス | 用途 |
+| 送信元 | 送信先 | 経路 |
 |---|---|---|
-| GET | `/health` | 生存確認 |
-| POST | `/tasks` | タスク投入（`{instruction, vm_id?, allow_vm_restart?}`） |
-| GET | `/tasks` | 履歴一覧（新しい順） |
-| GET | `/tasks/{id}` | タスク詳細（操作履歴・推論つき） |
-| DELETE | `/tasks/{id}` | 履歴削除（実行中なら停止して削除） |
-| GET | `/tasks/current` | 最新タスク状態（リロード後の復元用。なければ `idle`） |
-| POST | `/tasks/current/{pause,resume,stop}` | タスク制御 |
-| GET | `/vms` | VM一覧 |
-| POST | `/vms` | VM作成（ディスク複製＋起動） |
-| DELETE | `/vms/{id}` | VM削除（上タスク停止＋コンテナ＋ディスク削除） |
-| GET | `/vm/status` | 既定VMの状態（Docker＋QMP） |
-| POST | `/vm/restart` | 既定VMの作り直し（実行中タスク停止つき） |
-| WS | `/ws` | 状態・操作ログのプッシュ配信 |
+| ブラウザ | backendのAPIとWS | ホストの:8081 |
+| ブラウザ | 画面配信 | KVMありはホストの:6080、なしはホストの:6081。Androidはホストの:6070 |
+| backend | desktopのVNC | desktop:5900。KVMなし時でDocker内部ネットワーク |
+| backend | VMのVNC | vm:5900。KVM時で動的VMはvm-ID:5900 |
+| backend | AndroidのVNC | android:5900。動的はand-ID:5900 |
+| websockify-desktop | desktopのVNC | 同上 |
+| websockify | VMのVNC | 同上 |
+| websockify-android | AndroidのVNC | 同上 |
+| backend | Docker | /var/run/docker.sock。VM作成と再起動用 |
+
+代表的な環境変数はLLM_PROVIDERとLLM_MODELと各種APIキー、VNC_HOSTとVNC_PORT、USE_KVMの既定値はautoで未設定時は/dev/kvmの有無で自動切替、ALLOW_TCG_VMの既定値はfalse、VM_MEMORYの既定値は4096とVM_CPUSの既定値は4、DATA_DIRの既定値は./dataとする。VNC_HOSTのdesktop既定はcomposeのみとし、backend単体既定はlocalhostとする。VM_MEMORYとVM_CPUSの固定値はcomposeで定め、動的払い出しのみ起動時引数で変えられる。
+
+## バックエンド
+
+src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
+
+### エンドポイント
+
+| 方法 | パス | 用途 |
+|---|---|---|
+| GET | /health | 生存確認 |
+| POST | /tasks | タスク投入。instructionとvm_idとallow_vm_restartを指定できる |
+| GET | /tasks | 履歴一覧。新しい順に返す |
+| GET | /tasks/{id} | タスク詳細。操作履歴と推論を含む |
+| DELETE | /tasks/{id} | 履歴削除。実行中なら止めてから消す |
+| GET | /tasks/current | 最新タスク状態。リロード後の復元用でなければidle |
+| POST | /tasks/current/{pause,resume,stop} | タスク制御 |
+| GET | /vms | VM一覧 |
+| POST | /vms | VM作成。ディスク複製と起動を行う |
+| DELETE | /vms/{id} | VM削除。上のタスク停止とコンテナ削除を行い、動的はディスクも消す |
+| POST | /vms/{id}/stop | VMとコンテナの停止。固定と動的に使え、上のタスク停止と中継連動を含む |
+| POST | /vms/{id}/start | VMとコンテナの起動。固定と動的に使え、中継連動を含む。QEMU系はKVM必須 |
+| GET | /vm/status | 既定VMの状態。DockerとQMPで確認する |
+| POST | /vm/restart | 既定VMの作り直し。実行中タスク停止を含む |
+| WS | /ws | 状態と操作ログの配信 |
 
 ### セッション管理
 
-- 1タスク＝1 `TaskSession`（`server/session.py`）。`POST /tasks` ごとに生成し、
-  `_sessions[session.id]` に登録する。`_active_session` は後方互換のための最新1件。
-- セッションは `vm_id` を持ち、指定VMの `VNCClient` に `set_display()` で切り替える。
-  `vm_id` 省略時は稼働中の既定VM（`VmPool.default_vm()`）。
-- WebSocket配送はグローバルレジストリ（`_ws_state_cbs` 等）経由のファンアウトで、
-  全メッセージに `session_id` / `vm_id` を付与する。フロントは選択中のVMで選別する。
+1タスクは1つのTaskSessionに対応する。server/session.pyで定義し、POST /tasksごとに生成する。登録先はserver/app.pyの_sessionsでsession.idを鍵とする。_active_sessionは後方互換のための最新1件とする。セッションはvm_idを持ち、指定VMのVNCClientにset_displayで切り替える。vm_id省略時は稼働中の既定VMを使う。VmPool.default_vmで選ぶ。稼働中のdesktopがあれば順序によらず優先する。WebSocket配送は全体登録のファンアウトで行う。stateとactionとerrorとcompleteにsession_idとvm_idを付ける。初回のno_sessionとpongは除く。フロントは選択中のVMで選別する。
 
-### 永続化（`server/store.py`）
+### 永続化
 
-- `data/tasks/<task_id>.json` に1タスク1ファイルで保存する。状態遷移・アクション実行のたびにupsert。
-- `TaskRecord` は指示・状態・成否・操作履歴（判断理由・確信度つき）・サブタスク・
-  進捗index・`vm_id`・トークン使用量（prompt/completion/呼出回数）を持つ。
-- 起動時（lifespan）に実行中だった記録を `interrupted` に変える（`mark_interrupted()`）。
-- 保存先が書けない環境では一時ディレクトリに退避して動作継続する。
+data/tasks/タスクID.jsonに1タスク1ファイルで保存する。状態遷移とアクション実行のたびに更新する。server/store.pyが担う。TaskRecordは指示と状態と成否、操作履歴と判断理由と確信度、サブタスクと進捗index、vm_id、Goal、トークン使用量を持つ。トークン使用量はpromptとcompletionと呼出回数に加え、decision_callsとdecision_escalationsを持つ。起動時は実行中だった記録をinterruptedに変える。mark_interruptedで行う。保存先が書けない環境では一時ディレクトリに退避して動作を続ける。
 
-### VM管理
+### KVM判定
 
-- `server/kvm.py`（KVM判定の正本）：次の順序で判定する（`USE_KVM` 明示値 → backendの `/dev/kvm` →
-  Docker上の `vm` サービス存在）。KVMなし環境でのVM作成・再起動は
-  `KvmUnavailableError` で拒否する（APIは409。`ALLOW_TCG_VM=true` でのみ明示許可）。
-- `server/vm_control.py`（`VmController`）：既定VMの状態取得・再起動。状態にQMPの
-  `query-status` 結果（`qmp_status`）を添える。Docker不通時は `DockerUnavailableError`→503。
-- `server/vm_pool.py`（`VmPool`）：環境の一覧・作成・再起動・削除＋compose管理の
-  `desktop` 検出（id `desktop`、`managed=False`、既定ポート `5901`/`6081`）。
-  `default_vm()` はソート順で `desktop` を優先する（両方稼働時はdesktop）。
-  `POST /vms` は `kind` で種別を選ぶ（`qemu`＝既定／`container`／`android`）。
-  qemu作成時はbase qcow2のフルコピーを払い出し（ロック競合回避のためbacking参照は使わない）、
-  VNC/WSポートを `5910+`/`6090+` から割当て、ポート割当を `data/vms.json` に保存する。
-  container作成時は軽量デスクトップ＋中継の2コンテナを払い出し、KVM不要でどこでも作れる。
-  動的VMのidは `vm-<hex>`、動的コンテナは `desk-<hex>`。上限8台（`MAX_VMS`、両種別の合計）。
-  動的QEMU VMは `/dev/kvm` を常時要求する（KVM必須）。
-  一覧の種別は `kind`（`qemu`／`container`／`android`）で返す。`desktop` と既定VM（`vm`）は削除不可。
-  ホストパス解決はbackend自身の `/app/data` マウント元から逆算する（`_host_repo_dir()`）。
+server/kvm.pyが判定基準を持つ。判定順序はUSE_KVM明示値、backendの/dev/kvm、Docker上のvmサービス存在の順とする。KVMなし環境のVM作成と再起動はKvmUnavailableErrorで拒否する。APIは409を返し、ALLOW_TCG_VM=trueでのみ明示許可する。
 
-## エージェント状態機械と実行フロー
+### VM制御
 
-### 状態と遷移（`agent/state.py`・`agent/loop.py`）
+server/vm_control.pyのVmControllerが既定VMの状態取得と再起動を担う。状態にQMPのquery-status結果をqmp_statusとして添える。Docker不通時はDockerUnavailableErrorとして503を返す。
 
-有限状態機械。`AgentLoop` が有効遷移のみを通す。不正遷移は `InvalidTransitionError`。
-有効遷移の正本は `_VALID_TRANSITIONS`（`agent/state.py:29`）である。
+### VMプール
+
+server/vm_pool.pyのVmPoolが環境の一覧と作成と再起動と削除、compose管理のdesktop検出を担う。desktop検出はidがdesktop、managedがFalse、既定ポートが5901と6081とする。default_vmは稼働中のdesktopを順序によらず優先する。なければ稼働中の先頭を返す。POST /vmsはkindで種別を選ぶ。qemuが既定でcontainerとandroidも選べる。qemu作成時はbase qcow2のフルコピーを払い出す。backing参照はロック競合のため使わない。VNCとWSポートは5910番台と6090番台から割り当て、割当結果をdata/vms.jsonに保存する。動的AndroidのADB用にホスト側5570番台も払い出す。container作成時は軽量デスクトップと中継の2コンテナを払い出す。KVM不要でどこでも作れる。動的VMのidはvm-16進数、動的コンテナはdesk-16進数、動的Androidはand-16進数とする。上限は8台でMAX_VMSとし、両種別の合計とする。動的QEMU VMは/dev/kvmを常時要求する。一覧の種別はkindでqemuとcontainerとandroidを返す。固定のvmとdesktopとandroidもDELETE /vmsで削除できる。本体と中継を止めて消す。ホストパス解決はbackend自身の/app/dataマウント元から逆算する。_host_repo_dirで行う。
+
+## 状態機械と実行フロー
+
+### 状態と遷移
+
+有限状態機械とする。agent/state.pyとagent/loop.pyで定義し、AgentLoopが有効遷移のみを通す。不正遷移はInvalidTransitionErrorとする。有効遷移の基準は_VALID_TRANSITIONSでagent/state.py:29に置く。
 
 ```mermaid
 stateDiagram-v2
@@ -160,6 +139,7 @@ stateDiagram-v2
     PLANNING --> EXECUTING : 計画ready
     PLANNING --> FAILED : 分解失敗
     EXECUTING --> WAITING : アクション実行
+    EXECUTING --> EXECUTING : 継続 (自己遷移)
     EXECUTING --> PAUSED : 一時停止
     EXECUTING --> FAILED : fail_now() 上限・例外・取消
     EXECUTING --> RECOVERING : 即時回復 (稀)
@@ -195,12 +175,11 @@ stateDiagram-v2
     end note
 ```
 
-状態一覧：`IDLE / UNDERSTANDING / PLANNING / EXECUTING / WAITING / VERIFYING /
-RECOVERING / PAUSED / COMPLETED / FAILED`。`PAUSED` 以外の停止系は終端扱い。
-`interrupted` は状態機械の状態ではなく、再起動後に付け替える永続化上のマーク。
-`pause()` は `EXECUTING` からのみ可能。`fail_now()` は上限・例外・キャンセル時に打ち切るための遷移である。
+状態はIDLEとUNDERSTANDINGとPLANNINGとEXECUTINGとWAITINGとVERIFYINGとRECOVERINGとPAUSEDとCOMPLETEDとFAILEDとする。PAUSED以外の停止系は終端扱いとする。interruptedは状態機械の状態ではない。再起動後に付け替える永続化上の目印とする。pauseはEXECUTINGからのみ行える。fail_nowは上限と例外と取消時に打ち切るための遷移とする。loop.pyのunderstanding_failedとwait_timeoutとrecover_replanとabortは定義のみで、現行フローから呼ばない。UNDERSTANDINGの失敗は汎用例外処理でFAILED化する。
 
-### TaskSessionの実行フロー（`server/session.py:run()`）
+### 実行フロー
+
+TaskSessionの実行順序はserver/session.py:runに置く。
 
 ```mermaid
 sequenceDiagram
@@ -248,149 +227,79 @@ sequenceDiagram
     deactivate BE
 ```
 
-1. **UNDERSTANDING**：`understand_instruction()` で指示→`Goal`（意図・対象アプリ・制約）。
-2. **PLANNING**：`decompose_task()` でサブタスク列に分解（ID・説明・期待結果つき）。
-3. **EXECUTING→WAITING→VERIFYING** のループ（`_execute_phase()`）：
-   - 画面取得（オーバーレイ付き。真っ黒ならShiftキーを送って復帰させ、再取得）
-   - 無変化検出：前ターンと同一画面なら「待機か別手段を」のヒントをLLMに渡す
-   - アクション決定。操作なし完了宣言は最大2回まで却下して再問い合わせ
-     （`MAX_EMPTY_COMPLETE_REFUSALS`、`_is_empty_complete()`）
-   - 低確信度クリック・同一座標連打は `region_select` 拡大フローへ迂回
-   - 同一アクション3連続は `wait` に置換（足踏みブレーカー）
-   - `vm_restart` は専用フロー（後述）
-   - 座標クランプ→実行→視覚系操作後は画面安定待ち（`wait_for_still`）
-   - ステップ上限200（`MAX_ACTIONS_PER_TASK`）超過で `fail_now()`
-4. **VERIFYING**（`_verify_phase()`）：
-   - 機械的失敗→RECOVERING（エラー情報を次判断へ引継ぎ）
-   - クリック系→画面変化の有無をハッシュ比較（無変化は空振りとしてRECOVERING）
-   - `subtask_complete`→期待結果の達成を**画像つきでLLM検証**
-     （`_verify_subtask_phase()`）。未達は上限（`max_retries`）まで回復、
-     超過で `fail_now()`
-5. **RECOVERING**：`recover_from_error()` で回復計画。`recoverable` ならリトライ、
-   さもなくば失敗。計画の `strategy` は現状リトライ可否のみに使う。
-6. 例外・キャンセル時は必ず `FAILED` に遷移させて保存する（記録なしに終わらせない）。
-   一時停止中は遷移前に `_wait_if_paused()` で再開を待つ。
+処理は次の順序で進む。まずUNDERSTANDINGでunderstand_instructionにより指示をGoalに変える。Goalは意図と対象アプリと制約とする。失敗時は専用遷移を呼ばず、汎用例外処理でFAILED化する。次にPLANNINGでdecompose_taskによりサブタスク列に分ける。サブタスクはIDと説明と期待結果を持つ。続いてEXECUTINGからWAITINGを経てVERIFYINGに戻る循環に入る。_execute_phaseが担う。画面取得では重畳付き画像を使う。真っ黒ならShiftキーを送って復帰させ、再取得する。前回と同一画面なら無変化の旨をLLMに渡す。操作なし完了宣言は最大2回まで却下して問い直す。MAX_EMPTY_COMPLETE_REFUSALSと_is_empty_completeで判定する。低確信度クリックと同一座標連打はregion_select拡大フローへ回す。同一アクション3連続はwaitに置き換える。足踏みを止めるためである。vm_restartは専用フローで処理する。座標は画面内に収めてから実行する。視覚系操作後は画面安定待ちを行う。wait_for_stillを使う。ステップ上限200を超えるとfail_nowで打ち切る。MAX_ACTIONS_PER_TASKで定める。
 
-### エージェント判断のVM作り直し（許可制）
+VERIFYINGでは_verify_phaseが機械的失敗をRECOVERINGへ回す。エラー情報は次判断へ引き継ぐ。クリック系は画面変化の有無をハッシュ比較する。無変化は空振りとしてRECOVERINGへ回す。subtask_completeは期待結果の達成を画像付きでLLM検証する。_verify_subtask_phaseで行う。未達は上限まで回復し、超過でfail_nowとする。上限はmax_retriesで定める。
 
-- アクション `vm_restart {reason}`（`actions/primitives.py`）。
-- タスク投入時の `allow_vm_restart`（UIのチェックボックス）が真の場合のみ実行。
-  未許可なら却下して回復フローへ（別手段を促す）。
-- 実行後は環境初期化として回復フローに戻し、新画面で再判断する。
-  再起動後は `RESTART_SETTLE_SECONDS`（60秒）待ってから続行する。
+RECOVERINGではrecover_from_errorで回復計画を作る。recoverableが真なら再試行し、偽なら失敗とする。計画のstrategyは現状では再試行可否のみに使う。例外と取消時は必ずFAILEDに移して保存する。記録なしに終わらせない。一時停止中は遷移前に_wait_if_pausedで再開を待つ。DELETE /tasksとPOST /vm/restartの停止対象は_active_sessionのみとし、_sessions内の非実行セッションは対象外とする。
 
-## 意思決定層（LLM＋決定モデル）
+### VM作り直し
 
-判断は「生成系LLM」と「決定モデル（確定的な分類・判定）」の分担を方針とする。
-生成（座標・文章・計画）はLLM、定型判断（成否・戦略選択）は決定モデルに寄せる。
+アクションはvm_restartのreason指定でactions/primitives.pyに定義する。タスク投入時のallow_vm_restartが真の場合のみ実行する。UIのチェックボックスで指定する。未許可なら却下して回復フローへ回し、別手段を促す。実行後は環境初期化として回復フローに戻し、新画面で再判断する。再起動後はRESTART_SETTLE_SECONDSの60秒待ってから続ける。
 
-### LLMプロバイダ（`agent/llm/`）
+## 意思決定層
 
-- `factory.py` の `create_llm_provider()` が全プロバイダを `OpenAICompatProvider` に束ねる。
-  対応：`openai / anthropic / openrouter / opencode（Zen） / opencode-go（Go） / ollama / mock`。
-  既定モデル例：`gpt-4o`、`deepseek-v4.1-flash`。`LLM_PROVIDER` / `LLM_MODEL` / 各種APIキーで切替。
-- `openai_compat_provider.py` の仕様：
-  - 画像は同一解像度JPEG（q80）＋ `detail: high` で送信（座標系不変・軽量）。
-  - Structured Output（`response_format: json_schema`）で出力を強制。
-    非対応モデルでは通常JSONモードへ自動フォールバック（`_structured_output` 退避）。
-  - 不正paramsのサニタイズ（`_sanitize_params()`）と画面内クランプ（`_clamp_params()`）。
-    必須項目の欠落は `Action` のバリデーションでエラーにする。
-  - OpenCode系には `User-Agent: ai-desktop-agent/0.1.0` を付与し、
-    タスクIDを `x-opencode-session` で送る（`session_id`）。
-  - 呼出ごとのトークン使用量を累積し（`_record_usage()`）、タスク記録に保存する。
-    `max_tokens` は1500に絞っている（出力は小さいJSONのみのため）。
-- システムプロンプト方針（座標グリッドの読み方、2段階クリック、
-  **アプリ起動はキーボード優先**、**不足アプリは端末で導入**、
-  `subtask_complete` は操作後のみ）。OCRテキストは参考情報として添付する。
+判断は生成系LLMと決定モデルの分担を方針とする。生成の座標と文章と計画はLLM、定型判断の成否と戦略選択は決定モデルに寄せる。
 
-### 決定モデル（Clef / SystemOne）組込位置【計画】
+### LLMプロバイダ
 
-未実装。以下の位置に `agent/decision/`（仮称）として差す設計とする。
-インターフェースは `noul`（成否）・`choice`（戦略選択）・`score`（評価）の3型を受け、
-Jev互換API（現行はZenの `jev` 系、Clef本体はWorkers AI）を背負わせる。
+agent/llm配下に置く。factory.pyのcreate_llm_providerが全提供元をOpenAICompatProviderに束ねる。対応はopenaiとanthropicとopenrouterとopencodeのZen、opencode-goのGo、ollama、mockとする。既定モデル例はgpt-4oとdeepseek-v4.1-flashとする。LLM_PROVIDERとLLM_MODELと各種APIキーで切り替える。
 
-| # | 組込点 | 置換対象 | 期待効果 |
+openai_compat_provider.pyの仕様は次の通りとする。画像は同一解像度JPEGのq80とdetail highで送る。座標系を保ちつつ軽くするためである。出力形式はStructured Outputのresponse_format json_schemaで強制する。非対応モデルでは通常JSONモードへ自動切替する。_structured_output退避で行う。不正な引数は_sanitize_paramsで整え、画面内収めは_clamp_paramsで行う。必須項目の欠落はActionの検証で誤りとする。OpenCode系にはUser-Agentのai-desktop-agent/0.1.0を付け、タスクIDをx-opencode-sessionで送る。session_idに対応する。呼出ごとのトークン使用量は_record_usageで累積し、タスク記録に保存する。max_tokensは1500に絞る。出力は小さいJSONのみのためである。
+
+システムプロンプト方針は座標グリッドの読み方、2段階クリック、アプリ起動はキーボード優先、不足アプリは端末で導入、subtask_completeは操作後のみとする。OCRテキストは参考情報として添付する。
+
+### 決定モデルの組込
+
+実装済みとする。agent/decisionに置き、受け付ける型はnoulの成否とchoiceの戦略選択とscoreの評価の3型とする。System One互換APIで受け、提供元はDECISION_PROVIDERで切り替える。noneは従来動作で既定とし、mockは外部通信なしの簡易判定、clefはWorkers AI直結のClefとclef-flash、clef-openrouterはOpenRouter Decisions API経由のClef系を使う。clef-openrouterのみLLM本体と別のAPIキー（CLEF_API_KEY優先、なければOPENROUTER_API_KEY）を使える。既定モデルはclef-flashとする。中間帯と失敗時はLLMに退避するため、誤判定より退避を優先する。利用実績はdecision_callsとdecision_escalationsで記録する。
+
+| 番号 | 組込点 | 置換対象 | 期待効果 |
 |---|---|---|---|
-| 1 | 回復戦略の選択 | `_recover_phase()` のLLM呼出 | 数百msで戦略確定。テキスト生成が不要な分類は決定モデル向き |
-| 2 | サブタスク達成検証 | `_verify_subtask_phase()` の画像つきLLM検証 | 高確信で前進・低確信で回復・中間でLLM検証にエスカレーション（確率閾値設計） |
-| 3 | 評価ハーネス | なし（新設） | 永続化タスク記録を正解セット化し、Clef-flash→Clefの順で精度・分布を測定 |
+| 1 | 回復戦略の選択 | _recover_phaseのLLM呼出 | 数百msで戦略確定。文章生成が不要な分類に適する |
+| 2 | サブタスク達成検証 | _verify_subtask_phaseの画像付きLLM検証 | 高確信で前進し、低確信で回復し、中間でLLM検証へ回す。確率閾値で設計する |
+| 3 | 評価ハーネス | なし。新設済み | 保存済みタスク記録を正解集団とし、精度と分布を測る。agent/decision/eval.pyとscripts/eval_clef.pyを使う。推奨順序はClef-flashからClefとする |
 
-置換しないもの：`decide_next_action`（座標＋JSON生成）、タスク分解、OCR読解。
-判断は決定モデル、実行内容の生成はLLMの分担を維持する。
-注意：ベンチマークは提供元申告のため、自タスクでの精度×レイテンシ×単価で選定すること。
-利用可否の検討内容は `docs/research/clef.md` に残す。
+置換しないものはdecide_next_actionの座標とJSON生成、タスク分解、OCR読解とする。判断は決定モデル、実行内容の生成はLLMの分担を保つ。ベンチマークは提供元申告のため、自タスクでの精度と待ち時間と単価で選ぶ。利用可否の検討内容はdocs/research/clef.mdに残す。
 
-## 観測（スクリーンショットとその周辺）
+## 観測
 
-LLMに渡すのは生画像ではなく、座標ヒントを重畳した画像＋テキスト情報である。
+LLMに渡すのは生画像ではない。座標ヒントを重ねた画像と文字情報とする。
 
-- `vm/screenshot.py`：値オブジェクト。`with_overlay()`・`crop_with_meta()` を持つ。
-- `vm/overlay.py`：50pxグリッド（100pxごとに太線）＋上端・左端の座標数字＋
-  カーソル十字＋外周枠を描画。フォント12pt。ズーム画像には25pxグリッド。
-- 領域ズーム（`crop_region_with_meta()`）：`region_select` に対し2倍拡大画像を返し、
-  **実倍率も返す**。逆変換は必ず `absolute = origin + zoomed_coord / actual_scale`
-  で行う（`_handle_region_zoom()`）。入れ子は深さ1まで。
-- `vm/ocr.py`：tesseractで画面テキスト抽出（英字、`max_chars=2000`、8件キャッシュ）。
-  グリッド数字の混入を避けるため、生画像にOCRをかける。`WAIT_FOR_TEXT` の実体でもある。
-- カーソル情報（`VNCClient.cursor_position`／`has_custom_cursor`）：
-  プロトコル層の座標を優先し、取れなければ内部追跡にフォールバック。
-  オーバーレイの十字もこの値を使う。
-- `vm/matcher.py`：PILのみの正規化相互相関（単色はSAD併用、粗密2段階）。
-  `executor.locate()` から利用できる。テンプレート供給元は今後の課題。
-- 黒画面ウェイク：DPMS消灯などで全面真っ黒（平均輝度<2.0）を検出したら
-  Shiftキーを送って復帰させ、再取得する（最大1回）。`_is_black_screen()`。
-- 無変化検出：前ターンのハッシュ比較で「画面が変わっていない」旨を次判断に伝える。
+画面取得の値オブジェクトはvm/screenshot.pyに置く。with_overlayとcrop_with_metaを持つ。重畳描画はvm/overlay.pyに置く。50pxグリッドと100pxごとの太線、上端と左端の座標数字、カーソル十字、外周枠を描く。文字は12ptとする。ズーム画像には25pxグリッドを使う。領域ズームはcrop_region_with_metaで行い、2倍拡大画像と実倍率を返す。逆変換はabsolute = origin + zoomed_coord / actual_scaleで行う。_handle_region_zoomが担う。入れ子は深さ1までとする。
 
-## アクション実行（VNC操作層）
+文字認識はvm/ocr.pyで行う。tesseractで画面文字を取り出す。英字のみでmax_charsは2000、8件保持する。グリッド数字の混入を避けるため、生画像にOCRをかける。WAIT_FOR_TEXTの実体でもある。
 
-- 定義（`actions/primitives.py`）：マウス7種・キー4種・待機3種・`screenshot`（内部用）・
-  `region_select`・`subtask_complete`・`vm_restart`。クリック系は座標必須。
-  `allowed_params()`／`required_params()` で検証する。
-- 実行（`actions/executor.py`）：`Action`→バックエンド操作に変換。`REGION_SELECT`・
-  `VM_RESTART` はセッション側で処理するため、実行器に届いた場合は警告のみ出す。
-  安定待ち（`wait_for_still()`）、テキスト待機（OCR利用）を持つ。
-- VNC実装（`vm/vnc_client.py`、vncdotoolラップ）。既知の落とし穴と対策：
-  - `paste()`（クリップボード）はQEMU標準VNCに無視されるため不使用。
-    `type_text()` は1文字ずつキーイベントを送信する。
-  - QEMUはShift合成を復元しないため、`_SHIFT_PAIRS` 表で明示合成する。
-    ただし **大文字A-Zはそのまま通す**（手動合成すると小文字化する。実測）。
-  - vncdotool KEYMAPに無い名前（`backspace`等）は起動時に補完する。
-  - **ThreadedVNCClientProxyは戻り値Noneのメソッド呼び出しで後続の呼び出しが正しく動かなくなる**
-    （deferred連鎖に前回戻り値が流れる）。`keyEvent`・`mouseDrag` の直接利用は禁止。
-    `mouseDrag` は `mouseMove` 連打の自前ステップに置換済み。
-  - クリックは移動→整定待ち→押下（50ms）→解放。ダブルクリックは同座標明示。
-    コンボは20ms間隔。座標は画面内にクランプする。
+カーソル情報はVNCClientのcursor_positionとhas_custom_cursorを使う。cursor_positionは通信層の値を優先し、取れなければ内部追跡値を返す。重畳の十字には内部追跡の_cursor_xと_cursor_yを直接使う。
 
-## VM操作アーキテクチャ
+照合はvm/matcher.pyに置く。PILのみの正規化相互相関とし、単色はSAD併用、粗密2段階とする。executor.locateから利用できる。テンプレート供給元は今後の課題とする。
 
-### 実行環境の3本立て
+黒画面ウェイクはDPMS消灯などで全面真っ黒を検出したら起こして再取得する。平均輝度2.0未満を黒とみなし、最大1回まで行う。_is_black_screenで判定する。Linux系はShiftキーを送る。Android端末のandroidとand始まりは公式手順に沿い、ESCからMenuの1秒超保持と中央タップを行う。VNCClient.wake_androidが担う。実機の深い休止では戻らない場合がある。このためAndroidの休止対策は初期設定での無効化を本命とする。内容は休止最大と起床状態維持ONと画面保護無効とし、ADBのshell命令のみで行う。画面施錠の無効化命令は含まない。VNCタップ列は使わない。到達不能時は警告記録に留め、次回に再試行する。
 
-- `desktop`（`desktop/`、既定）：Xfce＋TigerVNCの軽量コンテナ。QEMU不要で常時起動する。
-  VNCは `desktop:5900`（ホスト公開 `5901`）、画面配信は `websockify-desktop`（`:6081`）。
-  解像度 `1280x800`（`VNC_GEOMETRY`）、認証なし（隔離ネットワーク前提）。
-  Firefox・LibreOffice（Writer/Calc）・`xdotool`・`wmctrl` 同梱。
-- `vm`（`vm/`、kvm限定）：QEMU/KVMの重い隔離デスクトップ（KDE）。
-  `kvm` プロファイルでのみ起動する（`./scripts/up.sh` が `/dev/kvm` の有無で自動判定）。
-  backendの既定接続先は `desktop` であり、`VmPool.default_vm()` も `desktop` を優先する。
-- `android`（Redroid、動的払い出し＋`android` プロファイル）：ADB操作のAndroid端末。
-  KVM不要（ホストの binder / ashmem または `use_memfd` が必要）。
-  `vm/adb_backend.py`（`AdbBackend`）が `DisplayBackend` 互換で接続し、
-  タップ・スワイプ・キー・文字入力と画面取得を行う。
-  ライブ視聴（noVNC相当）は未対応のため中継コンテナは作らない。
+無変化検出は前回のハッシュ比較で行い、画面が変わっていない旨を次判断に伝える。
 
-### KVM自動切替とVM起動制限
+## アクション実行
 
-- `USE_KVM` 未設定時は `auto` として `/dev/kvm` の有無で自動切替する（`.env` 指定不要）。
-  明示値 `true`（必須）/`false`（TCG扱い）も可。
-- KVMがない環境でのVM作成・再起動は制限する（TCGは実用速度が出ないため）。
-  次の3層で制限する：backendの `KvmUnavailableError`（API 409）→
-  `vm/entrypoint.sh` の起動拒否（`ALLOW_TCG_VM=true` でのみ明示許可）→
-  composeで `vm`・`websockify` を `kvm` プロファイル配下に配置。
-- エージェント判断の `vm_restart` が制限環境で要求された場合は失敗として
-  `_pending_error` に渡し、別手段での継続を促す。
+定義はactions/primitives.pyに置く。マウス7種とキー4種と待機3種、内部用のscreenshot、region_select、subtask_complete、vm_restartを持つ。クリック系は座標必須とする。allowed_paramsとrequired_paramsで検証する。
 
-動的VM・コンテナ（Plan B）のライフサイクル全体は以下の通り。`VmPool`（`server/vm_pool.py`）が
-Docker経由で本体コンテナとwebsockifyコンテナを対で払い出す（QEMU VMはKVM必須、コンテナは不要）。
+実行はactions/executor.pyに置き、Actionをbackend操作に変える。REGION_SELECTとVM_RESTARTはセッション側で処理する。このため実行器に届いた場合は警告のみ出す。安定待ちのwait_for_stillとOCR利用の文字待機を持つ。
+
+VNC実装はvm/vnc_client.pyに置き、vncdotoolを包む。既知の注意点と対策は次の通りとする。pasteの貼付はQEMU標準VNCに無視されるため使わない。type_textは1文字ずつキーイベントを送る。QEMUはShift合成を戻さないため、_SHIFT_PAIRS表で明示合成する。大文字AからZはそのまま通す。手動合成すると小文字化する実測があるためである。vncdotoolのKEYMAPに無い名前のbackspaceなどは起動時に補う。ThreadedVNCClientProxyは戻り値なし呼び出しで後続呼び出しが動かなくなる。deferred連鎖に前回戻り値が流れるためである。keyEventとmouseDragの直接利用は禁止とする。mouseDragはmouseMove連打の自前段階に置き換え済みとする。クリックは移動と整定待ち、50ms押下、解放の順に行う。ダブルクリックは同座標明示とする。組合せキーは20ms間隔とする。座標は画面内に収める。
+
+## VM操作
+
+### 実行環境の3種
+
+desktopはdesktop配下に置き、KVMなし時の作業環境とする。XfceとTigerVNCの軽量コンテナとし、QEMUは不要とする。containerプロファイル配下に置く。このためKVMなし時の./scripts/up.shかdocker compose --profile container upでのみ起動する。VNCはdesktop:5900でホスト公開5901、画面配信はwebsockify-desktopの:6081とする。解像度は1280x800でVNC_GEOMETRYとし、認証なしで隔離網前提とする。FirefoxとLibreOfficeのWriterとCalc、xdotool、wmctrlを同梱する。
+
+vmはvm配下に置き、KVMあり時の作業環境とする。QEMUとKVMの重い隔離デスクトップでKDEとする。kvmプロファイルでのみ起動する。./scripts/up.shが/dev/kvmの有無で自動判定する。初期起動ではvmのみを起動し、desktopとandroidは起動しない。1つに絞って軽くするためである。backendの接続先はup.shが環境に合わせて切り替える。KVMありはvm、なしはdesktopとし、compose既定はdesktopとする。VmPool.default_vmはdesktop稼働時にはdesktopを優先する。
+
+androidはAndroid-x86をQEMUで動かし、動的払い出しとandroidサービスで提供する。QEMUとKVM上でAndroid-x86のISOをLive起動する。VNC操作は通常VMと同一のため、VNCClientをそのまま使う。タップはクリック、スワイプはドラッグに対応付ける。KVM必須でkvmプロファイル配下とする。ISOはandroid/android-x86_64.isoに配置する。容量のためgit管理外とし、手順はandroid/README.mdに置く。休止しない設定は初回配備で入れる。AndroidProvisionerとandroid_adbで行う。内容は休止最大と起床状態維持ONと画面保護無効とする。ADBのshell命令のみとし、画面施錠の無効化命令は含まない。VNCタップ列は使わない。seed同梱なしで空dataから設定し、定期的なキー送信はしない。到達不能時は警告記録に留め、次回に再試行する。QEMUのADB転送のhostfwdは既定ONとする。詳細はandroid/README.mdに置く。
+
+### KVM自動切替と起動制限
+
+USE_KVM未設定時はautoとして/dev/kvmの有無で自動切替する。.env指定は不要とする。明示値のtrueは必須、falseはTCG扱いとする。KVMがない環境のVM作成と再起動は制限する。TCGは実用速度が出ないためである。制限は3層で行う。backendのKvmUnavailableErrorでAPI 409、vm/entrypoint.shの起動拒否でALLOW_TCG_VM=trueでのみ明示許可、composeでvmとwebsockifyをkvmプロファイル配下に配置とする。エージェント判断のvm_restartが制限環境で要求された場合は失敗として_pending_errorに渡し、別手段での継続を促す。
+
+動的VMとコンテナの全体手順は次の通りとする。VmPoolのserver/vm_pool.pyがDocker経由で本体コンテナとwebsockifyコンテナを対で払い出す。QEMU VMはKVM必須、コンテナは不要とする。
 
 ```mermaid
 sequenceDiagram
@@ -425,12 +334,14 @@ sequenceDiagram
     POOL->>DOCKER: ディスク削除 (qemuのみ)
     POOL-->>FE: deleted
     deactivate POOL
-    Note right of POOL: compose既定VM (id=vm) は自動検出・削除不可<br/>ポート割当は data/vms.json 保存<br/>QEMU VM作成はKVM必須 (非対応環境は409、desktopを使用)<br/>kind=container / android はKVM不要
+    Note right of POOL: compose既定VM (id=vm) は自動検出<br/>ポート割当は data/vms.json 保存<br/>QEMU系 (qemu/android) の作成はKVM必須 (非対応環境は409)<br/>kind=container はKVM不要
 ```
 
-### QEMU起動構成（`vm/entrypoint.sh`）
+### QEMU起動構成
 
-```
+vm/entrypoint.shに置く。
+
+```text
 qemu-system-x86_64 -enable-kvm -cpu host -smp $VM_CPUS -m $VM_MEMORY
   -kernel /vm/vmlinuz -initrd /vm/initrd.img -append "$CMDLINE"
   -drive file=$VM_IMAGE,if=virtio,format=qcow2
@@ -440,92 +351,38 @@ qemu-system-x86_64 -enable-kvm -cpu host -smp $VM_CPUS -m $VM_MEMORY
   -chardev socket,... -device virtio-serial-pci -device virtserialport,...,name=org.qemu.guest_agent.0
 ```
 
-- KVM＋host CPU＋4vCPU／4GB（既定。`VM_CPUS`／`VM_MEMORY` で可変）。
-  マシンタイプは変えない（NIC名 `ens3` がnetplanに固定のため）。
-  `USE_KVM=auto` 時は `/dev/kvm` の有無でKVM/TCGを自動選択するが、
-  TCG側は既定で起動拒否する（`ALLOW_TCG_VM=true` でのみ許可）。
-- ストレージはvirtio、ネットワークはslirp（user-mode NAT）、VNC直結、
-  シリアルは起動ログ用。QMP・guest-agent用ソケットは `/vm/sockets/` 配下
-  （`QMP_SOCK`／`QGA_SOCK` 環境変数で per-VM 変更可）。
+KVMとhost CPU、4vCPUと4GBを既定とする。固定値はcomposeで定める。マシン型は変えない。NIC名のens3がnetplanに固定のためである。USE_KVM=auto時は/dev/kvmの有無でKVMとTCGを自動選択する。TCG側は既定で起動拒否し、ALLOW_TCG_VM=trueでのみ許可する。許可時のTCGは-cpu qemu64と-smp 1に切り替わる。保存はvirtio、通信はslirpのuser-mode NAT、VNC直結、シリアルは起動記録用とする。QMPとguest-agent用ソケットは/vm/sockets/配下とし、QMP_SOCKとQGA_SOCK環境変数でVMごとに変えられる。
 
-### ゲストイメージ構築（`vm/build-vm-image.sh`）
+### ゲスト画像構築
 
-debootstrapでUbuntu 24.04＋KDE Plasma＋SDDMを構築し、qcow2化する。
-主な設定内容（再ビルド時の必須項目）：
+vm/build-vm-image.shで行う。debootstrapでUbuntu 24.04とKDE PlasmaとSDDMを構築し、qcow2化する。再構築時の必須項目は次の通りとする。利用者agentのNOPASSWD sudo、SDDM自動ログインでセッション自動検出、画面施錠無効と電源管理の休止と画面OFF無効、ログイン時DPMS無効化のdisable-dpms.desktopでXのDPMS 600秒消灯が残るため、netplanでens3をDHCP化でNetworkManager単独ではunmanagedになるため、/etc/resolv.confをQEMU内蔵DNSの10.0.2.3直書きと/etc/hostsに自ホスト名、ディスク下限15GBでKDEとsnap導入で3から4GBでは枯渇するため、qemu-guest-agentとxdotoolとwmctrlを同梱とする。注意点としてUbuntu 24.04のfirefoxパッケージはsnap移行置物である。エージェントがsudo snap install firefoxで導入する運用とし、通信が必要である。
 
-- ユーザー `agent`（NOPASSWD sudo）、SDDM自動ログイン（セッション自動検出）
-- 画面ロック無効・電源管理のサスペンド／画面OFF無効
-- ログイン時DPMS無効化（`disable-dpms.desktop`。XのDPMS 600秒消灯が残るため）
-- netplanで `ens3` をDHCP化（NetworkManager単独ではunmanagedになるため）
-- `/etc/resolv.conf` をQEMU内蔵DNS（10.0.2.3）直書き、`/etc/hosts` に自ホスト名
-- ディスク下限15GB（KDE＋snap導入で3〜4GBでは枯渇するため）
-- `qemu-guest-agent`・`xdotool`・`wmctrl` を同梱
-- 注意：Ubuntu 24.04の `firefox` パッケージはsnap移行スタブ。
-  エージェントが `sudo snap install firefox` で導入する運用（要ネット）。
+### ゲスト内通信
 
-### ゲスト内ネットワーク
+QEMU slirpは10.0.2.0/24、入口は.2、DNSは.3とする。過去のつまずきはNIC DOWN、NM unmanaged、resolv.confのstub迷子、ディスク枯渇とする。いずれも上記設定で解消済みとする。再発時はip -brief addrとgetent hostsから切り分ける。
 
-- QEMU slirp：`10.0.2.0/24`、ゲートウェイ `.2`、DNS `.3`。
-- 過去の落とし穴：NIC DOWN、NM unmanaged、resolv.confのstub迷子、ディスク枯渇。
-  いずれも上記設定で解消済み。再発時は `ip -brief addr`・`getent hosts` から切り分ける。
+### 保存方式
 
-### ストレージ方式
+base qcow2のvm/desktop.qcow2は共有の読取専用扱いとする。動的VMはフルコピーを払い出す。backing参照は錠競合するため使わない。1台あたり数GBを使う。不要VMは消して回収する。
 
-- base qcow2（`vm/desktop.qcow2`）は共有・読取専用扱い。
-- 動的VMは**フルコピー**を払い出す（backing参照はロック競合するため不採用）。
-  1台あたり数GBを消費する。不要VMは削除して回収する。
+### 監視と管理
 
-### 監視・管理面
-
-- ヘルスチェック：VNCポート疎通（compose）。
-- **QMP**（`vm/qmp.py`）：`query-status` 等。`/vm/status` の `qmp_status` に反映。
-- **guest agent**（`vm/qga.py`）：`guest-ping`／`get-osinfo`／`guest-exec`（コマンド実行・入出力取得）。
-  エージェントが `xdotool` 等を直接実行する将来経路。現状は診断・検証用。
-- **websockify**：VNC→WebSocket中継。既定VMは `:6080`、動的VMは per-VM コンテナ（`6090+`）。
-  ブラウザはnoVNC（`VncViewer.tsx`）で視聴する。
-- **VmController／VmPool**：前者は既定VMの状態・再起動、後者は動的VMの
-  一覧・作成・再起動・削除（Dockerソケット経由、ポート割当は `data/vms.json` に保存する）。
+ヘルス確認はVNCポート疎通でcomposeが行う。QMPのsrc/ai_desktop_agent/vm/qmp.pyはquery-statusなどを行い、/vm/statusのqmp_statusに反映する。guest agentのsrc/ai_desktop_agent/vm/qga.pyはguest-pingとget-osinfo、guest-execのコマンド実行と入出力取得を行う。エージェントがxdotoolなどを直接実行する将来経路とし、現状は診断と検証用とする。websockifyはVNCからWebSocketへの中継とする。既定VMは:6080、動的VMはVMごとのコンテナで6090番台とする。ブラウザはnoVNCのVncViewer.tsxで見る。VmControllerとVmPoolのうち前者は既定VMの状態と再起動、後者は動的VMの一覧と作成と再起動と削除を担う。Dockerソケット経由とし、ポート割当はdata/vms.jsonに保存する。
 
 ## フロントエンド
 
-Next.js（App Router）。主要パネル：
+Next.jsのApp Routerを使う。主要パネルは次の通りとする。InstructionInputの指示とVM作り直し許可、StatusPanelの状態とサブタスク進捗、ConnectionPanelのbackendとVNCとVMの接続状態で旧下部状態表示を右パネルに組み込んだもの、ControlPanelのタスク操作、VMControlsのVM作り直し、TaskHistoryの履歴と削除で表示は日付と題名に加え決定利用件数、LogPanel、VmTabsの環境切替と追加と削除で追加はVMとコンテナとAndroidの3種、削除は2段階確認、VncViewerのnoVNC埋め込みで切断時は自動再接続のみとし操作ボタンは持たない。Android-x86もVNCのためそのまま見られるとする。
 
-- `InstructionInput`（指示＋VM作り直し許可チェック）／`StatusPanel`（状態＋サブタスク進捗）
-  ／`ConnectionPanel`（バックエンド/VNC/VMの接続状態。旧下部ステータスバーを右パネルに組み込んだもの）
-  ／`ControlPanel`（タスク操作）／`VMControls`（VM作り直し）／`TaskHistory`
-  （履歴・削除。表示は日付＋タイトルのみ）／`LogPanel`／`VmTabs`
-  （環境切替・追加・削除。追加はVM／コンテナ／Androidの3種、削除は2段階確認）／
-  `VncViewer`（noVNC埋め込み、切断時のみ再接続UI。Android選択時は案内表示）。
-- デバッグ系は `CollapsibleSection` で折畳み。サイドバー幅はドラッグ可
-  （`useSidebarWidth`、280〜720px、localStorage保存）。
-- WebSocket（`/ws`、自動再接続）は `state / action / error / complete` を送る。
-  全メッセージに `session_id`／`vm_id` を含み、表示は選択中のVMで選別する。
-- リロード対応：`GET /tasks/current`＋`GET /tasks/{id}` でログ・進捗を復元する。
-  ログ・状態・進捗はVM単位で保持し、VM間で共有しない。
+その他仕様としてデバッグ系はCollapsibleSectionで折り畳む。側面幅は引張りで変えられ、useSidebarWidthで280から720pxとし、localStorage保存とする。WebSocketの/wsは自動再接続し、stateとactionとerrorとcompleteを送る。stateとactionとerrorとcompleteにsession_idとvm_idを含み、表示は選択中のVMで選別する。初回のno_sessionとpongは除く。リロード対応はGET /tasks/currentとGET /tasks/IDで記録と進捗を戻す。記録と状態と進捗はVM単位で保ち、VM間で共有しない。
 
-## 安全性・運用
+## 安全性
 
-- **隔離**（VM/コンテナ。ホスト非共有、NAT外向きのみ）。操作は隔離環境の外に出ない
-- **ステップ上限**: 1タスク200アクションで打ち切る。同じVMへの後発タスクは先行タスクを停止させる
-  （同一VMへの同時実行は避ける設計。別VMなら並列可）
-- エージェント判断のVM作り直しは **事前許可制**（`allow_vm_restart`）。
-  未許可の要求は却下して別手段へ誘導する
-- 全アクション＋判断理由＋トークン使用量を永続化し、履歴から監査できる
-- 未実装：アクションレート制限、危険操作ホワイトリスト（予定）
+安全方針の基準はdocs/safety.mdとする。本節は実装面の要点のみ記す。隔離はVMとコンテナで行い、ホスト非共有でNAT外向きのみとする。操作は隔離環境の外に出さない。段階上限は1タスク200動作で打ち切る。同じVMへの後発タスクは先行タスクを止める。同一VMへの同時実行は避ける設計とし、別VMなら並列できる。エージェント判断のVM作り直しは事前許可制とし、allow_vm_restartが真の場合のみ行う。未許可の要求は却下して別手段へ誘導する。全動作と判断理由とトークン使用量を保存し、履歴から監査できる。未実装はアクションレート制限と危険操作のホワイトリストとする。画面対策とUI停止操作はsafety.mdに記す。
 
-## 既知の制限と今後
+## 制限と今後
 
-- OCRは英字のみ。日本語UIには `tesseract-ocr-jpn` 追加が必要。
-- テンプレート照合の供給元（アイコンDB等）が未整備。
-- 決定モデル（Clef/SystemOne）は計画段階。「意思決定層」節の表の通り、
-  回復戦略→達成検証→評価ハーネスの順で組込む。
-- マルチVMのUIはタブ切替＋単一ビューア。同時監視グリッド等は未対応。
-- モデル依存のゆらぎ（空応答・非JSON）はリトライ＋フォールバックで吸収しているが、
-  応答の安定したモデル選定が最も効く。
+OCRは英字のみとする。日本語UIにはtesseract-ocr-jpn追加が必要である。テンプレート照合の供給元のアイコンDBなどが未整備である。決定モデルのClefとSystemOneは実装済みとし、既定は無効とする。意思決定層の表の通り、評価ハーネスで測ってから回復戦略と達成検証の順で有効化する。複数VMのUIはタブ切替と単一ビューアのみとする。同時監視グリッドなどは未対応とする。モデル依存のゆらぎの空応答と非JSONは再試行と代替で吸収しているが、応答の安定したモデル選定が最も効く。
 
 ## 図の管理
 
-- 図は本書のMermaidブロックが正本である（画像ファイルの生成・管理はしない）。
-- 状態遷移を変えたら `agent/state.py` の `_VALID_TRANSITIONS` と `agent/loop.py` を先に直し、
-  「エージェント状態機械」のMermaidに合わせる。図だけを先に変えないこと。
-- シーケンスを変えたら `server/session.py`・`server/vm_pool.py`・`server/app.py` の順で裏取りする。
+図は本書のMermaidブロックを基準とする。画像ファイルの生成と管理はしない。状態遷移を変えたらagent/state.pyの_VALID_TRANSITIONSとagent/loop.pyを先に直し、状態機械のMermaidに合わせる。図だけを先に変えないこと。順序を変えたらserver/session.pyとserver/vm_pool.pyとserver/app.pyの順で裏取りする。

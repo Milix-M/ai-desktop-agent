@@ -105,6 +105,36 @@ class TestWebSocket:
             resp = await client.get("/tasks/current")
             assert resp.status_code == 200
 
+    async def test_hung_send_does_not_block(self):
+        """死んだ接続への送信は打ち切られ、呼び出し側は固まらない。"""
+        import asyncio
+        import time
+
+        from ai_desktop_agent.server.app import _send_json
+
+        class _HungWS:
+            async def send_json(self, payload):
+                await asyncio.sleep(3600)
+
+        start = time.monotonic()
+        await asyncio.wait_for(_send_json(_HungWS(), {"type": "ping"}), timeout=10.0)
+        assert time.monotonic() - start < 10.0
+
+    async def test_send_records_payload(self):
+        """正常接続にはペイロードが届く。"""
+        from ai_desktop_agent.server.app import _send_json
+
+        class _OkWS:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        ws = _OkWS()
+        await _send_json(ws, {"type": "ping"})
+        assert ws.sent == [{"type": "ping"}]
+
 
 @pytest.mark.asyncio
 class TestPauseResumeStop:

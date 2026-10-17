@@ -38,9 +38,20 @@ ID_PREFIX = {KIND_QEMU: "vm", KIND_CONTAINER: "desk", KIND_ANDROID: "and"}
 BASE_VM_SERVICE = "vm"
 #: 軽量コンテナ実行環境（QEMU不要のVNCデスクトップ）。既定の作業環境。
 DESKTOP_SERVICE = "desktop"
+#: 固定Android端末（Android-x86 on QEMU。kvmプロファイル時のみ存在）
+ANDROID_SERVICE = "android"
+#: 固定サービスに対応する中継（websockify）サービス名。停止/起動は中継も連動する。
+FIXED_RELAY_SERVICE = {
+    BASE_VM_SERVICE: "websockify",
+    DESKTOP_SERVICE: "websockify-desktop",
+    ANDROID_SERVICE: "websockify-android",
+}
 #: compose管理サービスの既定ポート（ホスト公開用。保存値がない場合）。
 DESKTOP_VNC_PORT = 5901
 DESKTOP_WS_PORT = 6081
+#: 固定Androidの既定ポート（composeのportsに対応）。
+ANDROID_VNC_PORT = 5590
+ANDROID_WS_PORT = 6070
 OVERLAYS_DIR = "/vm/overlays"  # backendコンテナ内のマウント先
 BASE_IMAGE_IN_VM = "/vm/desktop.qcow2"  # vmコンテナ内から見たbase
 VNC_START_PORT = 5910
@@ -90,6 +101,23 @@ class VmPool:
 
     # ── 一覧・取得 ──────────────────────────────────
 
+    @staticmethod
+    def _pick_fixed(candidates: list, service: str) -> Any | None:
+        """固定サービスのコンテナを1つ選ぶ。
+
+        同一ラベルを持つ手動コンテナが混ざると影武者になる
+        （例: android-nowiz が android を乗っ取り、VNC接続先が到達不能に）。
+        compose命名（ai-desktop-agent-<service>-N）に一致するものを優先し、
+        なければ先頭を返す。
+        """
+        if not candidates:
+            return None
+        prefix = f"ai-desktop-agent-{service}-"
+        for c in candidates:
+            if getattr(c, "name", "").startswith(prefix):
+                return c
+        return candidates[0]
+
     def list_vms(self) -> list[VmInfo]:
         """実行中・停止中の全VMを返す（compose既定VM・desktopを含む）。"""
         docker = self._docker()
@@ -102,21 +130,36 @@ class VmPool:
             )
         except Exception:
             legacy = []
-        for c in legacy:
+        picked = self._pick_fixed(legacy, BASE_VM_SERVICE)
+        if picked is not None:
             found[BASE_VM_SERVICE] = self._from_container(
-                c, BASE_VM_SERVICE, managed=False, kind=KIND_QEMU
+                picked, BASE_VM_SERVICE, managed=False, kind=KIND_QEMU
             )
 
-        # compose管理の軽量コンテナ環境（サービス名 desktop。常時起動が既定）
+        # compose管理の軽量コンテナ環境（サービス名 desktop。containerプロファイル時）
         try:
             desktops = docker.containers.list(
                 all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={DESKTOP_SERVICE}"}
             )
         except Exception:
             desktops = []
-        for c in desktops:
+        picked = self._pick_fixed(desktops, DESKTOP_SERVICE)
+        if picked is not None:
             found[DESKTOP_SERVICE] = self._from_container(
-                c, DESKTOP_SERVICE, managed=False, kind=KIND_CONTAINER
+                picked, DESKTOP_SERVICE, managed=False, kind=KIND_CONTAINER
+            )
+
+        # compose管理の固定Android端末（サービス名 android。kvmプロファイル時のみ存在）
+        try:
+            androids = docker.containers.list(
+                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={ANDROID_SERVICE}"}
+            )
+        except Exception:
+            androids = []
+        picked = self._pick_fixed(androids, ANDROID_SERVICE)
+        if picked is not None:
+            found[ANDROID_SERVICE] = self._from_container(
+                picked, ANDROID_SERVICE, managed=False, kind=KIND_ANDROID
             )
 
         # 動的VM
@@ -157,8 +200,8 @@ class VmPool:
         kind=qemu: QEMU VM（overlay + 2コンテナ）。KVM必須のため、KVMが
         利用できない環境では作成を制限する（`KvmUnavailableError`）。
         kind=container: 軽量デスクトップコンテナ。KVM不要でどこでも作れる。
-        kind=android: Android端末コンテナ（Redroid）。KVM不要。
-        Androidの画面視聴（noVNC相当）は未対応のため中継は作らない。
+        kind=android: Android-x86のQEMU起動。VNC操作は通常VMと同一のため
+        中継も作る。KVM必須。
         """
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
@@ -171,7 +214,11 @@ class VmPool:
             raise ValueError(f"kind は qemu/container/android のいずれか: {kind}")
 
         docker = self._docker()
-        if kind == KIND_QEMU and not is_tcg_allowed() and not is_kvm_available(docker):
+        if (
+            kind in (KIND_QEMU, KIND_ANDROID)
+            and not is_tcg_allowed()
+            and not is_kvm_available(docker)
+        ):
             raise KvmUnavailableError()
         if len([v for v in self.list_vms() if v.managed]) >= MAX_VMS:
             raise ValueError(f"VM数の上限に達しています（{MAX_VMS}）")
@@ -188,23 +235,44 @@ class VmPool:
 
         adb_port = 0
         if kind == KIND_ANDROID:
-            adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
+            iso_host = self._android_iso_host()
+            if iso_host is None:
+                raise ValueError(
+                    "Android ISO がありません。android/README.md の手順で取得してください"
+                )
             image = self._android_image_ref(docker)
+            # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
+            use_kvm = resolve_use_kvm()
+            memory = os.environ.get("ANDROID_MEMORY", "2048")
+            cpus = os.environ.get("ANDROID_CPUS", "4")
+            # ADB転送のホスト側ポート（backendの強制経路＋開発者の手動adb用）。
+            # コンテナ側は entrypoint の ANDROID_ADB_PORT（既定5555）に転送される。
+            adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
             docker.containers.run(
                 image,
                 name=vm_name,
                 detach=True,
-                privileged=True,
-                ports={"5555/tcp": adb_port},
+                # Android-x86もKVM必須。非対応ホストでは起動前段で弾く。
+                devices=["/dev/kvm:/dev/kvm"],
+                ports={"5900/tcp": vnc_port, "5555/tcp": adb_port},
                 environment={
-                    "androidboot.redroid_width": os.environ.get("ANDROID_WIDTH", "1080"),
-                    "androidboot.redroid_height": os.environ.get("ANDROID_HEIGHT", "1920"),
-                    "androidboot.redroid_dpi": os.environ.get("ANDROID_DPI", "480"),
+                    "ANDROID_ISO": "/android/boot.iso",
+                    "ANDROID_MEMORY": memory,
+                    "ANDROID_CPUS": cpus,
+                    "ANDROID_VNC_PORT": "5900",
+                    "ANDROID_ADB_FORWARD": "1",
+                    "ANDROID_ADB_PORT": "5555",
+                    "USE_KVM": use_kvm,
+                },
+                volumes={
+                    iso_host: {"bind": "/android/boot.iso", "mode": "ro"},
+                    **self._android_ro_files(),
                 },
                 labels=common_labels,
                 network=network,
                 restart_policy={"Name": "unless-stopped"},
             )
+            self._start_relay(docker, vm_id, vm_name, ws_port, network, common_labels)
             self._save_state(
                 vm_id,
                 {
@@ -278,6 +346,19 @@ class VmPool:
                 restart_policy={"Name": "unless-stopped"},
             )
 
+        self._start_relay(docker, vm_id, vm_name, ws_port, network, common_labels)
+        return self._finish_create(vm_id, name, vm_name, vnc_port, ws_port, kind)
+
+    def _start_relay(
+        self,
+        docker: Any,
+        vm_id: str,
+        vm_name: str,
+        ws_port: int,
+        network: str | None,
+        common_labels: dict,
+    ) -> None:
+        """中継（websockify）コンテナを起動する。"""
         ws_image = os.environ.get("WEBSOCKIFY_IMAGE", "ai-desktop-agent-websockify")
         docker.containers.run(
             ws_image,
@@ -290,6 +371,16 @@ class VmPool:
             restart_policy={"Name": "unless-stopped"},
         )
 
+    def _finish_create(
+        self,
+        vm_id: str,
+        name: str | None,
+        vm_name: str,
+        vnc_port: int,
+        ws_port: int,
+        kind: str,
+    ) -> VmInfo:
+        """作成状態を保存し、作成中情報を返す。"""
         self._save_state(vm_id, {"vnc_port": vnc_port, "ws_port": ws_port, "name": name or vm_id})
         return VmInfo(
             id=vm_id,
@@ -305,8 +396,9 @@ class VmPool:
     def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
         """VMコンテナを再起動する（ゲストOSごと作り直し）。中継は触らない。
 
-        QEMU VMはKVM必須のため、KVMが利用できない環境では再起動を制限する
-        （`KvmUnavailableError`）。コンテナ環境の再起動はどこでもできる。
+        QEMU系（VM・Android）はKVM必須のため、KVMが利用できない環境では
+        再起動を制限する（`KvmUnavailableError`）。
+        コンテナ環境の再起動はどこでもできる。
         """
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
@@ -316,23 +408,12 @@ class VmPool:
 
         docker = self._docker()
         if (
-            self._target_kind(vm_id, docker) == KIND_QEMU
+            self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
             and not is_kvm_available(docker)
         ):
             raise KvmUnavailableError()
-        if vm_id == BASE_VM_SERVICE:
-            targets = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
-            )
-        else:
-            targets = [
-                c
-                for c in docker.containers.list(
-                    all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
-                )
-                if LABEL_WS_FOR not in self._labels(c)
-            ]
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=False)
         if not targets:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         for c in targets:
@@ -343,11 +424,123 @@ class VmPool:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         return info
 
-    def remove_vm(self, vm_id: str) -> bool:
-        """VMと中継コンテナを削除し、ディスクを消す。既定VM・desktopは不可。"""
-        if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE):
-            raise ValueError("既定VM・コンテナ環境は削除できません")
+    def stop_vm(self, vm_id: str, timeout: int = 10) -> VmInfo:
+        """VM/コンテナを停止する（固定・動的とも可）。中継も連動して止める。
+
+        停止済みの場合は何もせず現在情報を返す。存在しなければ ValueError。
+        """
         docker = self._docker()
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
+        if not targets:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        for c in targets:
+            try:
+                c.stop(timeout=timeout)
+            except Exception:
+                logger.debug("コンテナ停止に失敗", exc_info=True)
+            logger.info("VM停止: %s", c.name)
+        info = self.get_vm(vm_id)
+        if info is None:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        return info
+
+    def start_vm(self, vm_id: str) -> VmInfo:
+        """VM/コンテナを起動する（固定・動的とも可）。中継も連動して起動する。
+
+        QEMU系（VM・Android）はKVM必須のため、KVMが利用できない環境では
+        起動を制限する（`KvmUnavailableError`）。
+        存在しなければ ValueError。
+        """
+        from ai_desktop_agent.server.kvm import (
+            KvmUnavailableError,
+            is_kvm_available,
+            is_tcg_allowed,
+        )
+
+        docker = self._docker()
+        if (
+            self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
+            and not is_tcg_allowed()
+            and not is_kvm_available(docker)
+        ):
+            raise KvmUnavailableError()
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
+        if not targets:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        for c in targets:
+            try:
+                c.start()
+            except Exception:
+                logger.debug("コンテナ起動に失敗", exc_info=True)
+            logger.info("VM起動: %s", c.name)
+        info = self.get_vm(vm_id)
+        if info is None:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        return info
+
+    def _lifecycle_targets(self, vm_id: str, docker: Any, include_relay: bool) -> list[Any]:
+        """停止/起動/再起動の対象コンテナを返す。
+
+        固定サービス（vm/desktop/android）は compose サービスラベルで探す。
+        include_relay=True の場合は対応する websockify 中継も含める。
+        動的VMは LABEL_VM_ID で探し、include_relay=False では中継を除く。
+        """
+        if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE, ANDROID_SERVICE):
+            try:
+                mains = docker.containers.list(
+                    all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={vm_id}"}
+                )
+            except Exception:
+                mains = []
+            if not include_relay:
+                return list(mains)
+            relays: list[Any] = []
+            relay_service = FIXED_RELAY_SERVICE.get(vm_id)
+            if relay_service:
+                try:
+                    relays = docker.containers.list(
+                        all=True,
+                        filters={"label": f"{COMPOSE_SERVICE_LABEL}={relay_service}"},
+                    )
+                except Exception:
+                    relays = []
+            return [*list(mains), *list(relays)]
+        try:
+            all_targets = docker.containers.list(
+                all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
+            )
+        except Exception:
+            return []
+        if include_relay:
+            return list(all_targets)
+        return [c for c in all_targets if LABEL_WS_FOR not in self._labels(c)]
+
+    def remove_vm(self, vm_id: str) -> bool:
+        """VM/コンテナを削除する（固定・動的とも可）。
+
+        固定サービス（vm/desktop/android）は本体＋中継コンテナを停止・削除する
+        （`docker compose up` で復元できる。ディスクイメージは消さない）。
+        注意: 固定androidと同一composeラベルを持つ手動コンテナ
+        （`android-nowiz` 等）も対象になる。
+        動的VMは従来通りディスク・状態ファイルも消す。
+        対象がなければ False。
+        """
+        docker = self._docker()
+        if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE, ANDROID_SERVICE):
+            targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
+            if not targets:
+                return False
+            for c in targets:
+                try:
+                    c.stop(timeout=10)
+                except Exception:
+                    logger.debug("コンテナ停止に失敗", exc_info=True)
+                try:
+                    c.remove(force=True)
+                except Exception:
+                    logger.warning("コンテナ削除に失敗", exc_info=True)
+            logger.info("VM削除: %s", vm_id)
+            return True
         targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
         if not targets:
             return False
@@ -420,6 +613,8 @@ class VmPool:
             adb_port = int(saved.get("adb_port", 0))
         elif vm_id == DESKTOP_SERVICE:
             vnc_port, ws_port, adb_port = DESKTOP_VNC_PORT, DESKTOP_WS_PORT, 0
+        elif vm_id == ANDROID_SERVICE:
+            vnc_port, ws_port, adb_port = ANDROID_VNC_PORT, ANDROID_WS_PORT, 0
         else:
             vnc_port, ws_port, adb_port = 5900, 6080, 0
         return VmInfo(
@@ -478,6 +673,8 @@ class VmPool:
             return KIND_CONTAINER
         if vm_id == BASE_VM_SERVICE:
             return KIND_QEMU
+        if vm_id == ANDROID_SERVICE:
+            return KIND_ANDROID
         try:
             targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
         except Exception:
@@ -488,10 +685,63 @@ class VmPool:
         return KIND_QEMU
 
     def _android_image_ref(self, docker: Any) -> str:
-        """Android端末イメージの参照。環境変数優先、なければ既定タグ。"""
+        """Android実行イメージの参照。環境変数優先、なければ既定から検出。"""
         if os.environ.get("ANDROID_IMAGE_REF"):
             return os.environ["ANDROID_IMAGE_REF"]
-        return "redroid/redroid:13.0.0-latest"
+        try:
+            candidates = docker.containers.list(
+                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}=android"}
+            )
+            if candidates:
+                tags = (
+                    (candidates[0].image.attrs.get("RepoTags") or [])
+                    if hasattr(candidates[0], "image")
+                    else []
+                )
+                image = candidates[0].attrs.get("Image", "")
+                return tags[0] if tags else image
+        except Exception:
+            logger.debug("androidイメージ検出に失敗", exc_info=True)
+        return "ai-desktop-agent-android:latest"
+
+    def _android_iso_host(self) -> str | None:
+        """ホスト側のAndroid ISOパスを返す。なければ None。
+
+        明示指定（ANDROID_ISO_HOST）があれば優先。なければリポジトリ直下の
+        `android/android-x86_64.iso` を使う。
+        backendがコンテナ内で動く場合、ホストパスはDockerボリューム元として
+        使い、存在確認はコンテナ内マウント（`/app/android-host`）でも行う。
+        """
+        explicit = os.environ.get("ANDROID_ISO_HOST")
+        if explicit:
+            return explicit if Path(explicit).is_file() else None
+        host_path = Path(f"{self._host_repo_dir()}/android/android-x86_64.iso")
+        if host_path.is_file():
+            return str(host_path.resolve())
+        # backendコンテナ内からはホストパスが見えないため、マウント経由で確認する
+        container_path = Path("/app/android-host/android-x86_64.iso")
+        if container_path.is_file():
+            return str(host_path)
+        return None
+
+    def _android_ro_files(self) -> dict:
+        """カーネル等の読取専用マウント。存在するもののみ返す。
+
+        ISO直起動フォールバックのため、カーネルがなくても起動できる。
+        存在しないホストパスをマウントするとDockerがディレクトリを作って
+        しまうため、事前に存在確認する。backendコンテナ内からはホストパスが
+        見えないため、`/app/android-host` マウント経由でも確認する。
+        """
+        host_dir = f"{self._host_repo_dir()}/android"
+        mounts: dict = {}
+        for fname, guest in (
+            ("kernel", "/android/kernel"),
+            ("initrd.img", "/android/initrd.img"),
+        ):
+            host = f"{host_dir}/{fname}"
+            if Path(host).is_file() or Path(f"/app/android-host/{fname}").is_file():
+                mounts[host] = {"bind": guest, "mode": "ro"}
+        return mounts
 
     def _desktop_image_ref(self, docker: Any) -> str:
         """軽量デスクトップ実行イメージの参照。環境変数優先、なければ既定から検出。"""

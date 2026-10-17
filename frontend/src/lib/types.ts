@@ -24,7 +24,8 @@ export interface VmInfo {
   ws_port: number;
   vnc_host: string;
   managed: boolean;
-  kind?: string; // qemu | container（旧APIでは欠落）
+  kind?: string; // qemu | container | android（旧APIでは欠落）
+  adb_port?: number; // 旧android（Redroid）互換。現行は未使用
 }
 
 export interface WsStateMessage {
@@ -96,6 +97,8 @@ export interface TaskHistoryItem {
   prompt_tokens?: number;
   completion_tokens?: number;
   llm_calls?: number;
+  decision_calls?: number;
+  decision_escalations?: number;
 }
 
 export interface TaskAction {

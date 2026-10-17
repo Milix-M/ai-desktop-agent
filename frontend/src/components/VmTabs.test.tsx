@@ -29,12 +29,20 @@ describe("VmTabs", () => {
     expect(onSelect).toHaveBeenCalledWith("vm-ab12");
   });
 
-  it("shows delete only for managed vms", async () => {
+  it("shows delete for managed and all fixed vms", async () => {
+    const vms: VmInfo[] = [
+      { id: "vm", name: "vm", status: "exited", health: null, vnc_port: 5900, ws_port: 6080, vnc_host: "vm", managed: false },
+      { id: "desktop", name: "desktop", status: "exited", health: null, vnc_port: 5901, ws_port: 6081, vnc_host: "d", managed: false },
+      { id: "android", name: "android", status: "running", health: "healthy", vnc_port: 5590, ws_port: 6070, vnc_host: "a", managed: false, kind: "android" },
+      { id: "vm-ab12", name: "work", status: "running", health: "starting", vnc_port: 5910, ws_port: 6090, vnc_host: "x", managed: true },
+    ];
     render(
-      <VmTabs vms={VMS} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={false} />
+      <VmTabs vms={vms} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={false} />
     );
-    expect(screen.queryByRole("button", { name: "vmを削除" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "workを削除" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "vmを削除" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "desktopを削除" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "androidを削除" })).toBeInTheDocument();
   });
 
   it("asks confirmation before delete", async () => {
@@ -98,5 +106,52 @@ describe("VmTabs", () => {
       <VmTabs vms={VMS} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={true} />
     );
     expect(screen.getAllByRole("button", { name: "作成中..." })).toHaveLength(3);
+  });
+
+  it("shows stop for running and start for exited", () => {
+    const vms: VmInfo[] = [
+      { id: "vm", name: "vm", status: "running", health: "healthy", vnc_port: 5900, ws_port: 6080, vnc_host: "vm", managed: false },
+      { id: "desktop", name: "desktop", status: "exited", health: null, vnc_port: 5901, ws_port: 6081, vnc_host: "d", managed: false },
+    ];
+    render(
+      <VmTabs vms={vms} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onStop={vi.fn()} onStart={vi.fn()} creating={false} />
+    );
+    expect(screen.getByRole("button", { name: "vmを停止" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "desktopを起動" })).toBeInTheDocument();
+    // 固定VMにも停止ボタンが出る（managed=falseでも可）
+  });
+
+  it("asks confirmation before stop", async () => {
+    const onStop = vi.fn();
+    render(
+      <VmTabs vms={VMS} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onStop={onStop} onStart={vi.fn()} creating={false} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "vmを停止" }));
+    expect(onStop).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "vmの停止を実行" }));
+    expect(onStop).toHaveBeenCalledWith("vm");
+  });
+
+  it("cancels stop", async () => {
+    const onStop = vi.fn();
+    render(
+      <VmTabs vms={VMS} selectedId="vm" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onStop={onStop} onStart={vi.fn()} creating={false} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "vmを停止" }));
+    await userEvent.click(screen.getByRole("button", { name: "停止をやめる" }));
+    expect(onStop).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "vmを停止" })).toBeInTheDocument();
+  });
+
+  it("starts directly without confirmation", async () => {
+    const onStart = vi.fn();
+    const vms: VmInfo[] = [
+      { id: "desktop", name: "desktop", status: "exited", health: null, vnc_port: 5901, ws_port: 6081, vnc_host: "d", managed: false },
+    ];
+    render(
+      <VmTabs vms={vms} selectedId="desktop" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onStop={vi.fn()} onStart={onStart} creating={false} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "desktopを起動" }));
+    expect(onStart).toHaveBeenCalledWith("desktop");
   });
 });

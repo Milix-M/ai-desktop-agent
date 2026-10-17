@@ -15,6 +15,7 @@ JSON パースエラーを根本的に防止する。
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -38,6 +39,18 @@ from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
+
+#: 操作対象プラットフォーム。linux（既定）/ android。
+PLATFORM_LINUX = "linux"
+PLATFORM_ANDROID = "android"
+
+
+def _system_prompt(platform: str = PLATFORM_LINUX) -> str:
+    """プラットフォーム別のシステムプロンプトを返す。"""
+    if platform == PLATFORM_ANDROID:
+        return _SYSTEM_PROMPT + _ANDROID_PROMPT
+    return _SYSTEM_PROMPT
+
 
 # ========================================================================
 # システムプロンプト — 画面の見方と操作のルール
@@ -122,6 +135,38 @@ AI エージェントです。
    完了を宣言する（推測での完了宣言はしない）。
 
 画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
+
+_ANDROID_PROMPT = """
+# 操作対象: Android 端末（Android 9, x86 タブレット, 1024x768）
+
+このタスクの操作対象は Linux ではなく **Android 端末** です。
+上記の Linux デスクトップ向けルールのうち、以下は Android では使えません：
+
+- 禁止: 端末アプリ・KRunner・Alt+F2・Ctrl+Alt+T・`which`・`apt`・`snap`
+  （Android に端末・パッケージ管理・ランナーはありません）
+- 禁止: タスクバーのランチャー検索・デスクトップという概念
+  （下部のバーは Android のタスクバーであり、Linux のものとは別物です）
+
+代わりに以下の Android 流儀で操作してください：
+
+- **タップ**: `left_click` がそのままタップになる。アプリアイコン・ボタンを直接タップする
+- **スワイプ・スクロール**: `drag` がスワイプ、`scroll` がスクロールになる
+- **アプリ起動**: ホームのドロワー（アプリ一覧）アイコンをタップ→目的アプリをタップ。
+  ホームにアイコンがあれば直接タップでよい
+- **文字入力**: テキスト欄をタップしてから `type` を使う
+  （ソフトウェアキーボードが出ても無視して `type` で入力できる）
+- **戻る・ホーム**: `escape` キーは戻るボタン相当。下部ナビゲーションバーの
+  ◀ ■ ● ボタンのタップでもよい
+- **禁止: `home` / `menu` / `power` のキー押下**: QEMU経由ではAndroidに届かない。
+  ホームに戻る等は必ず画面下部のナビゲーションバーボタンをタップする
+  （◀: 約(340, 730)、●: 約(512, 730)、■: 約(680, 730)）
+- **設定変更**: 設定アプリを開き、目的の項目をタップで辿る
+  （例: 日付と時刻は 設定 → システム → 日付と時刻）
+- **初回起動時の選択**: 「Select a Home app」と出たら好みのランチャー
+  （Quickstep 推奨）をタップして `ALWAYS` をタップする
+- **アプリが無い場合**: Play ストアは無い。導入は指示がある場合のみ
+  ブラウザで APK を入手する手順に切り替え、勝手に `apt` 等を使わない
+- **待機**: アプリ・画面の切り替わりには `wait`（2〜5秒）を使う"""
 
 # ========================================================================
 # Structured Output JSON Schemas
@@ -713,6 +758,7 @@ class OpenAICompatProvider(LLMProvider):
         base_url: str | None = None,
         default_headers: dict[str, str] | None = None,
         session_id: str | None = None,
+        timeout: float = 120.0,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
@@ -726,7 +772,7 @@ class OpenAICompatProvider(LLMProvider):
         self.call_count = 0
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
-        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
         if base_url:
             client_kwargs["base_url"] = base_url
         if default_headers:
@@ -746,12 +792,14 @@ class OpenAICompatProvider(LLMProvider):
 
     # ── 指示理解 ─────────────────────────────────
 
-    async def understand_instruction(self, goal: Goal) -> UnderstandingResult:
+    async def understand_instruction(
+        self, goal: Goal, platform: str = PLATFORM_LINUX
+    ) -> UnderstandingResult:
         prompt = f"""ユーザー指示を解析し、意図・対象アプリ・制約を抽出してください。
 
 【ユーザー指示】
 {goal.description}"""
-        data = await self._call(prompt, _SCHEMA_UNDERSTAND)
+        data = await self._call(prompt, _SCHEMA_UNDERSTAND, system_prompt=_system_prompt(platform))
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
             target_application=data.get("target_application"),
@@ -761,7 +809,9 @@ class OpenAICompatProvider(LLMProvider):
 
     # ── タスク分解 ───────────────────────────────
 
-    async def decompose_task(self, goal: Goal, subtask_count: int) -> DecompositionResult:
+    async def decompose_task(
+        self, goal: Goal, subtask_count: int, platform: str = PLATFORM_LINUX
+    ) -> DecompositionResult:
         from ai_desktop_agent.agent.state import Subtask
 
         constraints_text = ", ".join(goal.constraints) if goal.constraints else "なし"
@@ -775,7 +825,7 @@ class OpenAICompatProvider(LLMProvider):
             f"制約: {constraints_text}\n"
             f"\nサブタスクIDは step_{subtask_count + 1} からの連番で生成してください。"
         )
-        data = await self._call(prompt, _SCHEMA_DECOMPOSE)
+        data = await self._call(prompt, _SCHEMA_DECOMPOSE, system_prompt=_system_prompt(platform))
         raw_subtasks = data.get("subtasks", [])
         subtasks = [
             Subtask(
@@ -801,6 +851,7 @@ class OpenAICompatProvider(LLMProvider):
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
         ocr_text: str | None = None,
+        platform: str = PLATFORM_LINUX,
     ) -> ActionDecision:
         history_text = self._format_action_history(action_history[-10:])
 
@@ -857,7 +908,12 @@ ID: {current_subtask.id}
 {history_text}"""
 
         image_bytes = screenshot.image_bytes
-        data = await self._call(prompt, _SCHEMA_ACTION, image_bytes=image_bytes)
+        data = await self._call(
+            prompt,
+            _SCHEMA_ACTION,
+            image_bytes=image_bytes,
+            system_prompt=_system_prompt(platform),
+        )
         action_type_str = data.get("action_type", "subtask_complete")
         try:
             action_type = ActionType(action_type_str)
@@ -880,6 +936,7 @@ ID: {current_subtask.id}
         expected_effect: str,
         screenshot: Screenshot | None = None,
         expected_outcome: str | None = None,
+        platform: str = PLATFORM_LINUX,
     ) -> VerificationResult:
         if screenshot is not None and expected_outcome:
             prompt = f"""サブタスクが達成されたか、添付の画面を見て判定してください。
@@ -907,7 +964,10 @@ ID: {current_subtask.id}
 【LLMの判断理由】
 {action.reasoning}"""
         data = await self._call(
-            prompt, _SCHEMA_VERIFY, image_bytes=screenshot.image_bytes if screenshot else None
+            prompt,
+            _SCHEMA_VERIFY,
+            image_bytes=screenshot.image_bytes if screenshot else None,
+            system_prompt=_system_prompt(platform),
         )
         return VerificationResult(
             success=bool(data.get("success", True)),
@@ -922,6 +982,7 @@ ID: {current_subtask.id}
         error: ErrorContext,
         action_history: list[ActionRecord],
         subtask: Subtask,
+        platform: str = PLATFORM_LINUX,
     ) -> RecoveryPlan:
         history_text = self._format_action_history(action_history[-10:])
         prompt = f"""エラーからの回復計画を立案してください。
@@ -938,7 +999,7 @@ ID: {subtask.id}
 
 【直前の操作履歴】
 {history_text}"""
-        data = await self._call(prompt, _SCHEMA_RECOVER)
+        data = await self._call(prompt, _SCHEMA_RECOVER, system_prompt=_system_prompt(platform))
         raw_actions = data.get("actions", [])
         recovery_actions = []
         for a in raw_actions:
@@ -966,6 +1027,7 @@ ID: {subtask.id}
         prompt: str,
         json_schema: dict[str, Any] | None = None,
         image_bytes: bytes | None = None,
+        system_prompt: str | None = None,
     ) -> dict[str, Any]:
         """OpenAI API を呼び出し、JSON 応答を返す。
 
@@ -1005,7 +1067,7 @@ ID: {subtask.id}
                     "max_tokens": self._max_tokens,
                     "temperature": self._temperature,
                     "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt or _SYSTEM_PROMPT},
                         {"role": "user", "content": user_content},
                     ],
                 }
@@ -1041,6 +1103,8 @@ ID: {subtask.id}
                             "LLM_MODEL の変更を検討してください"
                         ) from e
                     raise
+                # 一時不調の可能性があるため待ってから再試行する
+                await asyncio.sleep(1.5 * (attempt + 1))
             except Exception as e:
                 if use_schema and self._is_unsupported_error(e):
                     logger.warning(
@@ -1055,6 +1119,7 @@ ID: {subtask.id}
                 logger.exception("API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries)
                 if attempt == max_retries - 1:
                     raise
+                await asyncio.sleep(1.5 * (attempt + 1))
         return {}
 
     @staticmethod
@@ -1128,40 +1193,44 @@ ID: {subtask.id}
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """LLM応答テキストからJSONを抽出してパースする。
+        """LLM応答テキストからJSONオブジェクトを抽出してパースする。
 
         通常JSONモードでは説明文が混ざることがあるため、
         全体→コードフェンス→先頭{〜末尾}の順で試す。
+        トップレベルが配列等の非オブジェクトは再試行可能な
+        JSONDecodeError として扱う（呼び出し側のリトライ対象）。
         """
         stripped = text.strip()
         first_error: json.JSONDecodeError | None = None
-        try:
-            return json.loads(stripped)  # type: ignore[no-any-return]
-        except json.JSONDecodeError as e:
-            first_error = e
 
-        candidate = stripped
-        if "```json" in candidate:
-            start = candidate.index("```json") + 7
-            end = candidate.index("```", start)
-            candidate = candidate[start:end].strip()
-        elif "```" in candidate:
-            start = candidate.index("```") + 3
-            end = candidate.index("```", start)
-            candidate = candidate[start:end].strip()
-        try:
-            return json.loads(candidate)  # type: ignore[no-any-return]
-        except json.JSONDecodeError:
-            pass
-
-        # 最後の手段：最初と最後の波括弧で切り出す
+        candidates = [stripped]
+        if "```json" in stripped:
+            start = stripped.index("```json") + 7
+            end = stripped.index("```", start)
+            candidates.append(stripped[start:end].strip())
+        elif "```" in stripped:
+            start = stripped.index("```") + 3
+            end = stripped.index("```", start)
+            candidates.append(stripped[start:end].strip())
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start != -1 and end > start:
+            candidates.append(stripped[start : end + 1])
+
+        for candidate in candidates:
             try:
-                return json.loads(stripped[start : end + 1])  # type: ignore[no-any-return]
-            except json.JSONDecodeError:
-                pass
+                result = json.loads(candidate)
+            except json.JSONDecodeError as e:
+                if first_error is None:
+                    first_error = e
+                continue
+            if not isinstance(result, dict):
+                if first_error is None:
+                    first_error = json.JSONDecodeError(
+                        "JSONオブジェクトではありません", candidate, 0
+                    )
+                continue
+            return result  # type: ignore[no-any-return]
         raise first_error or ValueError(f"JSONを抽出できません: {text[:100]}")
 
     @staticmethod

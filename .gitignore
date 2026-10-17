@@ -28,6 +28,11 @@ data/
 vm_images/
 vm/vmlinuz
 vm/initrd.img
+android/android-x86_64.iso
+android/kernel
+android/initrd.img
+android/android-data.img
+android/apks/*.apk
 vm/cmdline.txt
 vm/sockets/
 vm/overlays/

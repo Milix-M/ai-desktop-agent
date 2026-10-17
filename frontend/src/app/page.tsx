@@ -13,7 +13,7 @@ import LogPanel from "@/components/LogPanel";
 import ConnectionPanel from "@/components/ConnectionPanel";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useSidebarWidth } from "@/hooks/useSidebarWidth";
-import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, getVncWsUrl } from "@/lib/api";
+import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, stopVm, startVm, getVncWsUrl } from "@/lib/api";
 import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo, VmInfo } from "@/lib/types";
 
 let logIdCounter = 0;
@@ -114,6 +114,15 @@ export default function Home() {
             message: `タスク: ${detail.instruction || "(指示なし)"}（${
               STATE_LABEL[detail.state] ?? detail.state
             }）`,
+            level: "state",
+          },
+          {
+            id: logIdCounter++,
+            time: epochStr(detail.updated_at),
+            message:
+              `使用量: LLM${detail.llm_calls ?? 0}回` +
+              `（入力${detail.prompt_tokens ?? 0}/出力${detail.completion_tokens ?? 0}トークン）` +
+              `・決定${detail.decision_calls ?? 0}件・退避${detail.decision_escalations ?? 0}件`,
             level: "state",
           },
           ...detail.actions.flatMap((a) => {
@@ -324,10 +333,30 @@ export default function Home() {
   const handleDeleteVm = useCallback(async (vmId: string) => {
     try {
       await deleteVm(vmId);
-      addLog("VM削除", "state");
+      addLog(`削除: ${vmId}`, "state", vmId);
       await refreshVms();
     } catch (e: unknown) {
-      addLog(`VM削除失敗: ${e instanceof Error ? e.message : String(e)}`, "error");
+      addLog(`削除失敗: ${e instanceof Error ? e.message : String(e)}`, "error", vmId);
+    }
+  }, [addLog, refreshVms]);
+
+  const handleStopVm = useCallback(async (vmId: string) => {
+    try {
+      await stopVm(vmId);
+      addLog(`停止: ${vmId}（実行中タスクは停止）`, "state", vmId);
+      await refreshVms();
+    } catch (e: unknown) {
+      addLog(`停止失敗: ${e instanceof Error ? e.message : String(e)}`, "error", vmId);
+    }
+  }, [addLog, refreshVms]);
+
+  const handleStartVm = useCallback(async (vmId: string) => {
+    try {
+      await startVm(vmId);
+      addLog(`起動: ${vmId}`, "state", vmId);
+      await refreshVms();
+    } catch (e: unknown) {
+      addLog(`起動失敗: ${e instanceof Error ? e.message : String(e)}`, "error", vmId);
     }
   }, [addLog, refreshVms]);
 
@@ -342,19 +371,12 @@ export default function Home() {
         onSelect={setSelectedVmId}
         onCreate={handleCreateVm}
         onDelete={handleDeleteVm}
+        onStop={handleStopVm}
+        onStart={handleStartVm}
         creating={creatingVm}
       />
       <div className="main-layout">
-        {selectedVm?.kind === "android" ? (
-          <div className="vnc-panel">
-            <div className="vnc-placeholder" data-testid="android-noviewer">
-              Android端末はADB操作のみです（ライブ視聴は未対応）。
-              指示を出すとエージェントが操作します。
-            </div>
-          </div>
-        ) : (
-          <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
-        )}
+        <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
 
         <div
           className="sidebar-resizer"

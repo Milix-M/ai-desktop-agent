@@ -55,4 +55,21 @@ describe("TaskHistory", () => {
     await userEvent.click(screen.getByRole("button", { name: "テスト指示2を削除" }));
     expect(onDelete).toHaveBeenCalledWith("b2");
   });
+
+  it("shows decision usage when present", () => {
+    const items: TaskHistoryItem[] = [
+      {
+        ...ITEMS[0],
+        decision_calls: 2,
+        decision_escalations: 1,
+      },
+    ];
+    render(<TaskHistory items={items} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.getByText(/決定2件・退避1件/)).toBeInTheDocument();
+  });
+
+  it("hides decision usage when zero", () => {
+    render(<TaskHistory items={ITEMS} selectedId={null} onSelect={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.queryByText(/決定/)).not.toBeInTheDocument();
+  });
 });
