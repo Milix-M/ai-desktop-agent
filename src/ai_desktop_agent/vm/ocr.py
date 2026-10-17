@@ -65,9 +65,7 @@ def is_available() -> bool:
     return _available()
 
 
-def extract_words(
-    image_bytes: bytes, *, lang: str = "eng", min_conf: float = 30.0
-) -> list[dict]:
+def extract_words(image_bytes: bytes, *, lang: str = "eng", min_conf: float = 30.0) -> list[dict]:
     """画像から単語ごとの座標付きテキストを抽出する。
 
     機械的プロビジョニング用に、ボタン等のタップ位置を特定する。

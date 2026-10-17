@@ -53,9 +53,7 @@ class TestProvisionVm:
         monkeypatch.setattr(adb_mod, "setup_home", lambda s: calls.append("home") or True)
         monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s: True)
         installed = []
-        monkeypatch.setattr(
-            adb_mod, "install_apk", lambda s, a: installed.append(a) or True
-        )
+        monkeypatch.setattr(adb_mod, "install_apk", lambda s, a: installed.append(a) or True)
         assert p.provision_vm("android") is True
         assert calls == ["sleep", "timezone", "wifi", "home"]
         assert installed == [str(tmp_path / "apks" / "F-Droid.apk")]

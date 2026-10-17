@@ -36,17 +36,13 @@ class TestConnect:
                 self.returncode = 0
 
         monkeypatch.setattr(android_adb, "_adb_bin", lambda: "/usr/bin/adb")
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **k: _P("connected to android:5555\n")
-        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P("connected to android:5555\n"))
         assert android_adb._run_connect("android:5555") is True
         monkeypatch.setattr(
             subprocess, "run", lambda *a, **k: _P("already connected to android:5555\n")
         )
         assert android_adb._run_connect("android:5555") is True
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **k: _P("Connection refused\n")
-        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P("Connection refused\n"))
         assert android_adb._run_connect("android:5555") is False
         monkeypatch.setattr(
             subprocess, "run", lambda *a, **k: _P("failed to connect to 'x:5555'\n")
@@ -152,8 +148,7 @@ class TestSetupHome:
 
     def test_no_candidate_returns_false(self):
         assert (
-            android_adb.setup_home("android:5555", runner=_ok, query=lambda *a: "nothing")
-            is False
+            android_adb.setup_home("android:5555", runner=_ok, query=lambda *a: "nothing") is False
         )
 
     def test_query_failure_returns_false(self):
@@ -169,10 +164,7 @@ class TestSetupHome:
             "com.farmerbb.taskbar.androidx86/com.farmerbb.taskbar.activity.HomeActivity\n"
             "com.android.settings/.FallbackHome\n"
         )
-        assert (
-            android_adb._pick_home_component(out)
-            == "com.android.launcher3/.Launcher"
-        )
+        assert android_adb._pick_home_component(out) == "com.android.launcher3/.Launcher"
 
         def query(serial, *args):
             return out
@@ -220,9 +212,7 @@ class TestSetupHome:
         def query(serial, *args):
             return self.QUICKSTEP_OUT
 
-        assert (
-            android_adb.setup_home("android:5555", runner=_ng, query=query) is False
-        )
+        assert android_adb.setup_home("android:5555", runner=_ng, query=query) is False
 
     def test_pick_prefers_launcher_over_first(self):
         out = "com.example.foo/com.example.foo.Bar\ncom.android.launcher3/com.android.Foo\n"
@@ -235,9 +225,11 @@ class TestSetupHome:
 class TestDismissDialogs:
     def test_sends_home_key(self):
         calls = []
+
         def runner(serial, *args):
             calls.append(args)
             return True
+
         assert android_adb.dismiss_dialogs("s:5555", runner=runner) is True
         assert any("keyevent" in " ".join(a) for a in calls)
 
@@ -251,6 +243,7 @@ class TestHasNetwork:
             if "eth0" in args:
                 return "4: eth0: <UP> mtu 1500\n    inet 10.0.2.15/24 scope global eth0"
             return "no inet"
+
         assert android_adb.has_network("s:5555", query=query) is True
 
     def test_no_ipv4(self):
@@ -259,6 +252,7 @@ class TestHasNetwork:
     def test_query_failure(self):
         def q(*a):
             raise RuntimeError("down")
+
         assert android_adb.has_network("s:5555", query=q) is False
 
 

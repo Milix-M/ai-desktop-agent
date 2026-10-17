@@ -757,9 +757,7 @@ class TestAndroidDockerfile:
             "androidboot.hardware付与は起動ロゴ停止の原因のため禁止"
         )
         # 公式nosetup基底 + ADB_TCP/VIRT_WIFI追加のみ許可（順序不問・DATA=vda変種含む）
-        assert "root=/dev/ram0 quiet SRC= DATA=" in content, (
-            "既定APPENDは公式nosetup基底を保つこと"
-        )
+        assert "root=/dev/ram0 quiet SRC= DATA=" in content, "既定APPENDは公式nosetup基底を保つこと"
         assert "ADB_TCP=" in content, "seedなし/VNCなしのADB到達用にADB_TCPが必要"
         assert "VIRT_WIFI=" in content, "Ethernet既定(VIRT_WIFI=0)が必要"
         assert "DATA=vda" in content, "永続data disk時はDATA=vdaにすること"
@@ -833,8 +831,11 @@ class TestAndroidDockerfile:
         path = PROJECT_ROOT / "scripts" / "patch-android-initrd.py"
         assert path.is_file()
         assert path.stat().st_mode & 0o111 or True
-        result = subprocess.run(["bash", "-n", str(PROJECT_ROOT / "android" / "entrypoint.sh")],
-                                capture_output=True, text=True)
+        result = subprocess.run(
+            ["bash", "-n", str(PROJECT_ROOT / "android" / "entrypoint.sh")],
+            capture_output=True,
+            text=True,
+        )
         assert result.returncode == 0
         content = path.read_text()
         assert "service.adb.tcp.port" in content
@@ -851,22 +852,24 @@ class TestAndroidDockerfile:
         if not initrd.is_file():
             return
         import gzip
-        data = gzip.open(initrd, "rb").read()
+
+        with gzip.open(initrd, "rb") as f:
+            data = f.read()
         # cpio newc から init を取り出す
         off = 0
         found = False
         while off + 110 <= len(data):
-            if data[off:off+6] not in (b"070701", b"070702"):
+            if data[off : off + 6] not in (b"070701", b"070702"):
                 break
-            namesize = int(data[off+6+11*8:off+6+12*8], 16)
-            filesize = int(data[off+6+6*8:off+6+7*8], 16)
-            name = data[off+110:off+110+namesize-1].decode()
+            namesize = int(data[off + 6 + 11 * 8 : off + 6 + 12 * 8], 16)
+            filesize = int(data[off + 6 + 6 * 8 : off + 6 + 7 * 8], 16)
+            name = data[off + 110 : off + 110 + namesize - 1].decode()
             hl = 110 + namesize
             pad = (4 - (hl % 4)) % 4
             doff = off + hl + pad
             if name == "init":
                 found = True
-                text = data[doff:doff+filesize].decode()
+                text = data[doff : doff + filesize].decode()
                 assert "ADB_TCP" in text, "initrdにADB_TCPパッチが必要"
                 assert "service.adb.tcp.port=5555" in text
                 assert "set-home-activity" in text, "Home自動確定パッチが必要"

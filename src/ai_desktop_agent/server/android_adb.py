@@ -137,10 +137,22 @@ def setup_sleep(serial: str, runner=None) -> bool:
     run = runner or _run_adb
     ok = True
     for c in (
-        ("shell", "settings", "put", "system", "screen_off_timeout",
-         str(SCREEN_OFF_TIMEOUT_MAX_MS)),
-        ("shell", "settings", "put", "global", "stay_on_while_plugged_in",
-         str(STAY_ON_WHILE_PLUGGED_IN)),
+        (
+            "shell",
+            "settings",
+            "put",
+            "system",
+            "screen_off_timeout",
+            str(SCREEN_OFF_TIMEOUT_MAX_MS),
+        ),
+        (
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "stay_on_while_plugged_in",
+            str(STAY_ON_WHILE_PLUGGED_IN),
+        ),
         ("shell", "svc", "power", "stayon", "true"),
         ("shell", "settings", "put", "secure", "screensaver_enabled", "0"),
         ("shell", "settings", "put", "secure", "screensaver_activate_on_sleep", "0"),
@@ -294,8 +306,6 @@ def install_apk(serial: str, apk_path: str, query=None, timeout: float = 120.0) 
 
     初回起動直後の12MB級APKは10秒を超える実測があるため既定120秒とする。
     """
-    from functools import partial as _partial
-
     if query is not None:
         out_of = query
     else:
