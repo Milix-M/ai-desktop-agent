@@ -95,6 +95,8 @@ def _use_ocr_prompt() -> bool:
         "off",
         "no",
     )
+
+
 RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
