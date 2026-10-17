@@ -8,20 +8,11 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.vm.base import DisplayBackend
 
 logger = logging.getLogger(__name__)
-
-# テキスト抽出器の型: 画像バイナリ → 抽出テキスト
-TextExtractor = Callable[[bytes], str]
-
-
-def _default_text_extractor(_image_bytes: bytes) -> str:
-    """デフォルトのテキスト抽出器。OCRが設定されていない場合は空文字列を返す。"""
-    return ""
 
 
 class ActionExecutor:
@@ -31,18 +22,13 @@ class ActionExecutor:
 
     Args:
         backend: VM操作に使用する表示バックエンド。
-        text_extractor: スクリーンショットからテキストを抽出する関数。
-            デフォルトは空文字列を返す。OCRを使用する場合は
-            pytesseract等を使った関数を注入する。
     """
 
     def __init__(
         self,
         backend: DisplayBackend,
-        text_extractor: TextExtractor | None = None,
     ) -> None:
         self._backend = backend
-        self._extract_text = text_extractor or _default_text_extractor
 
     async def execute(self, action: Action) -> bool:
         """1つのアクションを実行する。
@@ -106,8 +92,6 @@ class ActionExecutor:
             # ── 待機 ──
             case ActionType.WAIT:
                 await asyncio.sleep(p["seconds"])
-            case ActionType.WAIT_FOR_TEXT:
-                await self._wait_for_text(p["text"], p["timeout"])
             case ActionType.WAIT_FOR_STILL:
                 await self._wait_for_still(p["timeout"])
 
@@ -131,29 +115,6 @@ class ActionExecutor:
                 pass  # 何もしない（状態機械へのシグナル）
 
     # ── 待機ロジック ───────────────────────────────────
-
-    async def _wait_for_text(self, text: str, timeout: float) -> None:
-        """画面に指定テキストが現れるまでスクリーンショットを取得して待機。
-
-        テキスト抽出器（OCR）が設定されている場合は抽出テキストから検索する。
-        OCR未設定時は早期リターンせずタイムアウトまで待つ（画面変化だけでの
-        誤判定を防ぐため）。
-        """
-        elapsed = 0.0
-        interval = 0.5
-
-        while elapsed < timeout:
-            ss = self._capture_stable()
-            extracted = self._extract_text(ss.image_bytes)
-
-            if extracted and text in extracted:
-                logger.info("テキスト検出: %s", text)
-                return
-
-            await asyncio.sleep(interval)
-            elapsed += interval
-
-        logger.warning("wait_for_text がタイムアウト: %s", text)
 
     async def _wait_for_still(self, timeout: float) -> None:
         """画面変化が収まるまで待機する。

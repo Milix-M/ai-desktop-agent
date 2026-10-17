@@ -85,7 +85,6 @@ class LLMProvider(ABC):
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
-        ocr_text: str | None = None,
         platform: str = "linux",
     ) -> ActionDecision:
         """現在の状態から次のアクションを決定する。

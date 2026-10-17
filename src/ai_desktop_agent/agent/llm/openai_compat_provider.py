@@ -850,7 +850,6 @@ class OpenAICompatProvider(LLMProvider):
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
-        ocr_text: str | None = None,
         platform: str = PLATFORM_LINUX,
     ) -> ActionDecision:
         history_text = self._format_action_history(action_history[-10:])
@@ -883,18 +882,9 @@ class OpenAICompatProvider(LLMProvider):
 範囲外の座標は実行時にクランプされますが、精度が落ちるため範囲内に収めてください。
 """
 
-        ocr_block = ""
-        if ocr_text:
-            ocr_block = f"""
-【画面テキスト（OCR参考情報）】
-{ocr_text}
-座標特定の補助に使ってください（グリッド数字は含みません）。
-"""
-
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 {zoom_block}
 {screen_block}
-{ocr_block}
 【ゴール】{goal.description}
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}

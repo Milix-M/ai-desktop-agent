@@ -198,8 +198,8 @@ sequenceDiagram
     loop サブタスク消化
         BE->>VM: スクリーンショット取得
         VM-->>BE: 生画像
-        BE->>BE: グリッド重畳＋OCR＋黒画面ウェイク
-        BE->>LLM: decide_next_action()（画像＋OCR＋履歴＋エラー情報）
+        BE->>BE: グリッド重畳＋黒画面ウェイク
+        BE->>LLM: decide_next_action()（画像＋履歴＋エラー情報）
         LLM-->>BE: Action＋期待効果＋確信度
         alt vm_restart要求
             BE->>BE: allow_vm_restart判定（未許可は却下して回復へ）
@@ -247,7 +247,7 @@ agent/llm配下に置く。factory.pyのcreate_llm_providerが全提供元をOpe
 
 openai_compat_provider.pyの仕様は次の通りとする。画像は同一解像度JPEGのq80とdetail highで送る。座標系を保ちつつ軽くするためである。出力形式はStructured Outputのresponse_format json_schemaで強制する。非対応モデルでは通常JSONモードへ自動切替する。_structured_output退避で行う。不正な引数は_sanitize_paramsで整え、画面内収めは_clamp_paramsで行う。必須項目の欠落はActionの検証で誤りとする。OpenCode系にはUser-Agentのai-desktop-agent/0.1.0を付け、タスクIDをx-opencode-sessionで送る。session_idに対応する。呼出ごとのトークン使用量は_record_usageで累積し、タスク記録に保存する。max_tokensは1500に絞る。出力は小さいJSONのみのためである。
 
-システムプロンプト方針は座標グリッドの読み方、2段階クリック、アプリ起動はキーボード優先、不足アプリは端末で導入、subtask_completeは操作後のみとする。OCRテキストは参考情報として添付する。
+システムプロンプト方針は座標グリッドの読み方、2段階クリック、アプリ起動はキーボード優先、不足アプリは端末で導入、subtask_completeは操作後のみとする。画面文字はLLMが画像から直接読む。
 
 ### 決定モデルの組込
 
@@ -259,7 +259,7 @@ openai_compat_provider.pyの仕様は次の通りとする。画像は同一解�
 | 2 | サブタスク達成検証 | _verify_subtask_phaseの画像付きLLM検証 | 高確信で前進し、低確信で回復し、中間でLLM検証へ回す。確率閾値で設計する |
 | 3 | 評価ハーネス | なし。新設済み | 保存済みタスク記録を正解集団とし、精度と分布を測る。agent/decision/eval.pyとscripts/eval_clef.pyを使う。推奨順序はClef-flashからClefとする |
 
-置換しないものはdecide_next_actionの座標とJSON生成、タスク分解、OCR読解とする。判断は決定モデル、実行内容の生成はLLMの分担を保つ。ベンチマークは提供元申告のため、自タスクでの精度と待ち時間と単価で選ぶ。利用可否の検討内容はdocs/research/clef.mdに残す。
+置換しないものはdecide_next_actionの座標とJSON生成、タスク分解、画面文字の読解とする。判断は決定モデル、実行内容の生成はLLMの分担を保つ。ベンチマークは提供元申告のため、自タスクでの精度と待ち時間と単価で選ぶ。利用可否の検討内容はdocs/research/clef.mdに残す。
 
 ## 観測
 
@@ -267,7 +267,7 @@ LLMに渡すのは生画像ではない。座標ヒントを重ねた画像と�
 
 画面取得の値オブジェクトはvm/screenshot.pyに置く。with_overlayとcrop_with_metaを持つ。重畳描画はvm/overlay.pyに置く。50pxグリッドと100pxごとの太線、上端と左端の座標数字、カーソル十字、外周枠を描く。文字は12ptとする。ズーム画像には25pxグリッドを使う。領域ズームはcrop_region_with_metaで行い、2倍拡大画像と実倍率を返す。逆変換はabsolute = origin + zoomed_coord / actual_scaleで行う。_handle_region_zoomが担う。入れ子は深さ1までとする。
 
-文字認識はvm/ocr.pyで行う。tesseractで画面文字を取り出す。英字のみでmax_charsは2000、8件保持する。グリッド数字の混入を避けるため、生画像にOCRをかける。WAIT_FOR_TEXTの実体でもある。
+画面文字の読解はLLMが画像から直接行う。OCR機構（vm/ocr.py・WAIT_FOR_TEXT）は実画面ABで有益信号がなく削除した。
 
 カーソル情報はVNCClientのcursor_positionとhas_custom_cursorを使う。cursor_positionは通信層の値を優先し、取れなければ内部追跡値を返す。重畳の十字には内部追跡の_cursor_xと_cursor_yを直接使う。
 
@@ -281,7 +281,7 @@ LLMに渡すのは生画像ではない。座標ヒントを重ねた画像と�
 
 定義はactions/primitives.pyに置く。マウス7種とキー4種と待機3種、内部用のscreenshot、region_select、subtask_complete、vm_restartを持つ。クリック系は座標必須とする。allowed_paramsとrequired_paramsで検証する。
 
-実行はactions/executor.pyに置き、Actionをbackend操作に変える。REGION_SELECTとVM_RESTARTはセッション側で処理する。このため実行器に届いた場合は警告のみ出す。安定待ちのwait_for_stillとOCR利用の文字待機を持つ。
+実行はactions/executor.pyに置き、Actionをbackend操作に変える。REGION_SELECTとVM_RESTARTはセッション側で処理する。このため実行器に届いた場合は警告のみ出す。安定待ちのwait_for_stillを持つ。
 
 VNC実装はvm/vnc_client.pyに置き、vncdotoolを包む。既知の注意点と対策は次の通りとする。pasteの貼付はQEMU標準VNCに無視されるため使わない。type_textは1文字ずつキーイベントを送る。QEMUはShift合成を戻さないため、_SHIFT_PAIRS表で明示合成する。大文字AからZはそのまま通す。手動合成すると小文字化する実測があるためである。vncdotoolのKEYMAPに無い名前のbackspaceなどは起動時に補う。ThreadedVNCClientProxyは戻り値なし呼び出しで後続呼び出しが動かなくなる。deferred連鎖に前回戻り値が流れるためである。keyEventとmouseDragの直接利用は禁止とする。mouseDragはmouseMove連打の自前段階に置き換え済みとする。クリックは移動と整定待ち、50ms押下、解放の順に行う。ダブルクリックは同座標明示とする。組合せキーは20ms間隔とする。座標は画面内に収める。
 
@@ -381,7 +381,7 @@ Next.jsのApp Routerを使う。主要パネルは次の通りとする。Instru
 
 ## 制限と今後
 
-OCRは英字のみとする。日本語UIにはtesseract-ocr-jpn追加が必要である。テンプレート照合の供給元のアイコンDBなどが未整備である。決定モデルのClefとSystemOneは実装済みとし、既定は無効とする。意思決定層の表の通り、評価ハーネスで測ってから回復戦略と達成検証の順で有効化する。複数VMのUIはタブ切替と単一ビューアのみとする。同時監視グリッドなどは未対応とする。モデル依存のゆらぎの空応答と非JSONは再試行と代替で吸収しているが、応答の安定したモデル選定が最も効く。
+テンプレート照合の供給元のアイコンDBなどが未整備である。決定モデルのClefとSystemOneは実装済みとし、既定は無効とする。意思決定層の表の通り、評価ハーネスで測ってから回復戦略と達成検証の順で有効化する。複数VMのUIはタブ切替と単一ビューアのみとする。同時監視グリッドなどは未対応とする。モデル依存のゆらぎの空応答と非JSONは再試行と代替で吸収しているが、応答の安定したモデル選定が最も効く。
 
 ## 図の管理
 

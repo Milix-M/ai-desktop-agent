@@ -35,7 +35,6 @@ from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.vm.base import DisplayBackend
-from ai_desktop_agent.vm.ocr import extract_text as _ocr_text
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
@@ -85,16 +84,6 @@ MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
 MAX_EMPTY_RETRIES = 5  # 空応答の決定再試行上限（一時不調の吸収用）
 EMPTY_RETRY_SHORT_ATTEMPTS = 2  # 前ターンも失敗時の試行上限（障害時の空費防止用）
-
-
-def _use_ocr_prompt() -> bool:
-    """プロンプト添付用OCRの有効無効（既定有効）。無効時はOCR自体を走らせない。"""
-    return (os.environ.get("USE_OCR_PROMPT") or "1").strip().lower() not in (
-        "0",
-        "false",
-        "off",
-        "no",
-    )
 
 
 RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
@@ -178,12 +167,10 @@ class TaskSession:
                 "環境変数 VNC_HOST を設定するか、display オブジェクトを明示的に渡してください。"
             )
 
-        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
+        self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
-        # 直近のOCRテキスト（LLMプロンプト用）
-        self._last_ocr_text: str = ""
         # サブタスクごとの空完了却下回数
         self._empty_complete_refusals: dict[str, int] = {}
         # サブタスクごとの検証失敗回数
@@ -211,7 +198,7 @@ class TaskSession:
         except AttributeError:
             pass
         self.display = display
-        self.executor = ActionExecutor(self.display, text_extractor=_ocr_text)
+        self.executor = ActionExecutor(self.display)
 
     # ── イベント ──────────────────────────────
 
@@ -1183,7 +1170,6 @@ class TaskSession:
                     action_history=self.loop.context.action_history,
                     screenshot=screenshot,
                     error_context=error_context,
-                    ocr_text=self._last_ocr_text or None,
                     platform=self._platform(),
                 )
                 self._consec_empty_decides = 0
@@ -1210,7 +1196,6 @@ class TaskSession:
         Linux系は Shift で復帰するが、Android-x86 は Shift では復帰せず
         ESC / Menu の1秒超ホールドが必要（公式doc準拠）のため、
         Android端末（vm_id が ``android`` / ``and-*``）では専用シーケンスを使う。
-        ついでに生画像のOCRテキストを保持する。
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
@@ -1226,12 +1211,6 @@ class TaskSession:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
             screenshot = self.display.capture_screen()
-        try:
-            capture_raw = getattr(self.display, "capture_raw", None)
-            if callable(capture_raw) and _use_ocr_prompt():
-                self._last_ocr_text = _ocr_text(capture_raw().image_bytes)
-        except Exception:
-            logger.debug("OCRテキスト取得に失敗", exc_info=True)
         return screenshot
 
     def _is_android_vm(self) -> bool:
