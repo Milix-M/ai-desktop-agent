@@ -11,6 +11,8 @@ import {
   getVms,
   createVm,
   deleteVm,
+  stopVm,
+  startVm,
   getWsUrl,
   getVncWsUrl,
 } from "@/lib/api";
@@ -271,6 +273,42 @@ describe("API client", () => {
       } as Response);
       const deleted = await deleteVm("vm-x");
       expect(deleted.status).toBe("deleted");
+    });
+  });
+
+  describe("stopVm/startVm", () => {
+    it("POSTs /vms/{id}/stop", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "vm", name: "vm", status: "exited", health: null, vnc_port: 5900, ws_port: 6080, vnc_host: "h", managed: false }),
+      } as Response);
+      const result = await stopVm("vm");
+      expect(result.status).toBe("exited");
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/vms/vm/stop"),
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+
+    it("POSTs /vms/{id}/start", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "desktop", name: "desktop", status: "running", health: null, vnc_port: 5901, ws_port: 6081, vnc_host: "h", managed: false }),
+      } as Response);
+      const result = await startVm("desktop");
+      expect(result.status).toBe("running");
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/vms/desktop/start"),
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+
+    it("throws on HTTP error", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+      } as Response);
+      await expect(stopVm("nope")).rejects.toThrow("HTTP 404");
     });
   });
 });

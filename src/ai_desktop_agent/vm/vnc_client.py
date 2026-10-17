@@ -63,6 +63,9 @@ _KEY_MAP: dict[str, str] = {
     "cmd": "super",
     "insert": "insert",
     "print_screen": "print_screen",
+    # Android-x86 のウェイク用。公式docでは ESC / Menu / 矢印のみが
+    # スリープ復帰キーとして定義されている（Shift は復帰しない）。
+    "menu": "menu",
 }
 
 
@@ -85,6 +88,8 @@ def _ensure_vncdotool_keymap() -> None:
     KEYMAP.setdefault("page_up", 0xFF55)
     KEYMAP.setdefault("page_down", 0xFF56)
     KEYMAP.setdefault("print_screen", 0xFF61)
+    # X11 XK_Menu (0xFF67)。Android-x86 のスリープ復帰・キーガード解除用。
+    KEYMAP.setdefault("menu", 0xFF67)
 
 
 _ensure_vncdotool_keymap()
@@ -407,6 +412,37 @@ class VNCClient(DisplayBackend):
         for k in reversed(mapped):
             self._client.keyUp(k)
             time.sleep(0.02)
+
+    #: Android-x86 のスリープ復帰に必要な長押し秒数。
+    #: 公式doc（android-x86.org/documentation/wake_machine.html）では
+    #: ESC / Menu / 矢印を1秒以上ホールドすることとされている。
+    ANDROID_WAKE_HOLD_SECONDS = 1.1
+
+    def wake_android(self) -> None:
+        """Android-x86用スリープ復帰シーケンスを送る。
+
+        Shift では復帰しない（Linux DPMS用）ため、公式docに従い
+        ESC→Menu を1秒超ホールドし、最後に中央タップでキーガード解除を狙う。
+        通常の ``key_press("shift")`` と違い、スリープ中のAndroidを起こせる。
+        """
+        self._ensure_connected()
+        for key in ("escape", "menu"):
+            try:
+                mapped = self._map_key(key)
+                self._client.keyDown(mapped)
+                time.sleep(self.ANDROID_WAKE_HOLD_SECONDS)
+                self._client.keyUp(mapped)
+                time.sleep(0.3)
+            except Exception:
+                logger.debug("Androidウェイクキー送信に失敗: %s", key, exc_info=True)
+        try:
+            if self._width > 0 and self._height > 0:
+                cx, cy = self._width // 2, self._height // 2
+            else:
+                cx, cy = 512, 384
+            self.mouse_click(cx, cy)
+        except Exception:
+            logger.debug("Androidウェイクタップに失敗", exc_info=True)
 
     def type_text(self, text: str) -> None:
         """テキストを1文字ずつキーイベントで送信する。

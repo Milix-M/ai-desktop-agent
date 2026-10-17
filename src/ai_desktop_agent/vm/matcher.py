@@ -70,8 +70,10 @@ def find_template(
         t_mean = t_sum / n
         denom = ((s_sq - n * s_mean * s_mean) * (t_sq - n * t_mean * t_mean)) ** 0.5
         if denom <= 0:
-            # 単色テンプレート等：平均差分で評価する
-            return max(0.0, 1.0 - (sad / n) / 255.0)
+            # 単色領域の比較：平均差分で評価する。除数は厳しめにし、
+            # 平坦な背景が文字テンプレート等に誤マッチしないようにする。
+            # 完全一致は 1.0 のまま（既存の単色照合テストを維持）。
+            return max(0.0, 1.0 - (sad / n) / 32.0)
         return max(-1.0, min(1.0, (cross - n * s_mean * t_mean) / denom))
 
     best: tuple[float, int, int] | None = None  # (score, cx, cy)

@@ -41,6 +41,8 @@ export default function TaskHistory({ items, selectedId, onSelect, onDelete }: P
               <span className="history-row">
                 <span className="history-meta">
                   {timeStr(item.updated_at)}
+                  {(item.decision_calls ?? 0) > 0 &&
+                    ` 決定${item.decision_calls}件・退避${item.decision_escalations ?? 0}件`}
                 </span>
               </span>
             </button>

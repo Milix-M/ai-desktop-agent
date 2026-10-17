@@ -9,6 +9,7 @@ region_select による2段階精密クリックをサポートする。
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -17,9 +18,19 @@ from collections.abc import Callable
 
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.agent.decision.provider import (
+    DecisionProvider,
+    create_decision_provider_from_env,
+)
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.factory import create_llm_provider
-from ai_desktop_agent.agent.llm.types import ActionDecision, ErrorContext
+from ai_desktop_agent.agent.llm.types import (
+    ActionDecision,
+    ErrorContext,
+    RecoveryPlan,
+    RecoveryStrategy,
+    VerificationResult,
+)
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
@@ -72,10 +83,13 @@ ZOOM_MIN_SIZE = 50
 ZOOM_MAX_SIZE = 500
 MAX_ACTIONS_PER_TASK = 200  # 1タスクの上限（トークン燃費対策）
 MAX_EMPTY_COMPLETE_REFUSALS = 2  # 操作なし完了宣言の却下回数
+MAX_EMPTY_RETRIES = 5  # 空応答の決定再試行上限（一時不調の吸収用）
 RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
 SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
+#: Android-x86 スリープ復帰の長押し秒数（公式docは1秒以上を要求）
+ANDROID_WAKE_HOLD_SECONDS = 1.1
 
 # 画面を変える可能性のあるアクション（実行後に安定待ちする）
 VISUAL_ACTIONS: frozenset = frozenset(
@@ -107,10 +121,23 @@ class TaskSession:
         display: DisplayBackend | None = None,
         store: TaskStore | None = None,
         vm_id: str | None = None,
+        decision: DecisionProvider | None | str = "auto",
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
         self.llm = llm or create_llm_provider()
+        # 決定モデル（完了確認・回復方針のみ。次操作決めは対象外）。
+        # "auto"は環境変数DECISION_PROVIDERに従い、未設定ならNone（従来動作）。
+        if decision == "auto":
+            try:
+                decision = create_decision_provider_from_env()
+            except ValueError:
+                logger.exception("決定モデルの初期化に失敗したため無効化します")
+                decision = None
+        self.decision = decision
+        # 決定モデルの利用実績（コスト試算用）
+        self.decision_calls = 0
+        self.decision_escalations = 0
         if hasattr(self.llm, "session_id"):
             # 会話単位IDをLLMに引き渡す（OpenCode Go の x-opencode-session 用）。
             # タスク内では不変のため、生成直後の1回だけ設定する。
@@ -230,7 +257,7 @@ class TaskSession:
 
         try:
             # Phase 1: UNDERSTANDING
-            understanding = await self.llm.understand_instruction(goal)
+            understanding = await self.llm.understand_instruction(goal, platform=self._platform())
             goal.intent = understanding.intent
             goal.target_application = understanding.target_application
             goal.constraints = understanding.constraints
@@ -238,7 +265,7 @@ class TaskSession:
             await self._emit_state_change()
 
             # Phase 2: PLANNING
-            decomposition = await self.llm.decompose_task(goal, 0)
+            decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
             if not decomposition.subtasks:
                 self.loop.planning_failed()
                 await self._emit_error("タスクの分解に失敗しました")
@@ -307,6 +334,8 @@ class TaskSession:
             prompt_tokens=int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
             completion_tokens=int(getattr(self.llm, "total_completion_tokens", 0) or 0),
             llm_calls=int(getattr(self.llm, "call_count", 0) or 0),
+            decision_calls=int(getattr(self, "decision_calls", 0) or 0),
+            decision_escalations=int(getattr(self, "decision_escalations", 0) or 0),
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
@@ -514,14 +543,11 @@ class TaskSession:
         # 一時停止中は再開まで待つ（遷移エラーを防ぐ）
         await self._wait_if_paused()
 
-        # 状態遷移
-        if action.action_type == ActionType.SUBTASK_COMPLETE:
-            self.loop.action_executed()
-            self.loop.wait_complete()
-            self.loop.verify_subtask_done()
-        else:
-            self.loop.action_executed()
-            self.loop.wait_complete()
+        # 状態遷移。SUBTASK_COMPLETEもVERIFYINGで止める。
+        # 達成の画像検証は_verify_phase（_verify_subtask_phase）に委ねる。
+        # ここでverify_subtask_done()まで進めると検証が素通りになる。
+        self.loop.action_executed()
+        self.loop.wait_complete()
 
         await self._emit_action(action, success)
         await self._emit_state_change()
@@ -676,6 +702,7 @@ class TaskSession:
                 is_zoomed=True,
                 zoom_origin=(abs_origin_x, abs_origin_y),
                 zoom_scale=total_scale,
+                platform=self._platform(),
             )
             pending = zoom_decision
         else:
@@ -925,12 +952,47 @@ class TaskSession:
                 confidence=record.confidence,
                 reasoning=record.reasoning,
             )
-            result = await self.llm.verify_result(
-                decision,
-                subtask.expected_outcome,
-                screenshot=screenshot,
-                expected_outcome=subtask.expected_outcome,
-            )
+            result: VerificationResult | None = None
+            # 決定モデルを試す（処理順3番目の完了確認）。中間・失敗時はLLMに退避。
+            if self.decision is not None:
+                try:
+                    judged = await self.decision.verify_completion(
+                        expected_outcome=subtask.expected_outcome,
+                        evidence_text=record.reasoning,
+                        confidence_hint=record.confidence,
+                        image_bytes=screenshot.image_bytes,
+                    )
+                    self.decision_calls += 1
+                    if judged.success is not None:
+                        logger.info(
+                            "完了確認を決定モデルで判定: success=%s prob=%.2f grade=%s",
+                            judged.success,
+                            judged.prob,
+                            judged.grade,
+                        )
+                        result = VerificationResult(
+                            success=judged.success,
+                            reasoning=judged.reasoning,
+                            evidence=f"decision prob={judged.prob} grade={judged.grade}",
+                        )
+                    else:
+                        self.decision_escalations += 1
+                        logger.info(
+                            "完了確認が中間帯 (prob=%.2f grade=%s) のためLLMに再確認します",
+                            judged.prob,
+                            judged.grade,
+                        )
+                except Exception:
+                    self.decision_escalations += 1
+                    logger.exception("決定モデル判定に失敗、LLMに退避します")
+            if result is None:
+                result = await self.llm.verify_result(
+                    decision,
+                    subtask.expected_outcome,
+                    screenshot=screenshot,
+                    expected_outcome=subtask.expected_outcome,
+                    platform=self._platform(),
+                )
         except Exception:
             logger.exception("サブタスク検証中にエラー")
             self.loop.verify_failed()
@@ -1026,11 +1088,50 @@ class TaskSession:
                 self.loop.recover_retry()
                 return
 
-        plan = await self.llm.recover_from_error(
-            last_error,
-            self.loop.context.action_history,
-            subtask,
-        )
+        # 決定モデルを試す（処理順4番目の回復方針決定）。確信度不足・失敗時はLLMに退避。
+        plan: RecoveryPlan | None = None
+        if self.decision is not None:
+            try:
+                history_text = "\n".join(
+                    f"{r.action.action_type.value} {r.action.params} "
+                    f"{'OK' if r.success else 'NG:' + (r.error_message or '')}"
+                    for r in self.loop.context.action_history[-10:]
+                )
+                judged = await self.decision.choose_recovery(
+                    error_message=last_error.error_message,
+                    subtask_description=subtask.description,
+                    history_text=history_text,
+                    retry_count=last_error.retry_count,
+                )
+                self.decision_calls += 1
+                if not judged.escalate:
+                    logger.info(
+                        "回復方針を決定モデルで選択: %s prob=%.2f",
+                        judged.strategy,
+                        judged.prob,
+                    )
+                    plan = RecoveryPlan(
+                        strategy=RecoveryStrategy(judged.strategy),
+                        actions=[],
+                        reasoning=judged.reasoning,
+                        recoverable=judged.recoverable,
+                    )
+                else:
+                    self.decision_escalations += 1
+                    logger.info(
+                        "回復方針の確信度が不足 (prob=%.2f) のためLLMに退避します",
+                        judged.prob,
+                    )
+            except Exception:
+                self.decision_escalations += 1
+                logger.exception("回復方針の決定モデル判定に失敗、LLMに退避します")
+        if plan is None:
+            plan = await self.llm.recover_from_error(
+                last_error,
+                self.loop.context.action_history,
+                subtask,
+                platform=self._platform(),
+            )
 
         if plan.recoverable:
             self.loop.recover_retry()
@@ -1047,21 +1148,46 @@ class TaskSession:
         screenshot: Screenshot,
         error_context: ErrorContext | None = None,
     ) -> ActionDecision:
-        """LLM に次のアクションを決定させる（画面キャプチャ付き）。"""
-        return await self.llm.decide_next_action(
-            goal=self.loop.context.goal or Goal(description=""),
-            current_subtask=subtask,
-            action_history=self.loop.context.action_history,
-            screenshot=screenshot,
-            error_context=error_context,
-            ocr_text=self._last_ocr_text or None,
-        )
+        """LLM に次のアクションを決定させる（画面キャプチャ付き）。
+
+        空応答・JSON破損は通信路の一時不調として上限まで再試行する
+        （履歴を汚さないよう決定取得の内側で吸収する）。
+        アクション検証エラー（必須パラメータ不足など）は決定的なため即時送出する。
+        """
+        last_error: Exception | None = None
+        for attempt in range(MAX_EMPTY_RETRIES + 1):
+            try:
+                return await self.llm.decide_next_action(
+                    goal=self.loop.context.goal or Goal(description=""),
+                    current_subtask=subtask,
+                    action_history=self.loop.context.action_history,
+                    screenshot=screenshot,
+                    error_context=error_context,
+                    ocr_text=self._last_ocr_text or None,
+                    platform=self._platform(),
+                )
+            except ValueError as e:
+                retryable = isinstance(e, json.JSONDecodeError) or "応答が空" in str(e)
+                if not retryable or attempt >= MAX_EMPTY_RETRIES:
+                    raise
+                last_error = e
+                logger.warning(
+                    "決定応答の不備のため再試行します (%d/%d): %s",
+                    attempt + 1,
+                    MAX_EMPTY_RETRIES,
+                    str(e)[:80],
+                )
+                await asyncio.sleep(2.0 * (attempt + 1))
+        raise last_error or ValueError("応答が空です")
 
     async def _capture_screenshot(self) -> Screenshot:
         """現在のVM画面をキャプチャする（オーバーレイ付き）。
 
-        DPMS 等で画面が真っ黒の場合は Shift キーで起こしてから
-        取り直す（最大1回）。ついでに生画像のOCRテキストを保持する。
+        DPMS 等で画面が真っ黒の場合は起こしてから取り直す（最大1回）。
+        Linux系は Shift で復帰するが、Android-x86 は Shift では復帰せず
+        ESC / Menu の1秒超ホールドが必要（公式doc準拠）のため、
+        Android端末（vm_id が ``android`` / ``and-*``）では専用シーケンスを使う。
+        ついでに生画像のOCRテキストを保持する。
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
@@ -1069,7 +1195,10 @@ class TaskSession:
         if _is_black_screen(screenshot):
             logger.info("画面が真っ黒のためウェイクアップして再取得します")
             try:
-                self.display.key_press("shift")
+                if self._is_android_vm():
+                    await self._wake_android_display()
+                else:
+                    self.display.key_press("shift")
             except Exception:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
@@ -1081,6 +1210,61 @@ class TaskSession:
         except Exception:
             logger.debug("OCRテキスト取得に失敗", exc_info=True)
         return screenshot
+
+    def _is_android_vm(self) -> bool:
+        """操作対象がAndroid端末かどうか（ウェイク方式の切替用）。"""
+        vm_id = self.vm_id or ""
+        return vm_id == "android" or vm_id.startswith("and-")
+
+    def _platform(self) -> str:
+        """LLMプロンプト切替用のプラットフォーム名（android/linux）。"""
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            PLATFORM_ANDROID,
+            PLATFORM_LINUX,
+        )
+
+        return PLATFORM_ANDROID if self._is_android_vm() else PLATFORM_LINUX
+
+    async def _wake_android_display(self) -> None:
+        """Android-x86用スリープ復帰シーケンスを送る。
+
+        DisplayBackend が ``wake_android()`` を持てばそれを使い、
+        なければ ESC / Menu の長押し＋中央タップで代用する。
+        """
+        wake = getattr(self.display, "wake_android", None)
+        if callable(wake):
+            try:
+                wake()
+                return
+            except Exception:
+                logger.debug("wake_android() に失敗、フォールバックする", exc_info=True)
+        # フォールバック（wake_android 未実装バックエンド用）
+        try:
+            self.display.key_down("escape")
+            await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
+            self.display.key_up("escape")
+            await asyncio.sleep(0.3)
+            self.display.key_down("menu")
+            await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
+            self.display.key_up("menu")
+            await asyncio.sleep(0.3)
+        except Exception:
+            logger.debug("Androidウェイクキー送信に失敗", exc_info=True)
+            return
+        try:
+            width = (
+                getattr(self.display, "_screen_width", None)
+                or getattr(self.display, "_width", None)
+                or 1024
+            )
+            height = (
+                getattr(self.display, "_screen_height", None)
+                or getattr(self.display, "_height", None)
+                or 768
+            )
+            self.display.mouse_click(int(width // 2), int(height // 2))
+        except Exception:
+            logger.debug("Androidウェイクタップに失敗", exc_info=True)
 
     # ── 制御 ────────────────────────────────────
 

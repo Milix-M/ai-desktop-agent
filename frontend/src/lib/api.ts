@@ -71,6 +71,18 @@ export async function deleteVm(vmId: string): Promise<{ status: string }> {
   return resp.json();
 }
 
+export async function stopVm(vmId: string): Promise<VmInfo> {
+  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}/stop`, { method: "POST" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function startVm(vmId: string): Promise<VmInfo> {
+  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}/start`, { method: "POST" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
 export async function getVmStatus(): Promise<VmStatus> {
   const resp = await fetch(`${BACKEND_URL}/vm/status`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

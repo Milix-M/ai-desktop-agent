@@ -359,6 +359,10 @@ class TestDockerCompose:
         assert depends_on["desktop"].get("condition") == "service_healthy", (
             "backend は desktop の healthcheck 通過を待つ必要があります"
         )
+        # KVMあり時は desktop が起動対象外のため、依存解決で巻き添え起動しない
+        assert depends_on["desktop"].get("required") is False, (
+            "backend の desktop 依存は required:false である必要があります"
+        )
         # vm は kvm プロファイル配下のため backend の depends_on に含めない
         assert "vm" not in depends_on, "backend は profile 付きの vm に依存してはいけません"
 
@@ -432,8 +436,11 @@ class TestDockerCompose:
             "websockify サービスは kvm プロファイルに属する必要があります"
         )
         desktop_profiles = data["services"]["desktop"].get("profiles") or []
+        assert "container" in desktop_profiles, (
+            "desktop サービスは container プロファイルに属する必要があります"
+        )
         assert "kvm" not in desktop_profiles, (
-            "desktop サービスは常時起動（プロファイルなし）であるべき"
+            "desktop サービスは kvm プロファイルに属してはいけません"
         )
 
     def test_websockify_command(self):
@@ -539,7 +546,19 @@ class TestDesktopCompose:
     def test_backend_default_vnc_is_desktop(self):
         backend = self._compose_data()["services"]["backend"]
         env = backend.get("environment", [])
-        assert "VNC_HOST=desktop" in env
+        assert any(str(e).startswith("VNC_HOST=") and "desktop" in str(e) for e in env), (
+            "backend の VNC_HOST の既定は desktop であるべき（up.sh がKVM時は vm に切替）"
+        )
+
+    def test_desktop_behind_container_profile(self):
+        """desktop 系は container プロファイル配下（KVMあり時は起動しない）。"""
+        data = self._compose_data()
+        assert "container" in (data["services"]["desktop"].get("profiles") or []), (
+            "desktop サービスは container プロファイルに属する必要があります"
+        )
+        assert "container" in (data["services"]["websockify-desktop"].get("profiles") or []), (
+            "websockify-desktop は container プロファイルに属する必要があります"
+        )
 
 
 class TestUpScript:
@@ -560,3 +579,308 @@ class TestUpScript:
         content = (PROJECT_ROOT / "scripts" / "up.sh").read_text()
         assert "/dev/kvm" in content
         assert "--profile kvm" in content
+        assert "--profile container" in content
+
+    def test_switches_vnc_host(self):
+        """backend の接続先を起動環境に合わせて切り替える。"""
+        content = (PROJECT_ROOT / "scripts" / "up.sh").read_text()
+        assert "VNC_HOST=vm" in content, "KVMあり時は backend を vm に向ける必要があります"
+        assert "VNC_HOST=desktop" in content, (
+            "KVMなし時は backend を desktop に向ける必要があります"
+        )
+
+    def test_starts_single_environment_only(self):
+        """初期起動の作業環境は1つのみ（KVMあり=vm、なし=desktop）。"""
+        lines = (PROJECT_ROOT / "scripts" / "up.sh").read_text().splitlines()
+        up_lines = [ln.strip() for ln in lines if "docker compose" in ln and " up " in ln]
+        assert len(up_lines) == 2, f"起動経路はKVMあり/なしの2つであるべき（実際: {up_lines}）"
+        kvm_line = next(ln for ln in up_lines if "--profile kvm" in ln)
+        container_line = next(ln for ln in up_lines if "--profile container" in ln)
+        kvm_services = kvm_line.split(" up ", 1)[1].split()
+        container_services = container_line.split(" up ", 1)[1].split()
+        assert "vm" in kvm_services, "KVMあり時は vm を起動する必要があります"
+        for svc in ("desktop", "android", "websockify-desktop", "websockify-android"):
+            assert svc not in kvm_services, f"KVMあり時に {svc} を起動してはいけません（単一起動）"
+        assert "desktop" in container_services, "KVMなし時は desktop を起動する必要があります"
+        for svc in ("vm", "android", "websockify", "websockify-android"):
+            assert svc not in container_services, (
+                f"KVMなし時に {svc} を起動してはいけません（単一起動）"
+            )
+
+
+class TestAndroidCompose:
+    """android サービス（Android-x86 on QEMU）の compose 定義を検証する。"""
+
+    @staticmethod
+    def _compose_data():
+        import yaml
+
+        return yaml.safe_load((PROJECT_ROOT / "docker-compose.yml").read_text())
+
+    def test_android_behind_kvm_profile(self):
+        data = self._compose_data()
+        android = data["services"]["android"]
+        assert "kvm" in (android.get("profiles") or []), (
+            "android サービスは kvm プロファイルに属する必要があります"
+        )
+        ws = data["services"]["websockify-android"]
+        assert "kvm" in (ws.get("profiles") or []), (
+            "websockify-android は kvm プロファイルに属する必要があります"
+        )
+
+    def test_android_build_and_devices(self):
+        android = self._compose_data()["services"]["android"]
+        build = android.get("build", {})
+        assert build.get("context") == "./android"
+        devices = android.get("devices", [])
+        assert any("/dev/kvm" in str(d) for d in devices), (
+            "android サービスは /dev/kvm をマウントする必要があります"
+        )
+
+    def test_android_iso_volume(self):
+        android = self._compose_data()["services"]["android"]
+        volumes = android.get("volumes", [])
+        assert any("boot.iso" in str(v) for v in volumes), (
+            "android はISOを /android/boot.iso にマウントする必要があります"
+        )
+
+    def test_android_data_volume(self):
+        android = self._compose_data()["services"]["android"]
+        volumes = android.get("volumes", [])
+        assert any("android-data.img" in str(v) for v in volumes), (
+            "永続dataイメージのvolumeマウントが必要です"
+        )
+
+    def test_android_apks_volume(self):
+        android = self._compose_data()["services"]["android"]
+        volumes = android.get("volumes", [])
+        assert any("android/apks" in str(v) for v in volumes), (
+            "APK持ち込みディレクトリのvolumeマウントが必要です"
+        )
+
+    def test_android_ports(self):
+        android = self._compose_data()["services"]["android"]
+        assert "5590:5900" in android.get("ports", [])
+        ws = self._compose_data()["services"]["websockify-android"]
+        assert "6070" in str(ws.get("ports", ""))
+
+
+class TestAndroidScripts:
+    """android関連スクリプトの検証。"""
+
+    def test_mk_data_exists_and_executable(self):
+        path = PROJECT_ROOT / "scripts" / "mk-android-data.sh"
+        assert path.is_file(), "scripts/mk-android-data.sh が存在しません"
+        assert path.stat().st_mode & 0o111, "mk-android-data.sh に実行権限が必要です"
+
+    def test_mk_data_syntax(self):
+        path = PROJECT_ROOT / "scripts" / "mk-android-data.sh"
+        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_mk_data_creates_ext4(self):
+        content = (PROJECT_ROOT / "scripts" / "mk-android-data.sh").read_text()
+        assert "mkfs.ext4" in content
+        assert "android-data.img" in content
+
+    def test_data_img_gitignored(self):
+        content = (PROJECT_ROOT / ".gitignore").read_text()
+        assert "android-data.img" in content
+
+    def test_fetch_apks_script(self):
+        path = PROJECT_ROOT / "scripts" / "fetch-apks.sh"
+        assert path.is_file(), "scripts/fetch-apks.sh が存在しません"
+        assert path.stat().st_mode & 0o111, "fetch-apks.sh に実行権限が必要です"
+        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert "F-Droid.apk" in path.read_text()
+
+    def test_apks_gitignored(self):
+        content = (PROJECT_ROOT / ".gitignore").read_text()
+        assert "android/apks/*.apk" in content
+
+
+class TestAndroidDockerfile:
+    """android/Dockerfile の検証（QEMU方式・Redroid禁止）。"""
+
+    ANDROID_DIR = PROJECT_ROOT / "android"
+
+    def test_exists(self):
+        assert (self.ANDROID_DIR / "Dockerfile").is_file()
+        assert (self.ANDROID_DIR / "entrypoint.sh").is_file()
+
+    def test_installs_qemu_not_redroid(self):
+        content = (self.ANDROID_DIR / "Dockerfile").read_text()
+        assert "qemu-system-x86" in content
+        assert "redroid" not in content.lower()
+
+    def test_no_adb_in_image(self):
+        """adbクライアントはandroidイメージに含めない（backend側に同梱。transportはhostfwd）。"""
+        content = (self.ANDROID_DIR / "Dockerfile").read_text()
+        assert "android-tools-adb" not in content
+        assert "keep-awake" not in content
+
+    def test_default_memory_2048(self):
+        """既定メモリは2GB（4GBではカーネル直起動が停滞する実測あり）。"""
+        dockerfile = (self.ANDROID_DIR / "Dockerfile").read_text()
+        assert "ANDROID_MEMORY=2048" in dockerfile
+        entrypoint = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert 'ANDROID_MEMORY="${ANDROID_MEMORY:-2048}"' in entrypoint
+
+    def test_no_iso_copy(self):
+        content = (self.ANDROID_DIR / "Dockerfile").read_text()
+        assert not re.search(r"^COPY\s+.*\.iso", content, re.MULTILINE), (
+            "ISOはvolumeマウントし、COPYしてはいけません"
+        )
+
+    def test_entrypoint_boots_iso(self):
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert "-cdrom" in content
+        assert "-vnc" in content
+        assert "-enable-kvm" in content
+
+    def test_entrypoint_uses_official_cmdline(self):
+        """isolinux.cfgのnosetupエントリと同一のパラメータを使うこと。
+
+        androidboot.hardware=android_x86 を付与すると起動ロゴで停止する
+        実測があるため、回帰防止として禁止する（コメント言及は可）。
+        既定APPENDは公式と同一にすること（4GB停滞の切り分け時に
+        cmdline差分を疑わないため）。SETUPWIZARD=0 はウィザードを
+        無人スキップしてホーム画面から起動する（nosetupと同一）。
+        ADB_TCP= はseedなし/VNCなしのADB到達用に追加のみ許可する。
+        """
+        content = _read_cmdline(self.ANDROID_DIR / "entrypoint.sh")
+        assert "root=/dev/ram0" in content
+        assert "SRC=" in content
+        assert "SETUPWIZARD=0" in content, "ウィザード無人スキップが必要"
+        assert "androidboot.hardware" not in content, (
+            "androidboot.hardware付与は起動ロゴ停止の原因のため禁止"
+        )
+        # 公式nosetup基底 + ADB_TCP/VIRT_WIFI追加のみ許可（順序不問・DATA=vda変種含む）
+        assert "root=/dev/ram0 quiet SRC= DATA=" in content, "既定APPENDは公式nosetup基底を保つこと"
+        assert "ADB_TCP=" in content, "seedなし/VNCなしのADB到達用にADB_TCPが必要"
+        assert "VIRT_WIFI=" in content, "Ethernet既定(VIRT_WIFI=0)が必要"
+        assert "DATA=vda" in content, "永続data disk時はDATA=vdaにすること"
+
+    def test_entrypoint_syntax(self):
+        path = self.ANDROID_DIR / "entrypoint.sh"
+        assert path.stat().st_mode & 0o111
+        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_entrypoint_has_adb_forward(self):
+        """ADB転送は強制経路のtransportとして既定ON（到達時のみ有効）。
+        ゲストadbd不在でも起動は継続する。無効化は ANDROID_ADB_FORWARD=0。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert "hostfwd=tcp:" in content
+        assert "-:5555" in content
+        # backend別コンテナから届くよう 0.0.0.0 bind必須（127.0.0.1はloのみで不通）
+        assert "hostfwd=tcp:0.0.0.0:" in content, "ADB転送は0.0.0.0 bindであること"
+        assert "hostfwd=tcp:127.0.0.1:" not in content, "127.0.0.1 bindではbackend不通"
+        assert 'ANDROID_ADB_FORWARD="${ANDROID_ADB_FORWARD:-1}"' in content
+        assert 'ANDROID_ADB_PORT="${ANDROID_ADB_PORT:-5555}"' in content
+        assert "${NETDEV_OPTS[@]}" in content
+        assert "keep-awake" not in content
+
+    def test_entrypoint_persistent_data(self):
+        """永続data disk配線（DATA=vda＋virtioドライブ）。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert "ANDROID_DATA_IMG" in content
+        assert "DATA=vda" in content
+        assert "if=virtio" in content
+        # ISOフォールバック時は未使用・カーネル直起動時のみ有効
+        assert "${DATA_DRIVE[@]}" in content
+
+    def test_entrypoint_seeds_data(self):
+        """data.img不在時は空作成で自動生成する（初回ゼロタッチ）。
+        設定内容は backend の機械的プロビジョニングが投入する。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert "mkfs.ext4" in content
+        # volumeの空ディレクトリ化に対する救済
+        assert "data-local.img" in content
+
+    def test_entrypoint_nic_knob(self):
+        """NICモデル切替（既定virtio-net）。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert 'ANDROID_NIC="${ANDROID_NIC:-virtio-net}"' in content
+        assert '"$ANDROID_NIC",netdev=net0' in content
+
+    def test_entrypoint_usb_apks(self):
+        """APK持ち込み配線（FATイメージ化＋usb-storage）。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert "ANDROID_APKS_DIR" in content
+        assert "mkfs.vfat" in content
+        assert "mcopy" in content
+        assert "usb-storage" in content
+        assert "${USB_DRIVE[@]}" in content
+
+    def test_entrypoint_adb_tcp_append(self):
+        """seedなし/VNCなしのADB到達用に ADB_TCP=1 を -append で渡す。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert 'ANDROID_ADB_TCP="${ANDROID_ADB_TCP:-1}"' in content
+        assert "ADB_TCP=$ANDROID_ADB_TCP" in content
+
+    def test_entrypoint_virt_wifi_default_ethernet(self):
+        """VIRT_WIFI既定0でeth0のまま残しEthernet DHCPでIP取得する。"""
+        content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
+        assert 'ANDROID_VIRT_WIFI="${ANDROID_VIRT_WIFI:-0}"' in content
+        assert "VIRT_WIFI=$ANDROID_VIRT_WIFI" in content
+
+    def test_patch_script_exists(self):
+        """initrdパッチスクリプト（同梱なし/VNCなし用）が存在する。"""
+        path = PROJECT_ROOT / "scripts" / "patch-android-initrd.py"
+        assert path.is_file()
+        assert path.stat().st_mode & 0o111 or True
+        result = subprocess.run(
+            ["bash", "-n", str(PROJECT_ROOT / "android" / "entrypoint.sh")],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        content = path.read_text()
+        assert "service.adb.tcp.port" in content
+        assert "ro.adb.secure" in content
+        assert "set-home-activity" in content, "Home選択ダイアログの自動確定が必要"
+        assert "home_setup" in content, "boot時リトライ型serviceが必要"
+        assert "data/home-setup.sh" in content, "引用符問題回避のscriptファイル化が必要"
+        assert "home-hook.log" in content, "Homeフックの証跡が必要"
+        assert "initrd-patch-default.prop" in content, "適用証跡が必要"
+
+    def test_initrd_patched(self):
+        """android/initrd.img に ADB_TCP+Home パッチが当たっている（存在時のみ）。"""
+        initrd = PROJECT_ROOT / "android" / "initrd.img"
+        if not initrd.is_file():
+            return
+        import gzip
+
+        with gzip.open(initrd, "rb") as f:
+            data = f.read()
+        # cpio newc から init を取り出す
+        off = 0
+        found = False
+        while off + 110 <= len(data):
+            if data[off : off + 6] not in (b"070701", b"070702"):
+                break
+            namesize = int(data[off + 6 + 11 * 8 : off + 6 + 12 * 8], 16)
+            filesize = int(data[off + 6 + 6 * 8 : off + 6 + 7 * 8], 16)
+            name = data[off + 110 : off + 110 + namesize - 1].decode()
+            hl = 110 + namesize
+            pad = (4 - (hl % 4)) % 4
+            doff = off + hl + pad
+            if name == "init":
+                found = True
+                text = data[doff : doff + filesize].decode()
+                assert "ADB_TCP" in text, "initrdにADB_TCPパッチが必要"
+                assert "service.adb.tcp.port=5555" in text
+                assert "set-home-activity" in text, "Home自動確定パッチが必要"
+                break
+            if name == "TRAILER!!!":
+                break
+            off = doff + filesize
+            off += (4 - (filesize % 4)) % 4 if filesize else 0
+        assert found, "initrd内にinitが見つからない"
+
+    def test_apks_docker_deps(self):
+        content = (self.ANDROID_DIR / "Dockerfile").read_text()
+        assert "dosfstools" in content
+        assert "mtools" in content

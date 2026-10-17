@@ -63,3 +63,59 @@ def extract_text(image_bytes: bytes, *, lang: str = "eng", max_chars: int = 2000
 def is_available() -> bool:
     """OCRが利用可能かどうか。"""
     return _available()
+
+
+def extract_words(image_bytes: bytes, *, lang: str = "eng", min_conf: float = 30.0) -> list[dict]:
+    """画像から単語ごとの座標付きテキストを抽出する。
+
+    機械的プロビジョニング用に、ボタン等のタップ位置を特定する。
+    PSM 6（等間隔ブロック）を使い、UIスクリーンショットでの検出率を上げる。
+    戻り値は ``{"text", "x", "y", "w", "h", "conf"}`` の列
+    （x, y は左上、中心は x+w//2, y+h//2）。失敗時は []。
+    """
+    words: list[dict] = []
+    try:
+        import pytesseract
+        from PIL import Image
+        from pytesseract import Output
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            data = pytesseract.image_to_data(
+                img.convert("L"), lang=lang, config="--psm 6", output_type=Output.DICT
+            )
+        n = len(data.get("text", []))
+        for i in range(n):
+            text = (data["text"][i] or "").strip()
+            if not text:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except (TypeError, ValueError):
+                continue
+            if conf < min_conf:
+                continue
+            try:
+                x, y, w, h = (
+                    int(data["left"][i]),
+                    int(data["top"][i]),
+                    int(data["width"][i]),
+                    int(data["height"][i]),
+                )
+            except (TypeError, ValueError):
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            words.append({"text": text, "x": x, "y": y, "w": w, "h": h, "conf": conf})
+    except Exception:
+        logger.debug("OCR単語抽出に失敗", exc_info=True)
+    return words
+
+
+def find_word(
+    image_bytes: bytes, word: str, *, lang: str = "eng", min_conf: float = 30.0
+) -> tuple[int, int] | None:
+    """指定語の中心座標を返す（大文字小文字を区別しない）。なければ None。"""
+    for w in extract_words(image_bytes, lang=lang, min_conf=min_conf):
+        if w["text"].lower() == word.lower():
+            return (w["x"] + w["w"] // 2, w["y"] + w["h"] // 2)
+    return None

@@ -383,6 +383,17 @@ class TestOpenAICompatProvider:
         with pytest.raises((_json.JSONDecodeError, ValueError)):
             provider._parse_json("これはJSONではありません")
 
+    def test_parse_json_array_raises_retryable(self, provider):
+        """オブジェクトを含まないトップレベル配列は再試行可能なJSONDecodeErrorになる。"""
+        import json as _json
+
+        with pytest.raises(_json.JSONDecodeError):
+            provider._parse_json("[1, 2, 3]")
+
+    def test_parse_json_object_in_array_is_rescued(self, provider):
+        """配列に包まれたオブジェクトは波括弧抽出で救済される。"""
+        assert provider._parse_json('[{"action_type": "wait"}]') == {"action_type": "wait"}
+
     # ── screenshot 除外（無駄ループ防止） ───────────────
 
     def test_schema_has_no_screenshot(self, provider):
@@ -427,6 +438,24 @@ class TestOpenAICompatProvider:
         await provider._call("prompt")
         kwargs = provider._client.chat.completions.create.call_args.kwargs
         assert "extra_headers" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_client_has_timeout(self):
+        """APIクライアントにタイムアウトが設定される（無限ハング防止）。"""
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI",
+            autospec=True,
+        ) as mock_client:
+            from ai_desktop_agent.agent.llm.openai_compat_provider import (
+                OpenAICompatProvider as P,
+            )
+
+            P(api_key="k")
+            _, kwargs = mock_client.call_args
+            assert kwargs.get("timeout") == 120.0
+            P(api_key="k", timeout=30.0)
+            _, kwargs = mock_client.call_args
+            assert kwargs.get("timeout") == 30.0
 
 
 # ── LLMProviderFactory ────────────────────────────────
@@ -676,3 +705,55 @@ class TestTokenUsage:
         provider._record_usage(MagicMock(usage=None))
         provider._record_usage(object())
         assert provider.total_tokens == 0
+
+
+class TestEmptyRetry:
+    """空応答の一時不調吸収テスト。"""
+
+    @staticmethod
+    def _resp(content: str):
+        from unittest.mock import MagicMock
+
+        choice = MagicMock()
+        choice.message.content = content
+        return MagicMock(choices=[choice])
+
+    @pytest.mark.asyncio
+    async def test_empty_then_success(self):
+        """2回空応答の後に正常応答が来れば決定が返る。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        with patch("openai.AsyncOpenAI", autospec=True):
+            provider = OpenAICompatProvider(api_key="k")
+        provider._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                self._resp(""),
+                self._resp(""),
+                self._resp(
+                    '{"action_type": "wait", "params": {"seconds": 1.0}, '
+                    '"expected_effect": "wait", "confidence": 1.0, "reasoning": "ok"}'
+                ),
+            ]
+        )
+        data = await provider._call("prompt")
+        assert data["action_type"] == "wait"
+        assert provider._client.chat.completions.create.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_persistent_empty_raises(self):
+        """空応答が続くと上限で打ち切る。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ai_desktop_agent.agent.llm.openai_compat_provider import (
+            OpenAICompatProvider,
+        )
+
+        with patch("openai.AsyncOpenAI", autospec=True):
+            provider = OpenAICompatProvider(api_key="k")
+        provider._client.chat.completions.create = AsyncMock(return_value=self._resp(""))
+        with pytest.raises(ValueError, match="空応答"):
+            await provider._call("prompt")

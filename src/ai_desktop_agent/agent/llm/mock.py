@@ -50,7 +50,9 @@ class MockLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def understand_instruction(self, goal: Goal) -> UnderstandingResult:
+    async def understand_instruction(
+        self, goal: Goal, platform: str = "linux"
+    ) -> UnderstandingResult:
         if self._understand_result:
             return self._understand_result
         return UnderstandingResult(
@@ -60,7 +62,9 @@ class MockLLMProvider(LLMProvider):
             reasoning="mock",
         )
 
-    async def decompose_task(self, goal: Goal, subtask_count: int) -> DecompositionResult:
+    async def decompose_task(
+        self, goal: Goal, subtask_count: int, platform: str = "linux"
+    ) -> DecompositionResult:
         if self._decompose_result:
             return self._decompose_result
         return DecompositionResult(
@@ -80,6 +84,7 @@ class MockLLMProvider(LLMProvider):
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
         ocr_text: str | None = None,
+        platform: str = "linux",
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))
         if self._decide_result:
@@ -97,6 +102,7 @@ class MockLLMProvider(LLMProvider):
         expected_effect: str,
         screenshot: Screenshot | None = None,
         expected_outcome: str | None = None,
+        platform: str = "linux",
     ) -> VerificationResult:
         if self._verify_result:
             return self._verify_result
@@ -111,6 +117,7 @@ class MockLLMProvider(LLMProvider):
         error: ErrorContext,
         action_history: list[ActionRecord],
         subtask: Subtask,
+        platform: str = "linux",
     ) -> RecoveryPlan:
         if self._recover_result:
             return self._recover_result
