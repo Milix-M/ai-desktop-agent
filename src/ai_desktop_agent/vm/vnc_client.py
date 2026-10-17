@@ -90,39 +90,50 @@ def _ensure_vncdotool_keymap() -> None:
     KEYMAP.setdefault("print_screen", 0xFF61)
     # X11 XK_Menu (0xFF67)。Android-x86 のスリープ復帰・キーガード解除用。
     KEYMAP.setdefault("menu", 0xFF67)
+    # シフト文字の直接keysym。Shift修飾はVNC経路で外れる実測があるため、
+    # 修飾なしで文字自体を送る（X11は印字可能keysymを直接文字化する）。
 
 
 _ensure_vncdotool_keymap()
 
 
-# USキーボードの Shift 合成表: シフト文字 → 素キー
-# QEMU の VNC サーバは Shift 状態を復元しないため明示的に合成する。
-_SHIFT_PAIRS: dict[str, str] = {
-    "~": "`",
-    "!": "1",
-    "@": "2",
-    "#": "3",
-    "$": "4",
-    "%": "5",
-    "^": "6",
-    "&": "7",
-    "*": "8",
-    "(": "9",
-    ")": "0",
-    "_": "-",
-    "+": "=",
-    "{": "[",
-    "}": "]",
-    "|": "\\",
-    ":": ";",
-    '"': "'",
-    "<": ",",
-    ">": ".",
-    "?": "/",
+# USキーボードのシフト文字 → 直接送信用のX11 keysym名と値。
+# Shift修飾はVNC経路（TigerVNC・QEMU）で外れる実測があるため、
+# 修飾キーを使わず文字自体のkeysymを keyPress 1回で送る。
+_SHIFT_KEYSYMS: dict[str, tuple[str, int]] = {
+    "~": ("asciitilde", 0x7E),
+    "!": ("exclam", 0x21),
+    "@": ("at", 0x40),
+    "#": ("numbersign", 0x23),
+    "$": ("dollar", 0x24),
+    "%": ("percent", 0x25),
+    "^": ("asciicircum", 0x5E),
+    "&": ("ampersand", 0x26),
+    "*": ("asterisk", 0x2A),
+    "(": ("parenleft", 0x28),
+    ")": ("parenright", 0x29),
+    "_": ("underscore", 0x5F),
+    "+": ("plus", 0x2B),
+    "{": ("braceleft", 0x7B),
+    "}": ("braceright", 0x7D),
+    "|": ("bar", 0x7C),
+    ":": ("colon", 0x3A),
+    '"': ("quotedbl", 0x22),
+    "<": ("less", 0x3C),
+    ">": ("greater", 0x3E),
+    "?": ("question", 0x3F),
 }
 # 注意: 大文字 A-Z はここに入れないこと。QEMU が keysym から
 # 直接大文字を復元するため、素通し keyPress で正しく届く。
 # 手動 Shift 合成すると逆に小文字化する（実測）。
+
+# _SHIFT_KEYSYMSのkeysym名を登録する（定義の直後）。
+try:
+    from vncdotool.client import KEYMAP as _KM2
+except ImportError:
+    _KM2 = {}  # type: ignore[assignment]
+for _name, _keysym in _SHIFT_KEYSYMS.values():
+    _KM2.setdefault(_name, _keysym)
 
 
 class VNCClient(DisplayBackend):
@@ -450,8 +461,9 @@ class VNCClient(DisplayBackend):
         注意: vncdotool の paste() はクリップボード経由だが、QEMU 標準の
         VNC サーバは ClientCutText をゲストに注入しないため無視される。
         そのため ASCII 文字は keyPress で1文字ずつ送る。
-        さらに QEMU は Shift 合成を復元しないため、`>` や `"` 等の
-        Shift 文字は Shift押下＋素キーの2段階で送る。
+        さらに Shift が必要な `>` や `"` 等は、Shift修飾を使わず
+        文字自体のX11 keysymを keyPress 1回で送る（Shift修飾は
+        VNC経路で外れる実測があるため）。
         非ASCII文字は QEMU が変換できない場合があり、その場合は送らない。
         """
         self._ensure_connected()
@@ -463,11 +475,11 @@ class VNCClient(DisplayBackend):
             elif ch == "\t":
                 self.key_press("tab")
                 sent += 1
-            elif ch in _SHIFT_PAIRS:
-                self.key_down("shift")
-                self._client.keyPress(_SHIFT_PAIRS[ch])
-                self.key_up("shift")
-                time.sleep(0.01)
+            elif ch in _SHIFT_KEYSYMS:
+                # keyPress 1回で文字自体のkeysymを送る（Shift修飾なし）。
+                name, _keysym = _SHIFT_KEYSYMS[ch]
+                self._client.keyPress(name)
+                time.sleep(0.02)
                 sent += 1
             elif ch.isascii() and ch.isprintable():
                 self._client.keyPress(ch)

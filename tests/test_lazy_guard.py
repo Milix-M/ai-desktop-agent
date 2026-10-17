@@ -258,7 +258,7 @@ class TestExceptionMarksFailed:
 
 
 class TestTypeTextShift:
-    """type_text の Shift 合成テスト（QEMU 実測ルール）。"""
+    """type_text のシフト文字テスト（TigerVNC実測ルール）。"""
 
     @staticmethod
     def _client_with_recorder():
@@ -281,25 +281,24 @@ class TestTypeTextShift:
         c._connected = True
         return c, calls
 
-    def test_shift_punctuation_uses_shift_composition(self):
-        from ai_desktop_agent.vm.vnc_client import _SHIFT_PAIRS
+    def test_shift_punctuation_uses_direct_keysyms(self):
+        from ai_desktop_agent.vm.vnc_client import _SHIFT_KEYSYMS
 
-        assert _SHIFT_PAIRS[">"] == "."
-        assert _SHIFT_PAIRS['"'] == "'"
-        assert _SHIFT_PAIRS["?"] == "/"
-        # 大文字は素通し（QEMU が直接復元する）
-        assert "A" not in _SHIFT_PAIRS
-        assert "Z" not in _SHIFT_PAIRS
+        assert _SHIFT_KEYSYMS[">"] == ("greater", 0x3E)
+        assert _SHIFT_KEYSYMS['"'] == ("quotedbl", 0x22)
+        assert _SHIFT_KEYSYMS["?"] == ("question", 0x3F)
+        assert _SHIFT_KEYSYMS["~"] == ("asciitilde", 0x7E)
+        # 大文字は素通し（keysym から直接復元する）
+        assert "A" not in _SHIFT_KEYSYMS
+        assert "Z" not in _SHIFT_KEYSYMS
 
     def test_type_text_sequence(self):
         c, calls = self._client_with_recorder()
         c.type_text("A>")
-        # A は直接、> は Shift 合成
+        # A は直接、> は修飾なしのkeysym名で1回送信し、Shiftは使わない
         assert ("press", "A") in calls
-        assert ("down", "shift") in calls
-        assert ("press", ".") in calls
-        assert ("up", "shift") in calls
-        assert calls.count(("down", "shift")) == 1
+        assert ("press", "greater") in calls
+        assert all(k != "shift" for _op, k in calls)
 
     def test_type_text_newline_and_tab(self):
         c, calls = self._client_with_recorder()
