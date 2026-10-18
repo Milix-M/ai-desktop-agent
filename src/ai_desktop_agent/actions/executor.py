@@ -124,8 +124,8 @@ class ActionExecutor:
         オーバーレイ（グリッド/カーソル十字）の影響を避けるため
         生画像で比較する。
         """
-        check_interval = 0.3
-        min_stable_frames = 3
+        check_interval = 0.2
+        min_stable_frames = 2
         stable_count = 0
         prev_hash = ""
         elapsed = 0.0

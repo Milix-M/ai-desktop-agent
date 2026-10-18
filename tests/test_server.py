@@ -211,3 +211,44 @@ class TestWasteReduction:
         out = await s._decide_action(sub, s.display.capture_screen())
         assert out.action.action_type == ActionType.WAIT
         assert s._consec_empty_decides == 0
+
+    async def test_wait_action_skips_post_sleep(self, monkeypatch):
+        import asyncio as _asyncio
+
+        from ai_desktop_agent.actions.primitives import Action, ActionType
+        from ai_desktop_agent.agent.llm.types import ActionDecision
+        from ai_desktop_agent.agent.state import Goal, Subtask
+
+        calls: list[float] = []
+        real_sleep = _asyncio.sleep
+
+        async def _rec(d):
+            calls.append(d)
+            await real_sleep(0)
+
+        monkeypatch.setattr(_asyncio, "sleep", _rec)
+        llm = MockLLMProvider(
+            decide_result=ActionDecision(
+                action=Action(action_type=ActionType.WAIT, params={"seconds": 0.1}),
+                expected_effect="e",
+                confidence=0.9,
+                reasoning="r",
+            )
+        )
+        s = self._session(llm)
+        s.loop.start(Goal(description="g"))
+        s.loop.understanding_done()
+        s.loop.plan_ready([Subtask(id="s1", description="d")])
+        await s._execute_phase()
+        assert 0.1 in calls  # executorの待機自体は残る
+        assert 0.5 not in calls  # 追加の据え置き待機はしない
+
+    async def test_still_wait_quick_on_stable(self):
+        import time as _time
+
+        from ai_desktop_agent.actions.executor import ActionExecutor
+
+        ex = ActionExecutor(FakeDisplayBackend())
+        t0 = _time.monotonic()
+        await ex.wait_for_still(5.0)
+        assert _time.monotonic() - t0 < 3.0

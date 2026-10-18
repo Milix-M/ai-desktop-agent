@@ -539,6 +539,9 @@ class TaskSession:
         # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
         if action.action_type in VISUAL_ACTIONS:
             await self.executor.wait_for_still(SETTLE_TIMEOUT)
+        elif action.action_type in (ActionType.WAIT, ActionType.MOUSE_MOVE):
+            # 待機自体が待機・移動は画面を変えないため追加待機なし
+            pass
         else:
             await asyncio.sleep(0.5)
 
@@ -1039,9 +1042,10 @@ class TaskSession:
 
         生画像のハッシュ比較で「無変化の空振り」を検出する。
         変化がなければ False を返して RECOVERING へ回す。
+        直前の安定待ちで画面は収束済みのため、短い再観測で足りる。
         """
         try:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
             before = self._last_before_raw
             capture_raw = getattr(self.display, "capture_raw", None)
             after = capture_raw() if callable(capture_raw) else await self._capture_screenshot()
