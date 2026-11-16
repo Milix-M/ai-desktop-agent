@@ -34,6 +34,7 @@ from ai_desktop_agent.agent.llm.types import (
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
+from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
@@ -169,6 +170,8 @@ class TaskSession:
 
         self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
+        self._resources_closed = False
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
         # サブタスクごとの空完了却下回数
@@ -187,6 +190,7 @@ class TaskSession:
         self._on_action: list[Callable] = []
         self._on_error: list[Callable] = []
         self._on_complete: list[Callable] = []
+        self._control_notifications: set[asyncio.Task] = set()
 
     def set_display(self, display: DisplayBackend) -> None:
         """操作対象の表示バックエンドを差し替える（VM指定用）。"""
@@ -255,9 +259,8 @@ class TaskSession:
         goal = Goal(description=instruction)
         self._instruction = instruction
         self.loop.start(goal)
-        await self._emit_state_change()
-
         try:
+            await self._emit_state_change()
             # Phase 1: UNDERSTANDING
             understanding = await self.llm.understand_instruction(goal, platform=self._platform())
             goal.intent = understanding.intent
@@ -321,6 +324,31 @@ class TaskSession:
             await self._emit_state_change()
             self._persist(success=False)
             return False
+
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the display and provider connections on every exit path."""
+        if self._resources_closed:
+            return
+        self._resources_closed = True
+        try:
+            await asyncio.to_thread(self.display.disconnect)
+        except Exception:
+            logger.exception("VNC接続の解放に失敗")
+        for provider in (self.llm, self.decision):
+            close = getattr(provider, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.exception("プロバイダ接続の解放に失敗")
+
+    def _ensure_closed(self, task: asyncio.Task) -> None:
+        # Cancellation before run() starts never enters its finally block.
+        if not self._resources_closed:
+            self._cleanup_task = asyncio.create_task(self.aclose())
 
     # ── 永続化 ────────────────────────────────────
 
@@ -524,13 +552,16 @@ class TaskSession:
         # 検証用に実行直前の生画像を保持（オーバーレイの影響を除外）
         try:
             capture_raw = getattr(self.display, "capture_raw", None)
-            self._last_before_raw = capture_raw() if callable(capture_raw) else None
+            self._last_before_raw = (
+                await run_display_call(capture_raw) if callable(capture_raw) else None
+            )
         except Exception:
             self._last_before_raw = None
         success = await self.executor.execute(action)
         self.loop.record_action(
             action,
             success,
+            error=self.executor.last_error,
             reasoning=decision.reasoning,
             confidence=decision.confidence,
         )
@@ -593,7 +624,7 @@ class TaskSession:
 
         try:
             pool = VmPool()
-            info = pool.restart_vm(self.vm_id or "vm")
+            info = await run_vm_call(pool.restart_vm, self.vm_id or "vm")
             logger.info("VM作り直しを実行: %s (%s)", info.id, reason)
             await asyncio.sleep(RESTART_SETTLE_SECONDS)
             ok, error = True, ""
@@ -642,7 +673,7 @@ class TaskSession:
         """
         del depth  # 反復ループで深さを管理するため未使用
         try:
-            raw = self.display.capture_raw()
+            raw = await run_display_call(self.display.capture_raw)
         except Exception:
             logger.exception("拡大用の生画像取得に失敗")
             return None
@@ -1048,7 +1079,11 @@ class TaskSession:
             await asyncio.sleep(0.1)
             before = self._last_before_raw
             capture_raw = getattr(self.display, "capture_raw", None)
-            after = capture_raw() if callable(capture_raw) else await self._capture_screenshot()
+            after = (
+                await run_display_call(capture_raw)
+                if callable(capture_raw)
+                else await self._capture_screenshot()
+            )
             if before is None:
                 # 比較元がなければ成功扱い（従来動作）
                 return True
@@ -1203,18 +1238,18 @@ class TaskSession:
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
-        screenshot = self.display.capture_screen()
+        screenshot = await run_display_call(self.display.capture_screen)
         if _is_black_screen(screenshot):
             logger.info("画面が真っ黒のためウェイクアップして再取得します")
             try:
                 if self._is_android_vm():
                     await self._wake_android_display()
                 else:
-                    self.display.key_press("shift")
+                    await run_display_call(self.display.key_press, "shift")
             except Exception:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
-            screenshot = self.display.capture_screen()
+            screenshot = await run_display_call(self.display.capture_screen)
         return screenshot
 
     def _is_android_vm(self) -> bool:
@@ -1240,19 +1275,19 @@ class TaskSession:
         wake = getattr(self.display, "wake_android", None)
         if callable(wake):
             try:
-                wake()
+                await run_display_call(wake)
                 return
             except Exception:
                 logger.debug("wake_android() に失敗、フォールバックする", exc_info=True)
         # フォールバック（wake_android 未実装バックエンド用）
         try:
-            self.display.key_down("escape")
+            await run_display_call(self.display.key_down, "escape")
             await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            self.display.key_up("escape")
+            await run_display_call(self.display.key_up, "escape")
             await asyncio.sleep(0.3)
-            self.display.key_down("menu")
+            await run_display_call(self.display.key_down, "menu")
             await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            self.display.key_up("menu")
+            await run_display_call(self.display.key_up, "menu")
             await asyncio.sleep(0.3)
         except Exception:
             logger.debug("Androidウェイクキー送信に失敗", exc_info=True)
@@ -1268,7 +1303,7 @@ class TaskSession:
                 or getattr(self.display, "_height", None)
                 or 768
             )
-            self.display.mouse_click(int(width // 2), int(height // 2))
+            await run_display_call(self.display.mouse_click, int(width // 2), int(height // 2))
         except Exception:
             logger.debug("Androidウェイクタップに失敗", exc_info=True)
 
@@ -1279,17 +1314,35 @@ class TaskSession:
         if self._task and not self._task.done():
             raise RuntimeError("タスクは既に実行中です")
         self._task = asyncio.create_task(self.run(instruction))
+        self._task.add_done_callback(self._ensure_closed)
 
     def pause(self) -> None:
         if self.loop.state == AgentState.EXECUTING:
             self.loop.pause()
+            self._notify_control_change()
 
     def resume(self) -> None:
         if self.loop.state == AgentState.PAUSED:
             self.loop.resume()
+            self._notify_control_change()
+
+    def _notify_control_change(self) -> None:
+        # 制御は同期APIを保ち、待機中の実行ループに依存せず通知する。
+        self._persist()
+        task = asyncio.create_task(self._emit_state_change())
+        self._control_notifications.add(task)
+        task.add_done_callback(self._control_notification_done)
+
+    def _control_notification_done(self, task: asyncio.Task) -> None:
+        self._control_notifications.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("タスク制御の状態通知に失敗", exc_info=task.exception())
 
     def stop(self) -> None:
         if self._task and not self._task.done():
+            request_stop = getattr(self.display, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
             self._task.cancel()
 
     @property

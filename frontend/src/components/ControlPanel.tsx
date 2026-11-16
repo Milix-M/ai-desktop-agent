@@ -18,8 +18,7 @@ export default function ControlPanel({ onControl, state }: Props) {
   const isRunning = RUNNING_STATES.includes(state);
 
   return (
-    <div className="vm-subsection">
-      <h3>タスク操作</h3>
+    <div className="section">
       <div className="controls">
         <button
           disabled={state !== "executing"}

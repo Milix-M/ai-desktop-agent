@@ -140,10 +140,10 @@ class TestCreateRemove:
         overlay_run = client.containers.runs[0]
         assert overlay_run.get("entrypoint") == ["cp"]
         vm_run = client.containers.runs[1]
-        assert vm_run["ports"] == {"5900/tcp": 5910}
+        assert vm_run["ports"] == {"5900/tcp": ("127.0.0.1", 5910)}
         assert vm_run["labels"]["ai-desktop-agent.vm-id"].startswith("vm-")
         ws_run = client.containers.runs[2]
-        assert ws_run["ports"] == {"6080/tcp": 6090}
+        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
         # 一覧に出る
         assert pool.get_vm(info.id).id == info.id
 
@@ -484,7 +484,7 @@ class TestContainerProvisioning:
         assert desk_run["labels"]["ai-desktop-agent.kind"] == "container"
         assert desk_run["environment"]["VNC_GEOMETRY"] == "1280x800"
         ws_run = client.containers.runs[1]
-        assert ws_run["ports"] == {"6080/tcp": 6090}
+        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
         assert pool.get_vm(info.id).kind == "container"
 
     def test_create_invalid_kind(self, pool):
@@ -577,7 +577,7 @@ class TestAndroidProvisioning:
         run = client.containers.runs[0]
         assert run["image"] == "test-android-image:latest"
         assert run["devices"] == ["/dev/kvm:/dev/kvm"]
-        assert run["ports"] == {"5900/tcp": 5910, "5555/tcp": 5570}
+        assert run["ports"] == {"5900/tcp": ("127.0.0.1", 5910), "5555/tcp": ("127.0.0.1", 5570)}
         assert run["labels"]["ai-desktop-agent.kind"] == "android"
         assert run["environment"]["ANDROID_ISO"] == "/android/boot.iso"
         assert run["environment"]["ANDROID_MEMORY"] == "2048"
@@ -585,7 +585,7 @@ class TestAndroidProvisioning:
         assert run["environment"]["ANDROID_ADB_PORT"] == "5555"
         assert info.adb_port == 5570
         ws_run = client.containers.runs[1]
-        assert ws_run["ports"] == {"6080/tcp": 6090}
+        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
         assert pool.get_vm(info.id).kind == "android"
 
     def test_create_android_blocked_without_kvm(self, pool, iso, monkeypatch):

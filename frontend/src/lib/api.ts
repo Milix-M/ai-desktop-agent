@@ -26,10 +26,12 @@ export async function getCurrentTask(): Promise<TaskStatus> {
 }
 
 export async function controlTask(
-  action: "pause" | "resume" | "stop"
+  action: "pause" | "resume" | "stop",
+  vmId?: string | null
 ): Promise<{ status: string }> {
+  const query = vmId ? `?vm_id=${encodeURIComponent(vmId)}` : "";
   const resp = await fetch(
-    `${BACKEND_URL}/tasks/current/${action}`,
+    `${BACKEND_URL}/tasks/current/${action}${query}`,
     { method: "POST" }
   );
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

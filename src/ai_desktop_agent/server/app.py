@@ -9,11 +9,13 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from functools import wraps
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.server.vm_control import (
@@ -21,6 +23,7 @@ from ai_desktop_agent.server.vm_control import (
     get_vm_controller,
 )
 from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logging.basicConfig(level=logging.INFO)
@@ -91,17 +94,20 @@ app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(BrowserOriginMiddleware)
 
 # アクティブなセッション（後方互換：最新の1件）
 _active_session: TaskSession | None = None
 
 # 全セッション（複数VMの並列実行用）： session_id -> TaskSession
 _sessions: dict[str, TaskSession] = {}
+_task_start_lock = asyncio.Lock()
 
 # テスト用のセッションファクトリ。テストから差し替え可能。
 _create_session = _default_create_session  # type: ignore[var-annotated]
@@ -239,7 +245,18 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _serialize_task_submission(fn):
+    @wraps(fn)
+    async def submit(*args, **kwargs):
+        # Serialize handover only; already-started tasks on other VMs keep running.
+        async with _task_start_lock:
+            return await fn(*args, **kwargs)
+
+    return submit
+
+
 @app.post("/tasks", response_model=TaskStatus)
+@_serialize_task_submission
 async def create_task(req: CreateTaskRequest) -> TaskStatus:
     """新しいタスクを作成し、バックグラウンドで実行開始する。
 
@@ -247,16 +264,19 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     """
     global _active_session
 
-    vm = _resolve_vm(req.vm_id)
-    display = _connect_vm_display(vm)
+    vm = await run_vm_call(_resolve_vm, req.vm_id)
+    display = await run_display_call(_connect_vm_display, vm)
 
-    if _active_session and _active_session.is_running and _active_session.vm_id == vm.id:
-        _active_session.stop()
+    previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
+    for running in previous:
+        running.stop()
+    if previous:
+        await asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
 
-    session = _create_session()
+    session = await run_display_call(_create_session)
     session.vm_id = vm.id
     session.allow_vm_restart = req.allow_vm_restart
-    session.set_display(display)
+    await run_display_call(session.set_display, display)
 
     # 全 WebSocket 接続にセッション情報を付与して配送する
     _forward_registrations(session)
@@ -265,6 +285,8 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     _sessions[session.id] = session
 
     await session.start_async(req.instruction)
+    if session._task is not None:
+        session._task.add_done_callback(lambda _: _sessions.pop(session.id, None))
     return _make_status(session)
 
 
@@ -304,7 +326,7 @@ async def list_vms() -> list[VmInfoModel]:
     from fastapi import HTTPException
 
     try:
-        return [VmInfoModel(**v.to_dict()) for v in get_pool().list_vms()]
+        return [VmInfoModel(**v.to_dict()) for v in await run_vm_call(get_pool().list_vms)]
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -323,7 +345,7 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
     if kind not in ("qemu", "container", "android"):
         raise HTTPException(status_code=400, detail="kind は qemu/container/android のいずれか")
     try:
-        info = get_pool().create_vm(name=req.name, kind=kind)
+        info = await run_vm_call(get_pool().create_vm, name=req.name, kind=kind)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -346,7 +368,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
     _stop_sessions_for_vm(vm_id)
 
     try:
-        ok = get_pool().remove_vm(vm_id)
+        ok = await run_vm_call(get_pool().remove_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
@@ -364,7 +386,7 @@ async def stop_vm(vm_id: str) -> VmInfoModel:
     _stop_sessions_for_vm(vm_id)
 
     try:
-        info = get_pool().stop_vm(vm_id)
+        info = await run_vm_call(get_pool().stop_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
@@ -383,7 +405,7 @@ async def start_vm(vm_id: str) -> VmInfoModel:
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
     try:
-        info = get_pool().start_vm(vm_id)
+        info = await run_vm_call(get_pool().start_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -470,8 +492,15 @@ async def delete_task(task_id: str) -> dict[str, str]:
 
     global _active_session
 
-    if _active_session and _active_session.id == task_id:
-        _active_session.stop()
+    session = _sessions.get(task_id)
+    if session is None and _active_session and _active_session.id == task_id:
+        session = _active_session
+    if session is not None:
+        session.stop()
+        if session._task is not None:
+            await asyncio.gather(session._task, return_exceptions=True)
+        _sessions.pop(task_id, None)
+    if _active_session is session:
         _active_session = None
 
     if not get_store().delete(task_id):
@@ -479,26 +508,38 @@ async def delete_task(task_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+def _control_session(vm_id: str | None) -> TaskSession | None:
+    if vm_id is None:
+        return _active_session
+    return next(
+        (s for s in reversed(list(_sessions.values())) if s.vm_id == vm_id and s.is_running),
+        None,
+    )
+
+
 @app.post("/tasks/current/pause")
-async def pause_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.pause()
+async def pause_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.pause()
         return {"status": "paused"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/resume")
-async def resume_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.resume()
+async def resume_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.resume()
         return {"status": "resumed"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/stop")
-async def stop_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.stop()
+async def stop_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.stop()
         return {"status": "stopped"}
     return {"status": "no_session"}
 
@@ -512,7 +553,7 @@ async def vm_status() -> VmStatus:
     from fastapi import HTTPException
 
     try:
-        info = _get_vm_controller().status()
+        info = await run_vm_call(_get_vm_controller().status)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return VmStatus(
@@ -543,7 +584,7 @@ async def vm_restart() -> VmStatus:
         _active_session = None
 
     try:
-        info = _get_vm_controller().restart()
+        info = await run_vm_call(_get_vm_controller().restart)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:

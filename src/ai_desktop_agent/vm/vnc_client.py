@@ -7,6 +7,7 @@ vncdotool の ThreadedVNCClientProxy をラップして同期的に操作する�
 
 import io
 import logging
+import threading
 import time
 from typing import Any
 
@@ -152,6 +153,7 @@ class VNCClient(DisplayBackend):
     """
 
     def __init__(self) -> None:
+        self._stop_requested = threading.Event()
         self._client: Any = None  # ThreadedVNCClientProxy
         self._connected = False
         self._frame_count = 0
@@ -368,12 +370,15 @@ class VNCClient(DisplayBackend):
         time.sleep(0.1)
         self._client.mouseDown(button)
         time.sleep(0.05)
-        for i in range(1, steps + 1):
-            x = int(start_x + (end_x - start_x) * i / steps)
-            y = int(start_y + (end_y - start_y) * i / steps)
-            self._client.mouseMove(x, y)
-            time.sleep(0.015)
-        self._client.mouseUp(button)
+        try:
+            for i in range(1, steps + 1):
+                self._check_stop()
+                x = int(start_x + (end_x - start_x) * i / steps)
+                y = int(start_y + (end_y - start_y) * i / steps)
+                self._client.mouseMove(x, y)
+                time.sleep(0.015)
+        finally:
+            self._client.mouseUp(button)
         self._cursor_x = end_x
         self._cursor_y = end_y
 
@@ -382,6 +387,7 @@ class VNCClient(DisplayBackend):
         self._ensure_connected()
         btn = _BUTTON_SCROLL_UP if direction == "up" else _BUTTON_SCROLL_DOWN
         for _ in range(abs(amount)):
+            self._check_stop()
             self._client.mouseDown(btn)
             self._client.mouseUp(btn)
 
@@ -464,11 +470,18 @@ class VNCClient(DisplayBackend):
         さらに Shift が必要な `>` や `"` 等は、Shift修飾を使わず
         文字自体のX11 keysymを keyPress 1回で送る（Shift修飾は
         VNC経路で外れる実測があるため）。
-        非ASCII文字は QEMU が変換できない場合があり、その場合は送らない。
+        非ASCII文字はこの経路では扱えないため、入力前にエラーにする。
         """
         self._ensure_connected()
+        unsupported = [
+            ch for ch in text if ch not in "\n\t" and not (ch.isascii() and ch.isprintable())
+        ]
+        if unsupported:
+            codes = ", ".join(f"U+{ord(ch):04X}" for ch in dict.fromkeys(unsupported))
+            raise ValueError(f"このVNC入力経路では送信できない文字があります: {codes}")
         sent = 0
         for ch in text:
+            self._check_stop()
             if ch == "\n":
                 self.key_press("enter")
                 sent += 1
@@ -490,6 +503,14 @@ class VNCClient(DisplayBackend):
         logger.debug("テキスト送信: %d/%d 文字", sent, len(text))
 
     # ── 内部 ──────────────────────────────────────────────
+
+    def request_stop(self) -> None:
+        """Request cooperative cancellation of a long input operation."""
+        self._stop_requested.set()
+
+    def _check_stop(self) -> None:
+        if self._stop_requested.is_set():
+            raise RuntimeError("入力操作は停止されました")
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._client is None:
