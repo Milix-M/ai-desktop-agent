@@ -39,7 +39,7 @@ class ActionType(Enum):
     REGION_SELECT = "region_select"  # 精密クリックの前に領域を拡大表示
 
     # VM操作（ユーザー許可制）
-    VM_RESTART = "vm_restart"  # VM作り直し（allow_vm_restart 時のみ実行）
+    VM_RESTART = "vm_restart"  # VM再起動（allow_vm_restart 時のみ実行）
 
 
 # 全アクション種別リスト（テスト用）
@@ -133,7 +133,7 @@ _ACTION_NAMES: dict[ActionType, str] = {
     ActionType.SCREENSHOT: "スクリーンショット",
     ActionType.SUBTASK_COMPLETE: "サブタスク完了",
     ActionType.REGION_SELECT: "領域拡大要求",
-    ActionType.VM_RESTART: "VM作り直し",
+    ActionType.VM_RESTART: "VM再起動",
 }
 
 

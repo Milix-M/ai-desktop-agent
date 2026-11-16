@@ -72,6 +72,7 @@ services:
       - ./data:/app/data
       - ./vm/sockets:/vm/sockets
       # Android動的払い出しのISO存在確認用（backend内からの参照。Dockerボリューム元はホストパス）。
+      - ./vm/overlays:/vm/overlays
       - ./android:/app/android-host:ro
       # デバッグ用VM管理（作り直し機能）に必要。不要なら削除可。
       - /var/run/docker.sock:/var/run/docker.sock

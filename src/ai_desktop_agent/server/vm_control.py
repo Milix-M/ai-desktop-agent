@@ -71,7 +71,7 @@ class VmController:
         )
 
     def restart(self, timeout: int = 30) -> VmStatusInfo:
-        """VMコンテナを再起動する（ゲストOSごと作り直し）。
+        """VMコンテナを再起動する（ゲストOSを含む再起動）。
 
         KVMが利用できない環境ではTCG実行が遅すぎるため再起動を制限する
         （`KvmUnavailableError`）。デバッグ用の明示許可は `ALLOW_TCG_VM=true`。

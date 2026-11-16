@@ -4,6 +4,7 @@
 状態遷移は loop.py の AgentLoop が管理する。
 """
 
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -38,7 +39,7 @@ _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.EXECUTING,
         AgentState.PAUSED,
     },
-    AgentState.WAITING: {AgentState.VERIFYING, AgentState.RECOVERING},
+    AgentState.WAITING: {AgentState.VERIFYING, AgentState.RECOVERING, AgentState.FAILED},
     AgentState.VERIFYING: {
         AgentState.EXECUTING,
         AgentState.RECOVERING,
@@ -46,7 +47,7 @@ _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.FAILED,
     },
     AgentState.RECOVERING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.FAILED},
-    AgentState.PAUSED: {AgentState.EXECUTING, AgentState.IDLE},
+    AgentState.PAUSED: {AgentState.EXECUTING, AgentState.IDLE, AgentState.FAILED},
     AgentState.COMPLETED: {AgentState.IDLE},
     AgentState.FAILED: {AgentState.IDLE},
 }
@@ -138,6 +139,7 @@ class ActionRecord:
     duration_ms: float = 0.0
     reasoning: str = ""
     confidence: float = 1.0
+    at: float = field(default_factory=time.time)
 
 
 @dataclass

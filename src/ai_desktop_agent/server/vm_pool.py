@@ -27,6 +27,7 @@ from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E
 LABEL_VM_ID = "ai-desktop-agent.vm-id"
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
 LABEL_KIND = "ai-desktop-agent.kind"
+LABEL_PROJECT = "ai-desktop-agent.project"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 KIND_QEMU = "qemu"
@@ -101,8 +102,7 @@ class VmPool:
 
     # ── 一覧・取得 ──────────────────────────────────
 
-    def _fixed_containers(self, docker: Any, service: str) -> list[Any]:
-        """Find fixed services only in this backend's Compose project."""
+    def _project_name(self, docker: Any) -> str:
         project = os.environ.get("COMPOSE_PROJECT_NAME")
         if not project:
             try:
@@ -110,13 +110,38 @@ class VmPool:
                 project = self._labels(backend).get("com.docker.compose.project")
             except Exception:
                 pass
-        project = project or "ai-desktop-agent"
+        return project or "ai-desktop-agent"
+
+    def _fixed_containers(self, docker: Any, service: str) -> list[Any]:
+        """Find fixed services only in this backend's Compose project."""
+        project = self._project_name(docker)
         candidates = docker.containers.list(
             all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={service}"}
         )
         return [
             c for c in candidates if self._labels(c).get("com.docker.compose.project") == project
         ]
+
+    def _dynamic_containers(self, docker: Any, vm_id: str | None = None) -> list[Any]:
+        label = LABEL_VM_ID if vm_id is None else f"{LABEL_VM_ID}={vm_id}"
+        candidates = docker.containers.list(all=True, filters={"label": label})
+        project = self._project_name(docker)
+        states = self._load_all_states()
+        network = self._backend_network(docker)
+        owned = []
+        for container in candidates:
+            labels = self._labels(container)
+            owner = labels.get(LABEL_PROJECT)
+            if owner is not None:
+                if owner == project:
+                    owned.append(container)
+                continue
+            # Legacy containers have no owner label. Require this store's allocation
+            # AND this backend's network; a shared Docker daemon alone proves nothing.
+            nets = (container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
+            if labels.get(LABEL_VM_ID) in states and network and network in nets:
+                owned.append(container)
+        return owned
 
     @staticmethod
     def _pick_fixed(candidates: list, service: str) -> Any | None:
@@ -175,10 +200,12 @@ class VmPool:
 
         # 動的VM
         try:
-            dynamic = docker.containers.list(all=True, filters={"label": LABEL_VM_ID})
+            dynamic = self._dynamic_containers(docker)
         except Exception:
             dynamic = []
         for c in dynamic:
+            if LABEL_WS_FOR in self._labels(c):
+                continue
             vm_id = self._labels(c).get(LABEL_VM_ID, "")
             if vm_id and vm_id != BASE_VM_SERVICE:
                 found[vm_id] = self._from_container(c, vm_id, managed=True)
@@ -240,7 +267,11 @@ class VmPool:
         ws_port = self._alloc_port(WS_START_PORT, lambda v: v.ws_port)
 
         network = self._backend_network(docker)
-        common_labels = {LABEL_VM_ID: vm_id, LABEL_KIND: kind}
+        common_labels = {
+            LABEL_VM_ID: vm_id,
+            LABEL_KIND: kind,
+            LABEL_PROJECT: self._project_name(docker),
+        }
         vm_name = f"ai-desktop-agent-{vm_id}"
         logger.info("VM作成: %s kind=%s (vnc=%d ws=%d)", vm_id, kind, vnc_port, ws_port)
 
@@ -412,7 +443,7 @@ class VmPool:
         )
 
     def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
-        """VMコンテナを再起動する（ゲストOSごと作り直し）。中継は触らない。
+        """VMコンテナを再起動する（ゲストOSを含む再起動）。中継は触らない。
 
         QEMU系（VM・Android）はKVM必須のため、KVMが利用できない環境では
         再起動を制限する（`KvmUnavailableError`）。
@@ -425,15 +456,15 @@ class VmPool:
         )
 
         docker = self._docker()
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=False)
+        if not targets:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
         if (
             self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
             and not is_kvm_available(docker)
         ):
             raise KvmUnavailableError()
-        targets = self._lifecycle_targets(vm_id, docker, include_relay=False)
-        if not targets:
-            raise ValueError(f"VMが見つかりません: {vm_id}")
         for c in targets:
             c.restart(timeout=timeout)
             logger.info("VM再起動: %s", c.name)
@@ -454,8 +485,8 @@ class VmPool:
         for c in targets:
             try:
                 c.stop(timeout=timeout)
-            except Exception:
-                logger.debug("コンテナ停止に失敗", exc_info=True)
+            except Exception as e:
+                raise DockerUnavailableError(f"環境の停止に失敗しました: {c.name}") from e
             logger.info("VM停止: %s", c.name)
         info = self.get_vm(vm_id)
         if info is None:
@@ -476,20 +507,20 @@ class VmPool:
         )
 
         docker = self._docker()
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
+        if not targets:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
         if (
             self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
             and not is_kvm_available(docker)
         ):
             raise KvmUnavailableError()
-        targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
-        if not targets:
-            raise ValueError(f"VMが見つかりません: {vm_id}")
         for c in targets:
             try:
                 c.start()
-            except Exception:
-                logger.debug("コンテナ起動に失敗", exc_info=True)
+            except Exception as e:
+                raise DockerUnavailableError(f"環境の起動に失敗しました: {c.name}") from e
             logger.info("VM起動: %s", c.name)
         info = self.get_vm(vm_id)
         if info is None:
@@ -519,9 +550,7 @@ class VmPool:
                     relays = []
             return [*list(mains), *list(relays)]
         try:
-            all_targets = docker.containers.list(
-                all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
-            )
+            all_targets = self._dynamic_containers(docker, vm_id)
         except Exception:
             return []
         if include_relay:
@@ -550,11 +579,11 @@ class VmPool:
                     logger.debug("コンテナ停止に失敗", exc_info=True)
                 try:
                     c.remove(force=True)
-                except Exception:
-                    logger.warning("コンテナ削除に失敗", exc_info=True)
+                except Exception as e:
+                    raise DockerUnavailableError(f"環境の削除に失敗しました: {c.name}") from e
             logger.info("VM削除: %s", vm_id)
             return True
-        targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
+        targets = self._dynamic_containers(docker, vm_id)
         if not targets:
             return False
         for c in targets:
@@ -564,12 +593,15 @@ class VmPool:
                 logger.debug("コンテナ停止に失敗", exc_info=True)
             try:
                 c.remove(force=True)
-            except Exception:
-                logger.warning("コンテナ削除に失敗", exc_info=True)
+            except Exception as e:
+                raise DockerUnavailableError(f"環境の削除に失敗しました: {c.name}") from e
+        if Path(vm_id).name != vm_id or vm_id in {".", ".."}:
+            raise ValueError("環境IDが不正です")
+        # This path is mounted into the backend; host paths belong to the Docker daemon.
         try:
-            Path(f"{self._host_repo_dir()}/vm/overlays/{vm_id}.qcow2").unlink(missing_ok=True)
-        except OSError:
-            logger.debug("VMディスク削除をスキップ", exc_info=True)
+            (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
+        except OSError as e:
+            raise DockerUnavailableError(f"VMディスクの削除に失敗しました: {vm_id}") from e
         self._drop_state(vm_id)
         logger.info("VM削除: %s", vm_id)
         return True
@@ -645,6 +677,13 @@ class VmPool:
 
     def _alloc_port(self, start: int, key) -> int:
         used = {key(v) for v in self.list_vms()}
+        for container in self._docker().containers.list(all=True):
+            bindings = (container.attrs.get("HostConfig") or {}).get("PortBindings") or {}
+            for ports in bindings.values():
+                for binding in ports or []:
+                    value = binding.get("HostPort", "")
+                    if str(value).isdigit():
+                        used.add(int(value))
         port = start
         while port in used:
             port += 1
@@ -659,7 +698,7 @@ class VmPool:
         """
         docker = self._docker()
         overlay_host_dir = f"{self._host_repo_dir()}/vm/overlays"
-        Path(overlay_host_dir).mkdir(parents=True, exist_ok=True)
+        Path(self._overlays_dir).mkdir(parents=True, exist_ok=True)
         overlay_host = str(Path(overlay_host_dir).resolve() / (vm_id + ".qcow2"))
         image = self._vm_image_ref(docker)
         logger.info("VMディスク複製: %s", overlay_host)
@@ -689,7 +728,7 @@ class VmPool:
         if vm_id == ANDROID_SERVICE:
             return KIND_ANDROID
         try:
-            targets = docker.containers.list(all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"})
+            targets = self._dynamic_containers(docker, vm_id)
         except Exception:
             return KIND_QEMU
         for c in targets:

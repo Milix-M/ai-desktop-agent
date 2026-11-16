@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -66,6 +67,7 @@ class TaskRecord:
     goal: dict = dataclasses.field(default_factory=dict)
     created_at: float = 0.0
     updated_at: float = 0.0
+    revision: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +87,7 @@ class TaskRecord:
             "goal": self.goal,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "revision": self.revision,
             "action_count": len(self.actions),
             "success_count": sum(1 for a in self.actions if a.success),
             "failure_count": sum(1 for a in self.actions if not a.success),
@@ -109,6 +112,7 @@ class TaskRecord:
             goal=dict(d.get("goal", {})),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),
+            revision=int(d.get("revision", 0)),
         )
 
 
@@ -133,6 +137,8 @@ class TaskStore:
 
     def save(self, record: TaskRecord) -> None:
         """レコードを保存（upsert）。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record.id):
+            raise ValueError("タスクIDが不正です")
         record.updated_at = time.time()
         if not record.created_at:
             record.created_at = record.updated_at
@@ -143,12 +149,14 @@ class TaskStore:
 
     def load(self, task_id: str) -> TaskRecord | None:
         """1件読み出し。なければ None。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            return None
         path = self._dir / f"{task_id}.json"
         if not path.is_file():
             return None
         try:
             return TaskRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError, AttributeError, OSError) as e:
             logger.warning("タスク記録の読み出しに失敗 %s: %s", task_id, e)
             return None
 
@@ -169,6 +177,8 @@ class TaskStore:
 
     def delete(self, task_id: str) -> bool:
         """1件削除する。存在しなければ False。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            return False
         path = self._dir / f"{task_id}.json"
         if not path.is_file():
             return False
@@ -190,6 +200,7 @@ class TaskStore:
             if rec.state in ACTIVE_STATES:
                 rec.state = INTERRUPTED
                 rec.success = False
+                rec.revision += 1
                 self.save(rec)
                 count += 1
         if count:

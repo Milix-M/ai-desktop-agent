@@ -9,12 +9,14 @@ region_select による2段階精密クリックをサポートする。
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
@@ -87,7 +89,7 @@ MAX_EMPTY_RETRIES = 5  # 空応答の決定再試行上限（一時不調の吸�
 EMPTY_RETRY_SHORT_ATTEMPTS = 2  # 前ターンも失敗時の試行上限（障害時の空費防止用）
 
 
-RESTART_SETTLE_SECONDS = 60.0  # VM作り直し後の起動待ち秒数
+RESTART_SETTLE_SECONDS = 60.0  # VM再起動後の起動待ち秒数
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
 SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
@@ -150,7 +152,7 @@ class TaskSession:
         self._created_at = time.time()
         # 実行対象VMのID（複数VMの並列実行用）
         self.vm_id = vm_id
-        # ユーザー許可制：エージェント判断でのVM作り直しを許可するか
+        # ユーザー許可制：エージェント判断でのVM再起動を許可するか
         self.allow_vm_restart = False
 
         if display is not None:
@@ -184,6 +186,7 @@ class TaskSession:
         self._prev_turn_hash: str | None = None
         # 連続する決定取得の失敗回数（空応答ストーム時の早期打切り用）
         self._consec_empty_decides: int = 0
+        self._replan_count = 0
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
@@ -218,35 +221,28 @@ class TaskSession:
     def on_complete(self, cb: Callable) -> None:
         self._on_complete.append(cb)
 
+    async def _notify(self, callbacks: list[Callable], *args) -> None:
+        for callback in tuple(callbacks):
+            try:
+                result = callback(*args)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("イベント通知に失敗")
+
     async def _emit_state_change(self) -> None:
-        for cb in self._on_state_change:
-            if asyncio.iscoroutinefunction(cb):
-                await cb(self.loop.state, self.loop.context)
-            else:
-                cb(self.loop.state, self.loop.context)
         self._persist()
+        await self._notify(self._on_state_change, self.loop.state, self.loop.context)
 
     async def _emit_action(self, action: Action, success: bool) -> None:
-        for cb in self._on_action:
-            if asyncio.iscoroutinefunction(cb):
-                await cb(action, success)
-            else:
-                cb(action, success)
         self._persist()
+        await self._notify(self._on_action, action, success)
 
     async def _emit_error(self, error: str) -> None:
-        for cb in self._on_error:
-            if asyncio.iscoroutinefunction(cb):
-                await cb(error)
-            else:
-                cb(error)
+        await self._notify(self._on_error, error)
 
     async def _emit_complete(self, success: bool) -> None:
-        for cb in self._on_complete:
-            if asyncio.iscoroutinefunction(cb):
-                await cb(success)
-            else:
-                cb(success)
+        await self._notify(self._on_complete, success)
 
     # ── メインループ ───────────────────────────
 
@@ -274,6 +270,8 @@ class TaskSession:
             if not decomposition.subtasks:
                 self.loop.planning_failed()
                 await self._emit_error("タスクの分解に失敗しました")
+                await self._emit_state_change()
+                await self._emit_complete(False)
                 return False
 
             self.loop.plan_ready(decomposition.subtasks)
@@ -299,8 +297,8 @@ class TaskSession:
                     break
 
             success = self.loop.state == AgentState.COMPLETED
-            await self._emit_complete(success)
             self._persist(success=success)
+            await self._emit_complete(success)
             return success
 
         except asyncio.CancelledError:
@@ -312,6 +310,7 @@ class TaskSession:
                 self.loop.fail_now()
             await self._emit_state_change()
             self._persist(success=False)
+            await self._emit_complete(False)
             raise
         except Exception as e:
             logger.exception("タスク実行中にエラー: %s", e)
@@ -323,6 +322,7 @@ class TaskSession:
                 self.loop.fail_now()
             await self._emit_state_change()
             self._persist(success=False)
+            await self._emit_complete(False)
             return False
 
         finally:
@@ -356,6 +356,8 @@ class TaskSession:
         """現在のコンテキストを永続化用レコードに変換する。"""
         ctx = self.loop.context
         goal = ctx.goal
+        if success is None and self.loop.is_done:
+            success = self.loop.state == AgentState.COMPLETED
         return TaskRecord(
             id=self.id,
             instruction=self._instruction,
@@ -374,7 +376,7 @@ class TaskSession:
                     success=r.success,
                     error_message=r.error_message,
                     duration_ms=r.duration_ms,
-                    at=self._created_at,
+                    at=r.at,
                     reasoning=r.reasoning,
                     confidence=r.confidence,
                 )
@@ -401,6 +403,7 @@ class TaskSession:
                 else {}
             ),
             created_at=self._created_at,
+            revision=self.loop.transition_count,
         )
 
     def _persist(self, success: bool | None = None) -> None:
@@ -479,7 +482,8 @@ class TaskSession:
             # 3回連続で完了宣言なら受け入れる（本当に何もない場合の脱出）
             pass
 
-        # VM作り直しは専用フローで処理する
+        # VM再起動は専用フローで処理する
+        await self._wait_if_paused()
         if decision.action.action_type == ActionType.VM_RESTART:
             await self._execute_vm_restart(decision)
             return
@@ -501,6 +505,7 @@ class TaskSession:
             )
             region_decision = self._region_around(decision.action.params, screenshot)
             decision = await self._handle_region_zoom(subtask, region_decision)
+            await self._wait_if_paused()
             if decision is None:
                 self.loop.action_executed()
                 self.loop.wait_complete()
@@ -510,6 +515,7 @@ class TaskSession:
         # region_select の処理：ズーム → 再判断 → 精密操作
         elif decision.action.action_type == ActionType.REGION_SELECT:
             decision = await self._handle_region_zoom(subtask, decision)
+            await self._wait_if_paused()
             if decision is None:
                 # ズーム後も判断できなかった
                 self.loop.action_executed()
@@ -557,6 +563,7 @@ class TaskSession:
             )
         except Exception:
             self._last_before_raw = None
+        started = time.monotonic()
         success = await self.executor.execute(action)
         self.loop.record_action(
             action,
@@ -564,6 +571,7 @@ class TaskSession:
             error=self.executor.last_error,
             reasoning=decision.reasoning,
             confidence=decision.confidence,
+            duration_ms=(time.monotonic() - started) * 1000,
         )
 
         # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
@@ -594,23 +602,24 @@ class TaskSession:
             await asyncio.sleep(0.5)
 
     async def _execute_vm_restart(self, decision: ActionDecision) -> None:
-        """VM_RESTART を処理する：許可制で作り直し、後は回復フローへ。
+        """VM_RESTART を処理する：許可制で再起動、後は回復フローへ。
 
         許可なし → 却下して回復フロー（別手段へ）。
         実行後 → 環境初期化として回復フローへ（新画面で再判断）。
         """
         from ai_desktop_agent.server.vm_pool import VmPool
 
+        await self._wait_if_paused()
         action = decision.action
         reason = (action.params or {}).get("reason", "")
 
         if not self.allow_vm_restart:
-            logger.info("VM作り直しは許可されていないため却下: %s", reason)
-            self.loop.record_action(action, False, "VM作り直しは許可されていません")
+            logger.info("VM再起動は許可されていないため却下: %s", reason)
+            self.loop.record_action(action, False, "VM再起動は許可されていません")
             self._pending_error = ErrorContext(
                 action=action,
                 error_message=(
-                    "VM作り直しはこのタスクでは許可されていません。"
+                    "VM再起動はこのタスクでは許可されていません。"
                     "VMを作り直さずに別の方法で進めてください。"
                 ),
                 retry_count=0,
@@ -625,20 +634,21 @@ class TaskSession:
         try:
             pool = VmPool()
             info = await run_vm_call(pool.restart_vm, self.vm_id or "vm")
-            logger.info("VM作り直しを実行: %s (%s)", info.id, reason)
+            logger.info("VM再起動を実行: %s (%s)", info.id, reason)
             await asyncio.sleep(RESTART_SETTLE_SECONDS)
             ok, error = True, ""
         except Exception as e:
-            logger.exception("VM作り直しに失敗")
-            ok, error = False, f"VM作り直しに失敗しました: {e}"
+            logger.exception("VM再起動に失敗")
+            ok, error = False, f"VM再起動に失敗しました: {e}"
 
+        await self._wait_if_paused()
         self.loop.record_action(action, ok, error)
         if ok:
             self._pending_error = ErrorContext(
                 action=action,
                 error_message=(
-                    "VMを作り直しました。環境は初期状態に戻っています。"
-                    "最初からやり直すつもりで計画してください。"
+                    "VMを再起動しました。ディスクの初期化は行っていません。"
+                    "画面を確認し、保存済みの作業をやり直さずに続きから計画してください。"
                 ),
                 retry_count=0,
             )
@@ -1109,25 +1119,23 @@ class TaskSession:
             return
 
         # 最後の失敗アクションを取得
-        last_error = None
-        for record in reversed(self.loop.context.action_history):
+        last_error = self._pending_error
+        if last_error is None and self.loop.context.action_history:
+            record = self.loop.context.action_history[-1]
             if not record.success:
-                last_error = ErrorContext(
-                    action=record.action,
-                    error_message=record.error_message,
-                    retry_count=self.loop.context.retry_counts.get(
-                        f"{subtask.id}:{record.action.action_type.value}", 0
-                    ),
-                )
-                break
-
+                last_error = ErrorContext(record.action, record.error_message, 0)
         if last_error is None:
-            if self._pending_error is not None:
-                # 検証失敗などのエラー情報を引き継いで回復計画に使う
-                last_error = self._pending_error
-            else:
-                self.loop.recover_retry()
-                return
+            self.loop.recover_retry()
+            return
+        retry_key = f"{subtask.id}:{last_error.action.action_type.value}"
+        retries = self.loop.context.retry_counts.get(retry_key, 0)
+        if retries >= subtask.max_retries:
+            self.loop.recover_failed()
+            await self._emit_error(f"再試行の上限に到達しました: {subtask.description}")
+            await self._emit_state_change()
+            return
+        self.loop.context.retry_counts[retry_key] = retries + 1
+        last_error.retry_count = retries
 
         # 決定モデルを試す（処理順4番目の回復方針決定）。確信度不足・失敗時はLLMに退避。
         plan: RecoveryPlan | None = None
@@ -1174,12 +1182,90 @@ class TaskSession:
                 platform=self._platform(),
             )
 
-        if plan.recoverable:
-            self.loop.recover_retry()
-        else:
+        if not plan.recoverable or plan.strategy == RecoveryStrategy.GIVE_UP:
             self.loop.recover_failed()
+            await self._emit_state_change()
+            return
 
+        # Preserve the chosen strategy for the next screenshot-based decision.
+        self._pending_error = ErrorContext(
+            action=last_error.action,
+            error_message=f"{last_error.error_message}\n回復方針: {plan.reasoning}",
+            retry_count=retries + 1,
+        )
+        if not await self._execute_recovery_actions(plan, retries):
+            return
+        if plan.strategy == RecoveryStrategy.REPLAN_SUBTASK:
+            if self._replan_count >= 3:
+                self.loop.recover_failed()
+                await self._emit_error("再計画の上限に到達しました")
+                await self._emit_state_change()
+                return
+            self._replan_count += 1
+            self.loop.recover_replan()
+            await self._emit_state_change()
+            ctx = self.loop.context
+            completed = ctx.subtasks[: ctx.current_subtask_index]
+            remaining = ctx.subtasks[ctx.current_subtask_index :]
+            goal = replace(
+                ctx.goal or Goal(description=self._instruction),
+                constraints=[
+                    *(ctx.goal.constraints if ctx.goal else []),
+                    "完了済み（やり直し不要）: " + "; ".join(s.description for s in completed),
+                    "残りの作業を再計画する: " + "; ".join(s.description for s in remaining),
+                    f"回復方針: {plan.reasoning}",
+                ],
+            )
+            decomposition = await self.llm.decompose_task(
+                goal, len(completed), platform=self._platform()
+            )
+            if not decomposition.subtasks:
+                self.loop.planning_failed()
+                await self._emit_error("再計画に失敗しました")
+            else:
+                subtasks = [
+                    replace(s, id=f"replan_{self._replan_count}_{i}")
+                    for i, s in enumerate(decomposition.subtasks)
+                ]
+                self.loop.plan_ready([*completed, *subtasks], completed_count=len(completed))
+            await self._emit_state_change()
+            return
+
+        self.loop.recover_retry()
         await self._emit_state_change()
+
+    async def _execute_recovery_actions(self, plan: RecoveryPlan, retries: int) -> bool:
+        actions = plan.actions
+        if not actions and plan.strategy == RecoveryStrategy.WAIT_AND_RETRY:
+            actions = [Action(ActionType.WAIT, {"seconds": STUCK_WAIT_SECONDS})]
+        for action in actions:
+            if len(self.loop.context.action_history) >= MAX_ACTIONS_PER_TASK:
+                self.loop.recover_failed()
+                await self._emit_error("アクション上限に到達しました")
+                await self._emit_state_change()
+                return False
+            # Restart permission and completion verification also apply to recovery actions.
+            if action.action_type == ActionType.VM_RESTART:
+                self.loop.recover_retry()
+                await self._execute_vm_restart(ActionDecision(action, "", 1.0, plan.reasoning))
+                return False
+            if action.action_type in (ActionType.REGION_SELECT, ActionType.SUBTASK_COMPLETE):
+                break
+            started = time.monotonic()
+            success = await self.executor.execute(action)
+            self.loop.record_action(
+                action,
+                success,
+                error=self.executor.last_error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                reasoning=plan.reasoning,
+            )
+            await self._emit_action(action, success)
+            if not success:
+                self._pending_error = ErrorContext(action, self.executor.last_error, retries + 1)
+                await self._emit_state_change()
+                return False
+        return True
 
     # ── アクション決定 ─────────────────────────
 

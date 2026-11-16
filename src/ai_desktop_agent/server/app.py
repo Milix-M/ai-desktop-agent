@@ -6,14 +6,16 @@ WebSocket でフロントエンドと通信し、TaskSession を管理する。
 
 import asyncio
 import contextlib
+import inspect
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import wraps
+from typing import Annotated
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 
 from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
 from ai_desktop_agent.server.session import TaskSession
@@ -52,6 +54,7 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
+    global _active_session
     import faulthandler
     import signal
 
@@ -88,6 +91,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await provisioner.stop()
+        sessions = list(_sessions.values())
+        for session in sessions:
+            session.stop()
+        await asyncio.gather(
+            *(s._task for s in sessions if s._task is not None), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(s._cleanup_task for s in sessions if s._cleanup_task is not None),
+            return_exceptions=True,
+        )
+        await asyncio.gather(*(s.aclose() for s in sessions), return_exceptions=True)
+        _sessions.clear()
+        _active_session = None
+        await asyncio.to_thread(VNCClient.shutdown_runtime)
 
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
@@ -135,9 +152,11 @@ _ws_complete_cbs: list[Callable] = []
 
 
 class CreateTaskRequest(BaseModel):
-    instruction: str
+    instruction: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20000)
+    ]
     vm_id: str | None = None  # 省略時は稼働中の既定VM
-    allow_vm_restart: bool = False  # エージェント判断でのVM作り直しを許可
+    allow_vm_restart: bool = False  # エージェント判断でのVM再起動を許可
 
 
 class TaskStatus(BaseModel):
@@ -150,6 +169,7 @@ class TaskStatus(BaseModel):
     subtasks: list[dict] = []
     current_subtask_index: int = 0
     vm_id: str | None = None
+    revision: int = 0
 
 
 class VmStatus(BaseModel):
@@ -174,7 +194,7 @@ class VmInfoModel(BaseModel):
 
 
 class CreateVmRequest(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, max_length=128)
     kind: str | None = None  # qemu（既定） / container / android。省略時は qemu
 
 
@@ -360,6 +380,7 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
 
 
 @app.delete("/vms/{vm_id}")
+@_serialize_task_submission
 async def delete_vm(vm_id: str) -> dict[str, str]:
     """VM/コンテナを削除する（上のタスクは停止する）。
 
@@ -369,7 +390,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
     """
     from fastapi import HTTPException
 
-    _stop_sessions_for_vm(vm_id)
+    await _stop_sessions_for_vm(vm_id)
 
     try:
         ok = await run_vm_call(get_pool().remove_vm, vm_id)
@@ -383,11 +404,12 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
 
 
 @app.post("/vms/{vm_id}/stop", response_model=VmInfoModel)
+@_serialize_task_submission
 async def stop_vm(vm_id: str) -> VmInfoModel:
     """VM/コンテナを停止する（固定・動的とも可）。上のタスクは停止する。"""
     from fastapi import HTTPException
 
-    _stop_sessions_for_vm(vm_id)
+    await _stop_sessions_for_vm(vm_id)
 
     try:
         info = await run_vm_call(get_pool().stop_vm, vm_id)
@@ -399,6 +421,7 @@ async def stop_vm(vm_id: str) -> VmInfoModel:
 
 
 @app.post("/vms/{vm_id}/start", response_model=VmInfoModel)
+@_serialize_task_submission
 async def start_vm(vm_id: str) -> VmInfoModel:
     """VM/コンテナを起動する（固定・動的とも可）。
 
@@ -419,28 +442,37 @@ async def start_vm(vm_id: str) -> VmInfoModel:
     return VmInfoModel(**info.to_dict())
 
 
-def _stop_sessions_for_vm(vm_id: str) -> None:
+async def _stop_sessions_for_vm(vm_id: str) -> None:
     """指定VMに紐づく実行中セッションを停止する。"""
     global _active_session
 
-    for sid, sess in list(_sessions.items()):
-        if getattr(sess, "vm_id", None) == vm_id:
-            sess.stop()
-            del _sessions[sid]
+    sessions = [s for s in _sessions.values() if getattr(s, "vm_id", None) == vm_id]
+    for sess in sessions:
+        sess.stop()
+    await asyncio.gather(
+        *(s._task for s in sessions if s._task is not None), return_exceptions=True
+    )
+    for sess in sessions:
+        _sessions.pop(sess.id, None)
     if _active_session and getattr(_active_session, "vm_id", None) == vm_id:
         _active_session = None
 
 
 @app.get("/tasks/current", response_model=TaskStatus)
-async def get_current_task() -> TaskStatus:
+async def get_current_task(vm_id: str | None = None) -> TaskStatus:
     """現在のタスク状態を返す。
 
     ライブセッションがなければ、永続化された最新タスクを返す
     （ブラウザリロード後も状態が分かるように）。
     """
-    if _active_session is not None:
+    if vm_id is not None:
+        statuses = await _task_snapshot()
+        match = next((s for s in statuses if s.vm_id == vm_id), None)
+        if match is not None:
+            return match
+    elif _active_session is not None:
         return _make_status(_active_session)
-    latest = get_store().latest()
+    latest = await asyncio.to_thread(get_store().latest) if vm_id is None else None
     if latest is not None:
         d = latest.to_dict()
         return TaskStatus(
@@ -452,6 +484,8 @@ async def get_current_task() -> TaskStatus:
             failure_count=d.get("failure_count", 0),
             subtasks=d.get("subtasks", []),
             current_subtask_index=d.get("current_subtask_index", 0),
+            vm_id=d.get("vm_id"),
+            revision=d.get("revision", 0),
         )
     return TaskStatus(
         session_id=None,
@@ -460,13 +494,15 @@ async def get_current_task() -> TaskStatus:
         action_count=0,
         success_count=0,
         failure_count=0,
+        vm_id=vm_id,
     )
 
 
 @app.get("/tasks", response_model=list[TaskSummary])
-async def list_tasks(limit: int = 20) -> list[TaskSummary]:
+async def list_tasks(limit: int = Query(default=20, ge=1, le=1000)) -> list[TaskSummary]:
     """タスク履歴を新しい順に返す。"""
-    return [_to_summary(r.to_dict()) for r in get_store().list(limit=limit)]
+    records = await asyncio.to_thread(get_store().list, limit=limit)
+    return [_to_summary(r.to_dict()) for r in records]
 
 
 @app.get("/tasks/{task_id}", response_model=TaskDetail)
@@ -570,8 +606,9 @@ async def vm_status() -> VmStatus:
 
 
 @app.post("/vm/restart", response_model=VmStatus)
+@_serialize_task_submission
 async def vm_restart() -> VmStatus:
-    """VMコンテナを再起動する（ゲストOSごと作り直し）。
+    """VMコンテナを再起動する（ゲストOSを含む再起動）。
 
     実行中のエージェントタスクがあれば先に停止する。
     再起動自体は即時戻り、デスクトップが使えるまで数分かかる。
@@ -624,22 +661,38 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     global _active_session
     await ws.accept()
     logger.info("WebSocket 接続")
+    outbound: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
+    overloaded = False
 
-    if _active_session is None:
-        await ws.send_json({"type": "status", "state": "no_session"})
+    def enqueue(payload: dict) -> None:
+        nonlocal overloaded
+        if overloaded:
+            return
+        try:
+            outbound.put_nowait(payload)
+        except asyncio.QueueFull:
+            overloaded = True
+
+    async def deliver() -> None:
+        while True:
+            payload = await outbound.get()
+            if overloaded or not await _send_json(ws, payload):
+                with contextlib.suppress(Exception):
+                    await ws.close(code=1013)
+                return
 
     # セッションのイベントを WebSocket に転送する。
     # 先頭引数にセッションを受け取り、送信先の選別用IDを付与する。
     # 送信は5秒で打ち切る（死んだ接続へのsend_json無限待ちで
     # セッション全体が固まるのを防ぐ。実測で発生済み）。
-    async def on_state(session, state, ctx):
-        await _send_json(
-            ws,
+    def on_state(session, state, ctx):
+        enqueue(
             {
                 "type": "state",
                 "session_id": session.id,
                 "vm_id": getattr(session, "vm_id", None),
                 "state": state.value,
+                "revision": session.loop.transition_count,
                 "subtask_index": ctx.current_subtask_index,
                 "subtask_count": len(ctx.subtasks),
                 "action_count": len(ctx.action_history),
@@ -647,9 +700,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             },
         )
 
-    async def on_action(session, action, success):
-        await _send_json(
-            ws,
+    def on_action(session, action, success):
+        enqueue(
             {
                 "type": "action",
                 "session_id": session.id,
@@ -660,9 +712,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             },
         )
 
-    async def on_error(session, error):
-        await _send_json(
-            ws,
+    def on_error(session, error):
+        enqueue(
             {
                 "type": "error",
                 "session_id": session.id,
@@ -671,14 +722,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             },
         )
 
-    async def on_complete(session, success):
-        await _send_json(
-            ws,
+    def on_complete(session, success):
+        enqueue(
             {
                 "type": "complete",
                 "session_id": session.id,
                 "vm_id": getattr(session, "vm_id", None),
                 "success": success,
+                "revision": session.loop.transition_count,
             },
         )
 
@@ -692,16 +743,23 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     if _active_session:
         _forward_registrations(_active_session)
 
+    delivery: asyncio.Task | None = None
     try:
+        enqueue({"type": "snapshot", "tasks": [s.model_dump() for s in await _task_snapshot()]})
+        delivery = asyncio.create_task(deliver())
         while True:
             data = await ws.receive_text()
             if data == "ping":
-                await ws.send_json({"type": "pong"})
+                enqueue({"type": "pong"})
     except WebSocketDisconnect:
         logger.info("WebSocket 切断")
     except Exception:
         pass
     finally:
+        if delivery is not None:
+            delivery.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await delivery
         # 切断時にグローバルレジストリから除去
         with contextlib.suppress(ValueError):
             _ws_state_cbs.remove(on_state)
@@ -716,23 +774,53 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 # ── ヘルパー ──────────────────────────────────────────
 
 
-async def _send_json(ws: WebSocket, payload: dict, timeout: float = 5.0) -> None:
+async def _task_snapshot() -> list[TaskStatus]:
+    """Return the latest task for every VM, including tasks finished while disconnected."""
+    records = await asyncio.to_thread(get_store().list, limit=1000)
+    statuses: dict[str, TaskStatus] = {}
+    for record in records:
+        if record.vm_id is None or record.vm_id in statuses:
+            continue
+        statuses[record.vm_id] = TaskStatus(
+            session_id=record.id,
+            vm_id=record.vm_id,
+            state=record.state,
+            is_running=False,
+            action_count=len(record.actions),
+            success_count=sum(a.success for a in record.actions),
+            failure_count=sum(not a.success for a in record.actions),
+            subtasks=record.subtasks,
+            current_subtask_index=record.current_subtask_index,
+            revision=record.revision,
+        )
+    sessions = list(_sessions.values())
+    if _active_session is not None and _active_session not in sessions:
+        sessions.append(_active_session)
+    for session in sessions:
+        if session.vm_id is not None:
+            statuses[session.vm_id] = _make_status(session)
+    return list(statuses.values())
+
+
+async def _send_json(ws: WebSocket, payload: dict, timeout: float = 5.0) -> bool:
     """WebSocketへ送信する（打ち切り付き）。
 
     死んだ接続への ``send_json`` 無限待ちでセッション全体が固まるのを防ぐ。
     タイムアウト・送信エラーは黙って捨てる（切断検出は受信側で行う）。
     """
-    with contextlib.suppress(Exception):
+    try:
         await asyncio.wait_for(ws.send_json(payload), timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 async def _fanout(cbs: list, *args) -> None:
     """WSレジストリの全コールバックに配送する。"""
     for cb in list(cbs):
-        if asyncio.iscoroutinefunction(cb):
-            await cb(*args)
-        else:
-            cb(*args)
+        result = cb(*args)
+        if inspect.isawaitable(result):
+            await result
 
 
 def _forward_registrations(session: TaskSession) -> None:
@@ -769,7 +857,11 @@ def _make_status(session: TaskSession) -> TaskStatus:
     ctx = session.loop.context
     return TaskStatus(
         session_id=session.id,
-        state=session.loop.state.value,
+        state=(
+            "understanding"
+            if session.is_running and session.loop.state.value == "idle"
+            else session.loop.state.value
+        ),
         is_running=session.is_running,
         action_count=len(ctx.action_history),
         success_count=ctx.success_count,
@@ -777,6 +869,7 @@ def _make_status(session: TaskSession) -> TaskStatus:
         subtasks=[{"id": s.id, "description": s.description} for s in ctx.subtasks],
         current_subtask_index=ctx.current_subtask_index,
         vm_id=getattr(session, "vm_id", None),
+        revision=session.loop.transition_count,
     )
 
 

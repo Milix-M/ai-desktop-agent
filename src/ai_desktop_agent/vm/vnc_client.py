@@ -232,6 +232,13 @@ class VNCClient(DisplayBackend):
         self._connected = False
         self._frame_count = 0
 
+    @staticmethod
+    def shutdown_runtime() -> None:
+        """Stop the process-wide reactor after all display connections are closed."""
+        from vncdotool import api
+
+        api.shutdown()
+
     # ── 画面キャプチャ ────────────────────────────────────
 
     def capture_screen(self, *, with_overlay: bool = True) -> Screenshot:
