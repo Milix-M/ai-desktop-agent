@@ -23,11 +23,11 @@ python3 scripts/extract-android-kernel.py
 ## 起動手順
 
 ```bash
-./scripts/up.sh   # 初期起動はvmのみでandroidは含まない。必要なら手動で追加する
-docker compose --profile kvm up -d android websockify-android
+./scripts/up.sh   # Androidは初期起動に含まない
+docker compose --profile kvm up -d android
 ```
 
-固定サービスはandroidのVNC 5590番、websockify-androidの6070番とする。動的払い出しはPOST /vmsにkind androidを指定する。KVM必須とする。起動直後はホーム画面が出る。セットアップウィザードはSETUPWIZARD=0で無人通過する。isolinuxのnosetupと同一とする。VNC 1024x768で画面を見られることを確認済みとする。初回設定はbackendのADB投入で入り、手動タップは要らない。永続dataありでは再起動後も保たれる。
+操作画面でログインし、androidのタブを選ぶ。画面配信はバックエンドの認証付き接続を使い、VNC・ADBをホストへ直接公開しない。動的払い出しはPOST /vmsにkind androidを指定する。KVM必須とする。起動直後はホーム画面が出る。セットアップウィザードはSETUPWIZARD=0で無人通過する。isolinuxのnosetupと同一とする。VNC 1024x768で画面を見られることを確認済みとする。初回設定はbackendのADB投入で入り、手動タップは要らない。永続dataありでは再起動後も保たれる。
 
 ## 永続データの扱い
 
