@@ -45,11 +45,22 @@ class ActionExecutor:
             duration = (time.monotonic() - start) * 1000
             logger.info("[OK] %s (%.0fms)", action.description, duration)
             return True
+        except asyncio.CancelledError:
+            await self._release_held_key(action)
+            raise
         except Exception as e:
+            await self._release_held_key(action)
             duration = (time.monotonic() - start) * 1000
             self.last_error = str(e)
             logger.error("[FAIL] %s: %s (%.0fms)", action.description, e, duration)
             return False
+
+    async def _release_held_key(self, action: Action) -> None:
+        if action.action_type == ActionType.KEY_HOLD:
+            try:
+                await asyncio.to_thread(self._backend.key_up, action.params["key"])
+            except Exception:
+                logger.exception("中断した長押しキーの解放に失敗")
 
     async def wait_for_still(self, timeout: float = 5.0) -> None:
         """画面変化が収まるまで待機する（公開API）。"""
