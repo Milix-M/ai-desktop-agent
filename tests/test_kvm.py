@@ -16,6 +16,10 @@ class _FakeContainer:
     def __init__(self, name="vm-1"):
         self.name = name
         self.status = "running"
+        self.attrs = {
+            "Config": {"Labels": {"com.docker.compose.project": "ai-desktop-agent"}},
+            "HostConfig": {"Devices": [{"PathOnHost": "/dev/kvm"}]},
+        }
 
 
 class _FakeContainers:
@@ -72,6 +76,27 @@ def test_auto_without_kvm(monkeypatch):
     monkeypatch.setenv("USE_KVM", "auto")
     monkeypatch.setattr(os.path, "exists", lambda p: False)
     assert is_kvm_available(_FakeDocker([])) is False
+
+
+@pytest.mark.parametrize("reason", ["another-project", "no-kvm-device"])
+def test_auto_requires_a_vm_with_kvm_in_this_project(monkeypatch, reason):
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "ai-desktop-agent")
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    container = _FakeContainer()
+    if reason == "another-project":
+        container.attrs["Config"]["Labels"]["com.docker.compose.project"] = "unrelated"
+    else:
+        container.attrs["HostConfig"]["Devices"] = []
+    assert is_kvm_available(_FakeDocker([container])) is False
+
+
+def test_stopping_the_fixed_vm_does_not_prevent_starting_it_again(monkeypatch):
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    container = _FakeContainer()
+    container.status = "exited"
+    assert is_kvm_available(_FakeDocker([container])) is True
 
 
 def test_tcg_override(monkeypatch):

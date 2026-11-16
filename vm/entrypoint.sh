@@ -1,9 +1,12 @@
 #!/bin/bash
 # VM Entrypoint — プリビルドされたqcow2イメージをQEMUで起動するだけ
-# debootstrapによるイメージビルドはDockerfileのビルド時に完了済み
+# ゲストはホストの build-vm-image.sh で準備する。
 set -euo pipefail
 
 VM_IMAGE="${VM_IMAGE:-/vm/desktop.qcow2}"
+VM_BASE_IMAGE="${VM_BASE_IMAGE:-}"
+VM_KERNEL="${VM_KERNEL:-/vm/vmlinuz}"
+VM_INITRD="${VM_INITRD:-/vm/initrd.img}"
 VM_MEMORY="${VM_MEMORY:-4096}"
 VM_CPUS="${VM_CPUS:-4}"
 VM_VNC_PORT="${VM_VNC_PORT:-5900}"
@@ -54,6 +57,30 @@ else
     QEMU_ACCEL=(-cpu qemu64 -smp 1)
 fi
 
+# Fixed VMs initialize a private disk once. Never overwrite saved work on restart.
+if [ -n "$VM_BASE_IMAGE" ]; then
+    if [ "$VM_IMAGE" = "$VM_BASE_IMAGE" ] || [ ! -s "$VM_BASE_IMAGE" ] || [ ! -f "$VM_BASE_IMAGE" ]; then
+        log "ERROR: VM_BASE_IMAGE must be a regular template file separate from VM_IMAGE"
+        exit 1
+    fi
+    mkdir -p "$(dirname "$VM_IMAGE")"
+    (
+        flock -x 9
+        if [ ! -e "$VM_IMAGE" ]; then
+            disk_tmp=$(mktemp "${VM_IMAGE}.XXXXXX")
+            trap 'rm -f "$disk_tmp"' EXIT
+            cp --sparse=always --reflink=auto -- "$VM_BASE_IMAGE" "$disk_tmp"
+            mv -- "$disk_tmp" "$VM_IMAGE"
+        fi
+    ) 9>"${VM_IMAGE}.init.lock"
+fi
+for required_file in "$VM_IMAGE" "$VM_KERNEL" "$VM_INITRD" "$CMDLINE_FILE"; do
+    if [ ! -f "$required_file" ] || [ ! -s "$required_file" ]; then
+        log "ERROR: missing or invalid VM file: $required_file"
+        exit 1
+    fi
+done
+
 # カーネルコマンドラインを読み込み
 CMDLINE="console=ttyS0 root=/dev/vda rw"
 if [ -f "$CMDLINE_FILE" ]; then
@@ -61,7 +88,7 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 log "Starting VM (VNC:0.0.0.0:$VM_VNC_PORT, RAM:${VM_MEMORY}MB, CPUs:${VM_CPUS}, KVM=$WANT_KVM)"
-log "Kernel: /vm/vmlinuz, Initrd: /vm/initrd.img"
+log "Kernel: $VM_KERNEL, Initrd: $VM_INITRD"
 log "Command line: $CMDLINE"
 
 mkdir -p "$(dirname "$QMP_SOCK")" "$(dirname "$QGA_SOCK")"
@@ -69,8 +96,8 @@ mkdir -p "$(dirname "$QMP_SOCK")" "$(dirname "$QGA_SOCK")"
 exec qemu-system-x86_64 \
     "${QEMU_ACCEL[@]}" \
     -m "$VM_MEMORY" \
-    -kernel /vm/vmlinuz \
-    -initrd /vm/initrd.img \
+    -kernel "$VM_KERNEL" \
+    -initrd "$VM_INITRD" \
     -append "$CMDLINE" \
     -drive file="$VM_IMAGE",if=virtio,format=qcow2 \
     -vnc "0.0.0.0:$VNC_DISPLAY" \

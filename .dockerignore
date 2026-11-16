@@ -12,6 +12,7 @@ frontend/.next
 vm/*.qcow2
 vm/*.img
 vm/overlays
+vm/instances
 vm/sockets
 android/*.iso
 android/*.img

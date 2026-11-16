@@ -5,6 +5,7 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-x86 \
     qemu-utils \
+    util-linux \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 

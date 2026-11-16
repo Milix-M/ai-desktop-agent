@@ -42,6 +42,7 @@ android/apks/*.apk
 vm/cmdline.txt
 vm/sockets/
 vm/overlays/
+vm/instances/
 
 # OS
 .DS_Store
