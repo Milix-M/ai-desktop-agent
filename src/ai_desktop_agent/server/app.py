@@ -577,14 +577,23 @@ async def vm_restart() -> VmStatus:
 
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
-    global _active_session
-
-    if _active_session and _active_session.is_running:
-        _active_session.stop()
-        _active_session = None
+    controller = _get_vm_controller()
+    target_sessions = [s for s in _sessions.values() if s.vm_id == "vm" and s.is_running]
+    if (
+        _active_session is not None
+        and _active_session.vm_id == "vm"
+        and _active_session.is_running
+        and _active_session not in target_sessions
+    ):
+        target_sessions.append(_active_session)
+    for session in target_sessions:
+        session.stop()
+    await asyncio.gather(
+        *(s._task for s in target_sessions if s._task is not None), return_exceptions=True
+    )
 
     try:
-        info = await run_vm_call(_get_vm_controller().restart)
+        info = await run_vm_call(controller.restart)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
