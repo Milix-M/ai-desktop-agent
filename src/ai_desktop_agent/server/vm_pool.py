@@ -254,7 +254,7 @@ class VmPool:
                 detach=True,
                 # Android-x86もKVM必須。非対応ホストでは起動前段で弾く。
                 devices=["/dev/kvm:/dev/kvm"],
-                ports={"5900/tcp": vnc_port, "5555/tcp": adb_port},
+                ports={"5900/tcp": ("127.0.0.1", vnc_port), "5555/tcp": ("127.0.0.1", adb_port)},
                 environment={
                     "ANDROID_ISO": "/android/boot.iso",
                     "ANDROID_MEMORY": memory,
@@ -314,7 +314,7 @@ class VmPool:
                 detach=True,
                 # QEMU VMはKVM必須。非対応ホストでは起動前段で弾くため常時要求する。
                 devices=["/dev/kvm:/dev/kvm"],
-                ports={"5900/tcp": vnc_port},
+                ports={"5900/tcp": ("127.0.0.1", vnc_port)},
                 environment={
                     "VM_MEMORY": memory,
                     "VM_CPUS": cpus,
@@ -336,7 +336,7 @@ class VmPool:
                 image,
                 name=vm_name,
                 detach=True,
-                ports={"5900/tcp": vnc_port},
+                ports={"5900/tcp": ("127.0.0.1", vnc_port)},
                 environment={
                     "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
                     "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
@@ -365,7 +365,7 @@ class VmPool:
             name=f"ai-desktop-agent-ws-{vm_id}",
             command=f"0.0.0.0:6080 {vm_name}:5900",
             detach=True,
-            ports={"6080/tcp": ws_port},
+            ports={"6080/tcp": ("127.0.0.1", ws_port)},
             labels={**common_labels, LABEL_WS_FOR: vm_id},
             network=network,
             restart_policy={"Name": "unless-stopped"},

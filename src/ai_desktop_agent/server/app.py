@@ -14,6 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.server.vm_control import (
@@ -91,11 +92,13 @@ app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(BrowserOriginMiddleware)
 
 # アクティブなセッション（後方互換：最新の1件）
 _active_session: TaskSession | None = None
