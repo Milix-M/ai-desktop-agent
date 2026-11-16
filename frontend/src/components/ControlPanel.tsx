@@ -16,7 +16,6 @@ const RUNNING_STATES = [
 
 export default function ControlPanel({ onControl, state }: Props) {
   const isRunning = RUNNING_STATES.includes(state);
-  const disabled = !isRunning && state !== "paused";
 
   return (
     <div className="section">

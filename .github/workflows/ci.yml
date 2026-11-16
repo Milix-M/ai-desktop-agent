@@ -71,10 +71,31 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
+  frontend:
+    name: Frontend (lint, types, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
   # 全ジョブが通ったことの確認（branch protection用）
   all-checks:
     name: All checks passed
-    needs: [lint, format, test]
+    needs: [lint, format, test, frontend]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -82,7 +103,8 @@ jobs:
         run: |
           if [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.format.result }}" != "success" ]] || \
-             [[ "${{ needs.test.result }}" != "success" ]]; then
+             [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend.result }}" != "success" ]]; then
             echo "Some checks failed"
             exit 1
           fi

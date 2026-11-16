@@ -216,7 +216,7 @@ export default function Home() {
       refreshHistory();
     })();
     return () => clearInterval(vmTimer);
-  }, [addLog, refreshHistory, showTaskDetail, refreshVms]);
+  }, [addLog, refreshHistory, showTaskDetail, refreshVms, updateView]);
 
   const handleWsMessage = useCallback(
     (data: WsMessage) => {
