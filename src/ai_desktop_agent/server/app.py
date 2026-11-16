@@ -24,6 +24,7 @@ from ai_desktop_agent.server.vm_control import (
 )
 from ai_desktop_agent.server.vm_pool import VmPool
 from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
+from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logging.basicConfig(level=logging.INFO)
@@ -44,8 +45,8 @@ def get_store() -> TaskStore:
     return _store
 
 
-def _default_create_session() -> TaskSession:
-    return TaskSession(store=get_store())
+def _default_create_session(display: DisplayBackend | None = None) -> TaskSession:
+    return TaskSession(store=get_store(), display=display)
 
 
 @asynccontextmanager
@@ -273,10 +274,13 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     if previous:
         await asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
 
-    session = await run_display_call(_create_session)
+    try:
+        session = await run_display_call(_create_session, display)
+    except BaseException:
+        await run_display_call(display.disconnect)
+        raise
     session.vm_id = vm.id
     session.allow_vm_restart = req.allow_vm_restart
-    await run_display_call(session.set_display, display)
 
     # 全 WebSocket 接続にセッション情報を付与して配送する
     _forward_registrations(session)

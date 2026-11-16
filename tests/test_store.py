@@ -109,7 +109,7 @@ def _hist_app(tmp_path):
     server_app._pool = _FakePool()
     orig_connect = server_app._connect_vm_display
     server_app._connect_vm_display = lambda vm: FakeDisplayBackend()
-    server_app._create_session = lambda: TaskSession(
+    server_app._create_session = lambda display: TaskSession(
         llm=MockLLMProvider(), display=FakeDisplayBackend(), store=server_app._store
     )
     yield
