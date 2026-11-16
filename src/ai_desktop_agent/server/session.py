@@ -34,6 +34,7 @@ from ai_desktop_agent.agent.llm.types import (
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
+from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
@@ -525,7 +526,9 @@ class TaskSession:
         # 検証用に実行直前の生画像を保持（オーバーレイの影響を除外）
         try:
             capture_raw = getattr(self.display, "capture_raw", None)
-            self._last_before_raw = capture_raw() if callable(capture_raw) else None
+            self._last_before_raw = (
+                await run_display_call(capture_raw) if callable(capture_raw) else None
+            )
         except Exception:
             self._last_before_raw = None
         success = await self.executor.execute(action)
@@ -594,7 +597,7 @@ class TaskSession:
 
         try:
             pool = VmPool()
-            info = pool.restart_vm(self.vm_id or "vm")
+            info = await run_vm_call(pool.restart_vm, self.vm_id or "vm")
             logger.info("VM作り直しを実行: %s (%s)", info.id, reason)
             await asyncio.sleep(RESTART_SETTLE_SECONDS)
             ok, error = True, ""
@@ -643,7 +646,7 @@ class TaskSession:
         """
         del depth  # 反復ループで深さを管理するため未使用
         try:
-            raw = self.display.capture_raw()
+            raw = await run_display_call(self.display.capture_raw)
         except Exception:
             logger.exception("拡大用の生画像取得に失敗")
             return None
@@ -1049,7 +1052,11 @@ class TaskSession:
             await asyncio.sleep(0.1)
             before = self._last_before_raw
             capture_raw = getattr(self.display, "capture_raw", None)
-            after = capture_raw() if callable(capture_raw) else await self._capture_screenshot()
+            after = (
+                await run_display_call(capture_raw)
+                if callable(capture_raw)
+                else await self._capture_screenshot()
+            )
             if before is None:
                 # 比較元がなければ成功扱い（従来動作）
                 return True
@@ -1204,18 +1211,18 @@ class TaskSession:
         """
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
-        screenshot = self.display.capture_screen()
+        screenshot = await run_display_call(self.display.capture_screen)
         if _is_black_screen(screenshot):
             logger.info("画面が真っ黒のためウェイクアップして再取得します")
             try:
                 if self._is_android_vm():
                     await self._wake_android_display()
                 else:
-                    self.display.key_press("shift")
+                    await run_display_call(self.display.key_press, "shift")
             except Exception:
                 logger.debug("ウェイクアップキー送信に失敗", exc_info=True)
             await asyncio.sleep(1.0)
-            screenshot = self.display.capture_screen()
+            screenshot = await run_display_call(self.display.capture_screen)
         return screenshot
 
     def _is_android_vm(self) -> bool:
@@ -1241,19 +1248,19 @@ class TaskSession:
         wake = getattr(self.display, "wake_android", None)
         if callable(wake):
             try:
-                wake()
+                await run_display_call(wake)
                 return
             except Exception:
                 logger.debug("wake_android() に失敗、フォールバックする", exc_info=True)
         # フォールバック（wake_android 未実装バックエンド用）
         try:
-            self.display.key_down("escape")
+            await run_display_call(self.display.key_down, "escape")
             await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            self.display.key_up("escape")
+            await run_display_call(self.display.key_up, "escape")
             await asyncio.sleep(0.3)
-            self.display.key_down("menu")
+            await run_display_call(self.display.key_down, "menu")
             await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            self.display.key_up("menu")
+            await run_display_call(self.display.key_up, "menu")
             await asyncio.sleep(0.3)
         except Exception:
             logger.debug("Androidウェイクキー送信に失敗", exc_info=True)
@@ -1269,7 +1276,7 @@ class TaskSession:
                 or getattr(self.display, "_height", None)
                 or 768
             )
-            self.display.mouse_click(int(width // 2), int(height // 2))
+            await run_display_call(self.display.mouse_click, int(width // 2), int(height // 2))
         except Exception:
             logger.debug("Androidウェイクタップに失敗", exc_info=True)
 
@@ -1305,6 +1312,9 @@ class TaskSession:
 
     def stop(self) -> None:
         if self._task and not self._task.done():
+            request_stop = getattr(self.display, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
             self._task.cancel()
 
     @property

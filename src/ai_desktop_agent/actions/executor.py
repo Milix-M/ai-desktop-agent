@@ -10,6 +10,7 @@ import logging
 import time
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.base import DisplayBackend
 
 logger = logging.getLogger(__name__)
@@ -57,37 +58,44 @@ class ActionExecutor:
         match action.action_type:
             # ── マウス操作 ──
             case ActionType.MOUSE_MOVE:
-                self._backend.mouse_move(int(p["x"]), int(p["y"]))
+                await run_display_call(self._backend.mouse_move, int(p["x"]), int(p["y"]))
             case ActionType.LEFT_CLICK:
                 # 座標必須（primitivesで検証済み）
-                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=1)
+                await run_display_call(
+                    self._backend.mouse_click, int(p["x"]), int(p["y"]), button=1
+                )
             case ActionType.RIGHT_CLICK:
-                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=3)
+                await run_display_call(
+                    self._backend.mouse_click, int(p["x"]), int(p["y"]), button=3
+                )
             case ActionType.DOUBLE_CLICK:
-                self._backend.mouse_double_click(int(p["x"]), int(p["y"]))
+                await run_display_call(self._backend.mouse_double_click, int(p["x"]), int(p["y"]))
             case ActionType.MIDDLE_CLICK:
-                self._backend.mouse_click(int(p["x"]), int(p["y"]), button=2)
+                await run_display_call(
+                    self._backend.mouse_click, int(p["x"]), int(p["y"]), button=2
+                )
             case ActionType.DRAG:
-                self._backend.mouse_drag(
+                await run_display_call(
+                    self._backend.mouse_drag,
                     p["start_x"],
                     p["start_y"],
                     p["end_x"],
                     p["end_y"],
                 )
             case ActionType.SCROLL:
-                self._backend.mouse_scroll(p["direction"], p["amount"])
+                await run_display_call(self._backend.mouse_scroll, p["direction"], p["amount"])
 
             # ── キーボード操作 ──
             case ActionType.TYPE:
-                self._backend.type_text(p["text"])
+                await run_display_call(self._backend.type_text, p["text"])
             case ActionType.KEY_PRESS:
-                self._backend.key_press(p["key"])
+                await run_display_call(self._backend.key_press, p["key"])
             case ActionType.KEY_COMBO:
-                self._backend.key_combo(p["keys"])
+                await run_display_call(self._backend.key_combo, p["keys"])
             case ActionType.KEY_HOLD:
-                self._backend.key_down(p["key"])
+                await run_display_call(self._backend.key_down, p["key"])
                 await asyncio.sleep(p["duration_ms"] / 1000.0)
-                self._backend.key_up(p["key"])
+                await run_display_call(self._backend.key_up, p["key"])
 
             # ── 待機 ──
             case ActionType.WAIT:
@@ -97,7 +105,7 @@ class ActionExecutor:
 
             # ── 観測 ──
             case ActionType.SCREENSHOT:
-                self._backend.capture_screen()
+                await run_display_call(self._backend.capture_screen)
 
             # ── ズーム要求 ──
             case ActionType.REGION_SELECT:
@@ -131,7 +139,7 @@ class ActionExecutor:
         elapsed = 0.0
 
         while elapsed < timeout:
-            ss = self._capture_stable()
+            ss = await run_display_call(self._capture_stable)
             current_hash = self._image_hash(ss.image_bytes)
 
             if prev_hash and current_hash == prev_hash:
