@@ -6,6 +6,12 @@ dist/
 build/
 .venv/
 venv/
+.coverage*
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+.yomiyasu/
 
 # Environment
 .env
