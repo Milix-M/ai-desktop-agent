@@ -55,6 +55,7 @@ class ClipboardClient(VNCDoToolClient):
         else:
             pending, self.deferred = self.deferred, None
             pending.errback(RuntimeError("VNCから画面画像を取得できません"))
+            self.transport.loseConnection()
 
     def _send_clipboard(self, flags, payload=b""):
         message = pack("!I", flags) + payload

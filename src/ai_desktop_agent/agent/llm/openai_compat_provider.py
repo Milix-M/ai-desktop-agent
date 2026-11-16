@@ -37,6 +37,13 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
+from ai_desktop_agent.privacy import (
+    install_log_redaction,
+    protect,
+    protect_url,
+    redact,
+    redact_data,
+)
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
@@ -103,6 +110,9 @@ AI エージェントです。
 - drag: {start_x: int, start_y: int, end_x: int, end_y: int} — ドラッグ
 - scroll: {direction: "up"|"down", amount: int} — スクロール
 - type: {text: str} — テキスト入力
+- request_user_input: {reason: str} — パスワードや認証コードを利用者に入力してもらう。
+  入力欄を選んでから要求する。待機中はAIへ画面を送らない。
+  秘密の値を指示やtypeに含めず、利用者が画面を確認して再開するまで待つ。
 - key_press: {key: str} — キー押下（enter, escape, tab 等）
 - key_combo: {keys: [str]} — 複合キー（["ctrl", "c"] 等）
 - wait: {seconds: float} — 待機（アプリ起動待ちには2〜5秒を使う）
@@ -181,6 +191,7 @@ _ACTION_TYPES = [
     "drag",
     "scroll",
     "type",
+    "request_user_input",
     "key_press",
     "key_combo",
     "wait",
@@ -742,6 +753,36 @@ _SCHEMA_RECOVER = {
 }
 
 
+def _manual_input_schema(decision: bool) -> dict:
+    properties = {
+        "action_type": {"const": "request_user_input"},
+        "params": {
+            "type": "object",
+            "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    }
+    if decision:
+        properties.update(
+            expected_effect={"type": "string"},
+            confidence={"type": "number", "minimum": 0.0, "maximum": 1.0},
+            reasoning={"type": "string"},
+        )
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+_SCHEMA_ACTION["schema"]["oneOf"].append(_manual_input_schema(True))
+_SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["oneOf"].append(
+    _manual_input_schema(False)
+)
+
+
 class OpenAICompatProvider(LLMProvider):
     """OpenAI 互換 API を使用する LLM プロバイダ。
 
@@ -773,6 +814,14 @@ class OpenAICompatProvider(LLMProvider):
         self.call_count = 0
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
+        protect(api_key)
+        if base_url:
+            protect_url(base_url)
+        for name, value in (default_headers or {}).items():
+            if any(word in name.lower() for word in ("authorization", "key", "token")):
+                protect(value)
+                protect(value.removeprefix("Bearer ").removeprefix("Basic "))
+        install_log_redaction()
         # Retries belong to _call so every real send is counted by the task budget.
         client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout, "max_retries": 0}
         if base_url:
@@ -1006,7 +1055,7 @@ ID: {subtask.id}
             try:
                 recovery_actions.append(Action(action_type=at, params=params))
             except ValueError:
-                logger.warning("回復アクションをスキップ（不正params）: %s", a)
+                logger.warning("回復アクションをスキップ（不正params）: %s", at.value)
                 continue
         return RecoveryPlan(
             strategy=RecoveryStrategy(data.get("strategy", "wait_and_retry")),
@@ -1032,6 +1081,8 @@ ID: {subtask.id}
         画像は同一解像度のJPEG（q80）に変換して送る。座標系は変わらないまま
         ペイロードを約1/4に削減し、応答速度とコストを改善する。
         """
+        prompt = redact(prompt)
+        system_prompt = redact(system_prompt or _SYSTEM_PROMPT)
         # メッセージ構築（座標精度のため detail: high で原解像度を維持）
         if image_bytes:
             b64 = base64.b64encode(self._to_jpeg(image_bytes)).decode("ascii")
@@ -1089,7 +1140,7 @@ ID: {subtask.id}
                     empty_count += 1
                     raise ValueError("応答が空です")
 
-                return self._parse_json(text)
+                return redact_data(self._parse_json(text))
 
             except TaskLimitError:
                 raise

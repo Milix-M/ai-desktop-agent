@@ -32,14 +32,30 @@ def test_home_survives_update_and_a_verified_backup_can_restore_it(tmp_path, mon
     desktop_image = os.environ.get("DESKTOP_SMOKE_IMAGE", "ai-desktop-agent-desktop-smoke")
 
     def desktop(volumes=None):
-        return client.containers.run(
+        container = client.containers.run(
             desktop_image,
             detach=True,
             network_mode="none",
+            hostname=project + "-desktop",
+            extra_hosts={project + "-desktop": "127.0.1.1"},
             cap_drop=["NET_RAW"],
             volumes=volumes or {},
             labels={**labels, "com.docker.compose.service": "desktop"},
         )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            container.reload()
+            if container.status == "exited":
+                pytest.fail(container.logs().decode())
+            ready = container.exec_run(
+                ["wmctrl", "-m"],
+                user="agent",
+                environment={"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority"},
+            )
+            if ready.exit_code == 0:
+                return container
+            time.sleep(0.1)
+        pytest.fail("Desktop did not become ready: " + container.logs().decode())
 
     try:
         backend = client.containers.run(

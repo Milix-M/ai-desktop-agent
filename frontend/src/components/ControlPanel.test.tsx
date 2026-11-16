@@ -4,6 +4,22 @@ import userEvent from "@testing-library/user-event";
 import ControlPanel from "@/components/ControlPanel";
 
 describe("ControlPanel", () => {
+  it("shows the manual request and requires a screen-sharing resume", async () => {
+    const onControl = vi.fn().mockResolvedValue(undefined);
+    render(<ControlPanel onControl={onControl} state="awaiting_user" manualInput={{ id: "request-1", reason: "パスワードを入力してください" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("パスワードを入力してください");
+    expect(screen.queryByRole("button", { name: "一時停止" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
+    expect(onControl).toHaveBeenCalledWith("resume");
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  });
+
+  it("does not allow manual resume without the current request", () => {
+    render(<ControlPanel onControl={vi.fn()} state="awaiting_user" />);
+    expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  });
+
   it("disables pause and resume when idle", () => {
     render(<ControlPanel onControl={vi.fn()} state="idle" />);
 

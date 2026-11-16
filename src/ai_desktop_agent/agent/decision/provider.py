@@ -21,6 +21,7 @@ from typing import Any
 from ai_desktop_agent.agent.budget import model_request
 from ai_desktop_agent.agent.decision import routing
 from ai_desktop_agent.agent.decision.types import DecisionRecovery, DecisionVerify
+from ai_desktop_agent.privacy import install_log_redaction, protect, redact_data
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,8 @@ class WorkersAiClefProvider(DecisionProvider):
         super().__init__()
         self._account_id = account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
         self._api_token = api_token or os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        protect(self._api_token)
+        install_log_redaction()
         raw_model = model or os.environ.get("CLEF_MODEL", WORKERS_AI_CLEF_MODEL_DEFAULT)
         self._model = _normalize_clef_model(raw_model, for_openrouter=False)
         self._timeout = timeout
@@ -284,7 +287,7 @@ class WorkersAiClefProvider(DecisionProvider):
                 resp = await client.post(
                     self._endpoint(),
                     headers={"Authorization": f"Bearer {self._api_token}"},
-                    json=payload,
+                    json=redact_data(payload, skip_images=True),
                 )
                 resp.raise_for_status()
                 try:
@@ -370,6 +373,8 @@ class OpenRouterClefProvider(DecisionProvider):
         self._api_key = (
             api_key or os.environ.get("CLEF_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
         )
+        protect(self._api_key)
+        install_log_redaction()
         raw_model = model or os.environ.get("CLEF_MODEL", OPENROUTER_CLEF_MODEL_DEFAULT)
         self._model = _normalize_clef_model(raw_model, for_openrouter=True)
         self._base_url = base_url or OPENROUTER_DECISIONS_URL
@@ -462,7 +467,7 @@ class OpenRouterClefProvider(DecisionProvider):
                 resp = await client.post(
                     self._endpoint(),
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json=payload,
+                    json=redact_data(payload, skip_images=True),
                 )
                 resp.raise_for_status()
                 try:

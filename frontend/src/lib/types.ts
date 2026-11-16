@@ -14,6 +14,12 @@ export interface TaskStatus {
   current_subtask_index: number;
   vm_id?: string | null;
   revision?: number;
+  manual_input?: ManualInputRequest | null;
+}
+
+export interface ManualInputRequest {
+  id: string;
+  reason: string;
 }
 
 export interface VmInfo {
@@ -39,6 +45,7 @@ export interface WsStateMessage {
   action_count: number;
   subtasks?: SubtaskInfo[];
   revision?: number;
+  manual_input?: ManualInputRequest | null;
 }
 
 export interface WsActionMessage {

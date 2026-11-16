@@ -10,6 +10,7 @@ import logging
 import time
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.privacy import install_log_redaction, redact
 from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.base import DisplayBackend
 
@@ -30,6 +31,7 @@ class ActionExecutor:
         backend: DisplayBackend,
     ) -> None:
         self._backend = backend
+        install_log_redaction()
         self.last_error = ""
 
     async def execute(self, action: Action) -> bool:
@@ -43,7 +45,7 @@ class ActionExecutor:
         try:
             await self._dispatch(action)
             duration = (time.monotonic() - start) * 1000
-            logger.info("[OK] %s (%.0fms)", action.description, duration)
+            logger.info("[OK] %s (%.0fms)", action.action_type.value, duration)
             return True
         except asyncio.CancelledError:
             await self._release_held_key(action)
@@ -51,8 +53,8 @@ class ActionExecutor:
         except Exception as e:
             await self._release_held_key(action)
             duration = (time.monotonic() - start) * 1000
-            self.last_error = str(e)
-            logger.error("[FAIL] %s: %s (%.0fms)", action.description, e, duration)
+            self.last_error = redact(str(e))
+            logger.error("[FAIL] %s (%.0fms)", action.action_type.value, duration)
             return False
 
     async def _release_held_key(self, action: Action) -> None:
@@ -70,6 +72,8 @@ class ActionExecutor:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
         p = action.params or {}
         match action.action_type:
+            case ActionType.REQUEST_USER_INPUT:
+                raise RuntimeError("手動入力はタスクセッションで処理してください")
             # ── マウス操作 ──
             case ActionType.MOUSE_MOVE:
                 await run_display_call(self._backend.mouse_move, int(p["x"]), int(p["y"]))

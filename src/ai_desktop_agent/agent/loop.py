@@ -200,6 +200,16 @@ class AgentLoop:
         """PAUSED → EXECUTING に復帰。"""
         self._transition(AgentState.EXECUTING)
 
+    def wait_for_user(self) -> AgentState:
+        previous = self.state
+        self._transition(AgentState.AWAITING_USER)
+        return previous
+
+    def user_input_done(self, previous: AgentState) -> None:
+        if previous not in (AgentState.EXECUTING, AgentState.RECOVERING):
+            raise ValueError("手動入力前の状態が不正です")
+        self._transition(previous)
+
     def abort(self) -> None:
         """PAUSED → IDLE（タスク中断）。"""
         self._transition(AgentState.IDLE)

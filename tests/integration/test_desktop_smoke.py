@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import docker
 import pytest
@@ -205,3 +206,175 @@ async def test_unicode_paragraphs_can_be_typed_and_saved_in_an_editor(desktop):
         assert result.exit_code == 0 and result.output == (content + addition).encode("utf-8")
     finally:
         await asyncio.to_thread(display.disconnect)
+
+
+async def test_manual_password_input_is_not_sent_to_the_model_or_task_history(
+    desktop, tmp_path, monkeypatch, caplog
+):
+    import json
+    import logging
+
+    from httpx import ASGITransport
+
+    from ai_desktop_agent.server import app as server_app
+    from tests.http import AuthenticatedClient
+
+    proof = f"/tmp/manual-password-{uuid.uuid4().hex}"
+    code = """from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs
+import sys
+class Handler(BaseHTTPRequestHandler):
+ def do_GET(self):
+  if self.path == '/ready':
+   Path(sys.argv[1]+'.ready').touch()
+   self.send_response(204)
+   self.end_headers()
+   return
+  self.send_response(200)
+  self.send_header('Content-Type','text/html; charset=utf-8')
+  self.end_headers()
+  self.wfile.write(b'<title>Manual input login</title><form method="post">'
+   b'<label>Password <input type="password" name="password" autofocus></label>'
+   b'<button>Login</button></form>'
+   b'<script>requestAnimationFrame(()=>fetch("/ready"))</script>')
+ def do_POST(self):
+  value=parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())['password'][0]
+  Path(sys.argv[1]).write_text(value)
+  self.send_response(200)
+  self.send_header('Content-Type','text/html; charset=utf-8')
+  self.end_headers()
+  self.wfile.write(b'<title>Manual input complete</title><h1>LOGIN COMPLETE</h1>')
+ def log_message(self,*args):pass
+HTTPServer(('127.0.0.1',8765),Handler).serve_forever()
+"""
+    desktop.exec_run(["python3", "-u", "-c", code, proof], user="agent", detach=True)
+    env = {"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority"}
+    profile = "/tmp/manual-login-profile"
+    desktop.exec_run(["mkdir", "-p", profile], user="agent")
+    desktop.exec_run(
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; Path('/tmp/manual-login-profile/user.js').write_text("
+            + repr(
+                'user_pref("browser.shell.checkDefaultBrowser",false);\n'
+                'user_pref("browser.aboutwelcome.enabled",false);\n'
+                # The same test-only preference used by Mozilla's Remote Agent.
+                'user_pref("termsofuse.bypassNotification",true);\n'
+                'user_pref("signon.rememberSignons",false);'
+            )
+            + ")",
+        ],
+        user="agent",
+    )
+    desktop.exec_run(
+        ["firefox", "--no-remote", "--profile", profile, "--new-window", "http://127.0.0.1:8765"],
+        user="agent",
+        environment=env,
+        detach=True,
+    )
+    for _ in range(100):
+        found = desktop.exec_run(
+            ["xdotool", "search", "--onlyvisible", "--name", "Manual input login"],
+            user="agent",
+            environment=env,
+        )
+        ready = desktop.exec_run(["test", "-f", proof + ".ready"], user="agent")
+        if found.exit_code == 0 and ready.exit_code == 0:
+            desktop.exec_run(
+                ["xdotool", "windowactivate", found.output.decode().splitlines()[0]],
+                user="agent",
+                environment=env,
+            )
+            break
+        await asyncio.sleep(0.2)
+    else:
+        pytest.fail("Login form did not open")
+
+    class ManualProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.decisions = 0
+            self.verifications = 0
+
+        async def decompose_task(self, *args, **kwargs):
+            return DecompositionResult([Subtask("login", "ログインする")], "手動入力を待つ")
+
+        async def decide_next_action(self, *args, **kwargs):
+            self.decisions += 1
+            action = (
+                Action(
+                    ActionType.REQUEST_USER_INPUT,
+                    {"reason": "パスワードを入力してログインしてください"},
+                )
+                if self.decisions == 1
+                else Action(ActionType.SUBTASK_COMPLETE)
+            )
+            return ActionDecision(action, "ログインする", 1.0, "利用者による入力")
+
+        async def verify_result(self, *args, **kwargs):
+            self.verifications += 1
+            complete = desktop.exec_run(
+                ["xdotool", "search", "--name", "Manual input complete"],
+                user="agent",
+                environment=env,
+            )
+            return VerificationResult(complete.exit_code == 0, "ログイン完了画面", "完了を確認")
+
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    display, user_display = VNCClient(), VNCClient()
+    await asyncio.to_thread(display.connect, "127.0.0.1", port)
+    model = ManualProvider()
+    session = TaskSession(llm=model, display=display, store=TaskStore(tmp_path), decision=None)
+    session.vm_id = "desktop"
+    monkeypatch.setattr(server_app, "_sessions", {session.id: session})
+    monkeypatch.setattr(server_app, "_active_session", session)
+    pending = asyncio.Event()
+    session.on_state_change(
+        lambda state, _: pending.set() if state.value == "awaiting_user" else None
+    )
+    secret = "manual-private-" + uuid.uuid4().hex
+    with caplog.at_level(logging.DEBUG):
+        await session.start_async("ログイン情報は利用者が入力する")
+        try:
+            await asyncio.wait_for(pending.wait(), 10)
+            calls = model.decisions, model.verifications
+            await asyncio.to_thread(user_display.connect, "127.0.0.1", port)
+            await asyncio.to_thread(user_display.type_text, secret)
+            await asyncio.to_thread(user_display.key_press, "enter")
+            for _ in range(50):
+                received = desktop.exec_run(["cat", proof], user="agent")
+                if received.exit_code == 0 and received.output == secret.encode():
+                    break
+                await asyncio.sleep(0.1)
+            if received.exit_code != 0 or received.output != secret.encode():
+                failure = await asyncio.to_thread(user_display.capture_raw)
+                Path("/tmp/ai-desktop-agent-review-manual-input-failure.png").write_bytes(
+                    failure.image_bytes
+                )
+            assert received.exit_code == 0 and received.output == secret.encode()
+            assert (model.decisions, model.verifications) == calls
+            async with AuthenticatedClient(
+                transport=ASGITransport(app=server_app.app), base_url="http://test"
+            ) as client:
+                status = (await client.get("/tasks/current?vm_id=desktop")).json()
+                denied = await client.post("/tasks/current/resume?vm_id=desktop")
+                assert denied.status_code == 409
+                resumed = await client.post(
+                    "/tasks/current/resume?vm_id=desktop",
+                    json={
+                        "manual_input_id": status["manual_input"]["id"],
+                        "allow_screen_share": True,
+                    },
+                )
+                assert resumed.status_code == 200
+            assert await asyncio.wait_for(session._task, 10)
+            assert secret not in json.dumps(session._store.load(session.id).to_dict())
+            assert secret not in (tmp_path / "tasks" / f"{session.id}.json").read_text()
+            assert secret not in caplog.text
+        finally:
+            session.stop()
+            await asyncio.gather(session._task, return_exceptions=True)
+            await asyncio.to_thread(user_display.disconnect)
