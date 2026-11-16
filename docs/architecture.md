@@ -68,6 +68,14 @@ flowchart LR
 
 LLM_PROVIDER、LLM_MODEL、各種APIキーでLLMを設定する。USE_KVMの既定値はauto、ALLOW_TCG_VMはfalse、VM_MEMORYは4096、VM_CPUSは4、DATA_DIRは./dataとなる。up.shはComposeが解決したUSE_KVMを読み、接続先と判定結果をバックエンドにも渡す。VNC_HOSTの既定はComposeではdesktop、バックエンド単体ではlocalhostとなる。VM_MEMORYとVM_CPUSの固定値はComposeで定め、動的払い出しでは環境変数を使う。
 
+### ネットワーク
+
+管理用のdefaultネットワークにはフロントエンドとバックエンドを置く。各作業環境はproject_env_IDという名前の専用bridgeを使い、バックエンドだけが各bridgeにも接続する。固定環境のbridgeはCompose、動的環境はEnvironmentNetworksが作る。新しい作業環境にはNET_RAWを与えない。
+
+コンテナの起動点はserver/__main__.pyとなる。管理用IPとサブネットをDockerから確認し、そのIPだけでAPIを待ち受ける。ManagementNetworkMiddlewareも実際の送信元IPを確認し、管理用ネットワーク以外を拒否する。転送ヘッダーは信頼しない。管理経路のgw_priorityは1、専用bridgeは0とし、追加接続で既定経路を変えない。Docker API 1.48以降とCompose 2.33.1以降を必要とする。
+
+起動時、環境一覧の取得時、タスク投入時に所属と専用ネットワークを確認する。旧環境は新しい接続先を確保してから共有ネットワークを外す。保存済みのisolated_networkは、旧環境の発見とバックエンド再作成後の再接続にも使う。移行失敗では処理を止め、別プロジェクトや未知のコンテナを切断しない。専用bridgeは環境削除時に回収する。
+
 ## バックエンド
 
 src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。

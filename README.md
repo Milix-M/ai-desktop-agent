@@ -4,9 +4,11 @@
 
 ## 起動する
 
-Docker EngineとDocker Compose、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
+Docker Engine（API 1.48以降）とDocker Compose 2.33.1以降、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
 
 QEMU VMを使う場合は、x86_64ホストの `/dev/kvm` とゲストファイルが必要になる。先に `sudo ./vm/build-vm-image.sh` を実行する。このスクリプトはホストにパッケージを導入し、`vm/desktop.qcow2`、`vm/vmlinuz`、`vm/initrd.img`、`vm/cmdline.txt` を作成する。
+
+更新でコンテナが再作成される場合がある。作業環境内の必要なファイルは先に退避する。
 
 ```bash
 cp .env.example .env
@@ -28,6 +30,8 @@ KVMとゲストファイルが揃う場合はQEMU VM、それ以外はXfceのコ
 | API・状態通知・画面配信 | 8081 |
 
 公開ポートはホストのループバックに限定する。API・状態通知・画面配信は認証を必須とし、VNC・ADBのポートを直接公開しない。旧版の中継は起動時に同じプロジェクトのものだけ撤去する。
+
+各作業環境に専用ネットワークを割り当て、管理APIと別環境への接続を制限する。外部サイトへの接続と、認証後の画面配信は利用できる。
 
 ログインは12時間有効で、バックエンド再起動後は再ログインする。ログアウトは閲覧接続を切断するが、実行中タスクは止めない。停止する場合は先に［停止］を選ぶ。
 
@@ -79,10 +83,11 @@ npm run typecheck
 npm run build
 ```
 
-実デスクトップの確認はリポジトリのルートで実行する。APIキーは使わず、Firefoxの描画とVNC入力後のファイル内容を検査する。LLMの判断精度を測るテストではない。
+実デスクトップの確認はリポジトリのルートで実行する。LLMのAPIキーは使わず、Firefoxの描画、VNC入力後のファイル内容、環境間の通信遮断、バックエンド再作成後の復旧を検査する。LLMの判断精度を測るテストではない。
 
 ```bash
 docker build -t ai-desktop-agent-desktop-smoke desktop
+docker build -t ai-desktop-agent-backend-smoke .
 RUN_DESKTOP_SMOKE=1 uv run pytest -m desktop_integration tests/integration/
 ```
 
