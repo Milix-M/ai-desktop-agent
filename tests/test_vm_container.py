@@ -349,7 +349,7 @@ class TestDockerCompose:
     def test_vm_exposes_vnc_port(self):
         vm = self._vm_service()
         ports = vm.get("ports", [])
-        assert "5900:5900" in ports, "vm サービスは 5900 ポートを公開する必要があります"
+        assert "127.0.0.1:5900:5900" in ports, "vm サービスは 5900 ポートを公開する必要があります"
 
     def test_backend_depends_on_desktop_healthy(self):
         data = self._compose_data()
@@ -536,7 +536,7 @@ class TestDesktopCompose:
 
     def test_desktop_ports(self):
         desktop = self._compose_data()["services"]["desktop"]
-        assert "5901:5900" in desktop.get("ports", [])
+        assert "127.0.0.1:5901:5900" in desktop.get("ports", [])
 
     def test_desktop_websockify(self):
         ws = self._compose_data()["services"]["websockify-desktop"]
@@ -660,7 +660,7 @@ class TestAndroidCompose:
 
     def test_android_ports(self):
         android = self._compose_data()["services"]["android"]
-        assert "5590:5900" in android.get("ports", [])
+        assert "127.0.0.1:5590:5900" in android.get("ports", [])
         ws = self._compose_data()["services"]["websockify-android"]
         assert "6070" in str(ws.get("ports", ""))
 
