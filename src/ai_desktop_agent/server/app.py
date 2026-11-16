@@ -285,6 +285,8 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     _sessions[session.id] = session
 
     await session.start_async(req.instruction)
+    if session._task is not None:
+        session._task.add_done_callback(lambda _: _sessions.pop(session.id, None))
     return _make_status(session)
 
 
