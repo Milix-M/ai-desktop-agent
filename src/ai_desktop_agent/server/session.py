@@ -187,6 +187,7 @@ class TaskSession:
         self._on_action: list[Callable] = []
         self._on_error: list[Callable] = []
         self._on_complete: list[Callable] = []
+        self._control_notifications: set[asyncio.Task] = set()
 
     def set_display(self, display: DisplayBackend) -> None:
         """操作対象の表示バックエンドを差し替える（VM指定用）。"""
@@ -1283,10 +1284,24 @@ class TaskSession:
     def pause(self) -> None:
         if self.loop.state == AgentState.EXECUTING:
             self.loop.pause()
+            self._notify_control_change()
 
     def resume(self) -> None:
         if self.loop.state == AgentState.PAUSED:
             self.loop.resume()
+            self._notify_control_change()
+
+    def _notify_control_change(self) -> None:
+        # 制御は同期APIを保ち、待機中の実行ループに依存せず通知する。
+        self._persist()
+        task = asyncio.create_task(self._emit_state_change())
+        self._control_notifications.add(task)
+        task.add_done_callback(self._control_notification_done)
+
+    def _control_notification_done(self, task: asyncio.Task) -> None:
+        self._control_notifications.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("タスク制御の状態通知に失敗", exc_info=task.exception())
 
     def stop(self) -> None:
         if self._task and not self._task.done():
