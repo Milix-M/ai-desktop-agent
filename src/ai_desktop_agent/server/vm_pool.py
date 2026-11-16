@@ -440,6 +440,7 @@ class VmPool:
                     shm_size="1g",
                     volumes={home.name: {"bind": HOME, "mode": "rw"}},
                     environment={
+                        "LANG": "C.UTF-8",
                         "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
                         "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
                     },

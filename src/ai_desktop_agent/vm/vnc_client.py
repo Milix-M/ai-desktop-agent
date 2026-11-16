@@ -209,6 +209,8 @@ class VNCClient(DisplayBackend):
         """VNCサーバーに接続する。"""
         from vncdotool import api
 
+        from ai_desktop_agent.vm.clipboard import ClipboardFactory
+
         # vncdotool: double-colon for explicit port (single colon = display number)
         server = f"{host}::{port}"
         logger.info("VNC接続中: %s", server)
@@ -217,7 +219,13 @@ class VNCClient(DisplayBackend):
             server,
             password=password,
             timeout=10.0,
+            factory_class=ClipboardFactory,
         )
+        try:
+            self._client.connection_ready()
+        except Exception:
+            self.disconnect()
+            raise
         self._connected = True
         logger.info("VNC接続完了: %s", server)
 
@@ -469,23 +477,29 @@ class VNCClient(DisplayBackend):
             logger.debug("Androidウェイクタップに失敗", exc_info=True)
 
     def type_text(self, text: str) -> None:
-        """テキストを1文字ずつキーイベントで送信する。
+        """テキストをキーイベントまたはUnicodeの貼り付けで送信する。
 
-        注意: vncdotool の paste() はクリップボード経由だが、QEMU 標準の
-        VNC サーバは ClientCutText をゲストに注入しないため無視される。
+        注意: vncdotool の paste() はクリップボード経由だが、このQEMU構成には
+        ゲストへのクリップボード連携がないため使わない。
         そのため ASCII 文字は keyPress で1文字ずつ送る。
         さらに Shift が必要な `>` や `"` 等は、Shift修飾を使わず
         文字自体のX11 keysymを keyPress 1回で送る（Shift修飾は
         VNC経路で外れる実測があるため）。
-        非ASCII文字はこの経路では扱えないため、入力前にエラーにする。
+        非ASCII文字はExtended Clipboardを確認してから貼り付ける。
         """
         self._ensure_connected()
         unsupported = [
-            ch for ch in text if ch not in "\n\t" and not (ch.isascii() and ch.isprintable())
+            ch
+            for ch in text
+            if ch not in "\n\t"
+            and (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or 0xD800 <= ord(ch) <= 0xDFFF)
         ]
         if unsupported:
             codes = ", ".join(f"U+{ord(ch):04X}" for ch in dict.fromkeys(unsupported))
             raise ValueError(f"このVNC入力経路では送信できない文字があります: {codes}")
+        if not text.isascii():
+            self._paste_unicode(text)
+            return
         sent = 0
         for ch in text:
             self._check_stop()
@@ -508,6 +522,32 @@ class VNCClient(DisplayBackend):
             else:
                 logger.warning("送信不可の文字をスキップ: U+%04X", ord(ch))
         logger.debug("テキスト送信: %d/%d 文字", sent, len(text))
+
+    def _paste_unicode(self, text: str) -> None:
+        from ai_desktop_agent.vm.clipboard import MAX_TEXT_BYTES, ClipboardClient
+
+        if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ValueError("日本語・絵文字などを含む1回の入力はUTF-8で64 KiB以下にしてください")
+        protocol = getattr(self._client, "protocol", None)
+        if not isinstance(protocol, ClipboardClient):
+            raise ValueError("このVNC接続はUnicodeの貼り付けに対応していません")
+        self._wait_clipboard(protocol.clipboard_ready)
+        if not protocol.clipboard_supported:
+            raise ValueError("このVNCサーバーはUnicodeの貼り付けに対応していません")
+        self._check_stop()
+        self._client.announce_text(text)
+        self.key_combo(["shift", "insert"])
+        self._wait_clipboard(protocol.clipboard_provided)
+        if protocol.clipboard_error:
+            raise RuntimeError(protocol.clipboard_error)
+
+    def _wait_clipboard(self, event: threading.Event) -> None:
+        deadline = time.monotonic() + 2.0
+        while not event.wait(0.05):
+            self._check_stop()
+            if time.monotonic() >= deadline:
+                raise RuntimeError("VNCの貼り付け応答がありません。入力結果を確認してください")
+        self._check_stop()
 
     # ── 内部 ──────────────────────────────────────────────
 

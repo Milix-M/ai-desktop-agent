@@ -56,6 +56,6 @@ async def test_input_failure_reason_reaches_recovery():
     session.executor.wait_for_still = AsyncMock()
     await session._execute_phase()
     await session._verify_phase()
-    assert "U+3053" in session._pending_error.error_message
-    assert "U+3053" in session.snapshot().actions[-1].error_message
+    assert "Unicode" in session._pending_error.error_message
+    assert "Unicode" in session.snapshot().actions[-1].error_message
     assert not vnc._client.mock_calls
