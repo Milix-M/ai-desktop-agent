@@ -58,6 +58,7 @@ skip-magic-trailing-comma = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = ["-v", "--tb=short"]
+markers = ["desktop_integration: real Docker desktop and browser checks"]
 
 [tool.coverage.run]
 source = ["src/ai_desktop_agent"]
