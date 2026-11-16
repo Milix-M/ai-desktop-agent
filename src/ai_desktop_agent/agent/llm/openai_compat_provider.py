@@ -792,6 +792,9 @@ class OpenAICompatProvider(LLMProvider):
 
     # ── 指示理解 ─────────────────────────────────
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def understand_instruction(
         self, goal: Goal, platform: str = PLATFORM_LINUX
     ) -> UnderstandingResult:

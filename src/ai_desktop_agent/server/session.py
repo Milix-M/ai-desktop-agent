@@ -169,6 +169,8 @@ class TaskSession:
 
         self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
+        self._resources_closed = False
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
         # サブタスクごとの空完了却下回数
@@ -255,9 +257,8 @@ class TaskSession:
         goal = Goal(description=instruction)
         self._instruction = instruction
         self.loop.start(goal)
-        await self._emit_state_change()
-
         try:
+            await self._emit_state_change()
             # Phase 1: UNDERSTANDING
             understanding = await self.llm.understand_instruction(goal, platform=self._platform())
             goal.intent = understanding.intent
@@ -321,6 +322,31 @@ class TaskSession:
             await self._emit_state_change()
             self._persist(success=False)
             return False
+
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the display and provider connections on every exit path."""
+        if self._resources_closed:
+            return
+        self._resources_closed = True
+        try:
+            await asyncio.to_thread(self.display.disconnect)
+        except Exception:
+            logger.exception("VNC接続の解放に失敗")
+        for provider in (self.llm, self.decision):
+            close = getattr(provider, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.exception("プロバイダ接続の解放に失敗")
+
+    def _ensure_closed(self, task: asyncio.Task) -> None:
+        # Cancellation before run() starts never enters its finally block.
+        if not self._resources_closed:
+            self._cleanup_task = asyncio.create_task(self.aclose())
 
     # ── 永続化 ────────────────────────────────────
 
@@ -1279,6 +1305,7 @@ class TaskSession:
         if self._task and not self._task.done():
             raise RuntimeError("タスクは既に実行中です")
         self._task = asyncio.create_task(self.run(instruction))
+        self._task.add_done_callback(self._ensure_closed)
 
     def pause(self) -> None:
         if self.loop.state == AgentState.EXECUTING:
