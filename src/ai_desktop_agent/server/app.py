@@ -482,26 +482,38 @@ async def delete_task(task_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+def _control_session(vm_id: str | None) -> TaskSession | None:
+    if vm_id is None:
+        return _active_session
+    return next(
+        (s for s in reversed(list(_sessions.values())) if s.vm_id == vm_id and s.is_running),
+        None,
+    )
+
+
 @app.post("/tasks/current/pause")
-async def pause_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.pause()
+async def pause_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.pause()
         return {"status": "paused"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/resume")
-async def resume_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.resume()
+async def resume_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.resume()
         return {"status": "resumed"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/stop")
-async def stop_task() -> dict[str, str]:
-    if _active_session:
-        _active_session.stop()
+async def stop_task(vm_id: str | None = None) -> dict[str, str]:
+    session = _control_session(vm_id)
+    if session:
+        session.stop()
         return {"status": "stopped"}
     return {"status": "no_session"}
 
