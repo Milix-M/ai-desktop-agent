@@ -101,6 +101,23 @@ class VmPool:
 
     # ── 一覧・取得 ──────────────────────────────────
 
+    def _fixed_containers(self, docker: Any, service: str) -> list[Any]:
+        """Find fixed services only in this backend's Compose project."""
+        project = os.environ.get("COMPOSE_PROJECT_NAME")
+        if not project:
+            try:
+                backend = docker.containers.get(socket.gethostname())
+                project = self._labels(backend).get("com.docker.compose.project")
+            except Exception:
+                pass
+        project = project or "ai-desktop-agent"
+        candidates = docker.containers.list(
+            all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={service}"}
+        )
+        return [
+            c for c in candidates if self._labels(c).get("com.docker.compose.project") == project
+        ]
+
     @staticmethod
     def _pick_fixed(candidates: list, service: str) -> Any | None:
         """固定サービスのコンテナを1つ選ぶ。
@@ -125,9 +142,7 @@ class VmPool:
 
         # compose管理の既定VM（サービス名 vm。kvmプロファイル時のみ存在）
         try:
-            legacy = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
-            )
+            legacy = self._fixed_containers(docker, BASE_VM_SERVICE)
         except Exception:
             legacy = []
         picked = self._pick_fixed(legacy, BASE_VM_SERVICE)
@@ -138,9 +153,7 @@ class VmPool:
 
         # compose管理の軽量コンテナ環境（サービス名 desktop。containerプロファイル時）
         try:
-            desktops = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={DESKTOP_SERVICE}"}
-            )
+            desktops = self._fixed_containers(docker, DESKTOP_SERVICE)
         except Exception:
             desktops = []
         picked = self._pick_fixed(desktops, DESKTOP_SERVICE)
@@ -151,9 +164,7 @@ class VmPool:
 
         # compose管理の固定Android端末（サービス名 android。kvmプロファイル時のみ存在）
         try:
-            androids = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={ANDROID_SERVICE}"}
-            )
+            androids = self._fixed_containers(docker, ANDROID_SERVICE)
         except Exception:
             androids = []
         picked = self._pick_fixed(androids, ANDROID_SERVICE)
@@ -487,9 +498,7 @@ class VmPool:
         """
         if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE, ANDROID_SERVICE):
             try:
-                mains = docker.containers.list(
-                    all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={vm_id}"}
-                )
+                mains = self._fixed_containers(docker, vm_id)
             except Exception:
                 mains = []
             if not include_relay:
@@ -498,10 +507,7 @@ class VmPool:
             relay_service = FIXED_RELAY_SERVICE.get(vm_id)
             if relay_service:
                 try:
-                    relays = docker.containers.list(
-                        all=True,
-                        filters={"label": f"{COMPOSE_SERVICE_LABEL}={relay_service}"},
-                    )
+                    relays = self._fixed_containers(docker, relay_service)
                 except Exception:
                     relays = []
             return [*list(mains), *list(relays)]
@@ -689,9 +695,7 @@ class VmPool:
         if os.environ.get("ANDROID_IMAGE_REF"):
             return os.environ["ANDROID_IMAGE_REF"]
         try:
-            candidates = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}=android"}
-            )
+            candidates = self._fixed_containers(docker, ANDROID_SERVICE)
             if candidates:
                 tags = (
                     (candidates[0].image.attrs.get("RepoTags") or [])
@@ -748,9 +752,7 @@ class VmPool:
         if os.environ.get("DESKTOP_IMAGE_REF"):
             return os.environ["DESKTOP_IMAGE_REF"]
         try:
-            candidates = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={DESKTOP_SERVICE}"}
-            )
+            candidates = self._fixed_containers(docker, DESKTOP_SERVICE)
             if candidates:
                 tags = (
                     (candidates[0].image.attrs.get("RepoTags") or [])
@@ -768,9 +770,7 @@ class VmPool:
         if os.environ.get("VM_IMAGE_REF"):
             return os.environ["VM_IMAGE_REF"]
         try:
-            legacy = docker.containers.list(
-                all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
-            )
+            legacy = self._fixed_containers(docker, BASE_VM_SERVICE)
             if legacy:
                 tags = (
                     (legacy[0].image.attrs.get("RepoTags") or [])
