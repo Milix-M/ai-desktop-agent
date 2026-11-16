@@ -15,7 +15,10 @@ class _FakeContainer:
     def __init__(self, name="vm-1", status="running", running=True, health="healthy"):
         self.name = name
         self.status = status
-        self.attrs = {"State": {"Running": running, "Health": {"Status": health}}}
+        self.attrs = {
+            "Config": {"Labels": {"com.docker.compose.project": "ai-desktop-agent"}},
+            "State": {"Running": running, "Health": {"Status": health}},
+        }
         self.restarted = False
 
     def reload(self):

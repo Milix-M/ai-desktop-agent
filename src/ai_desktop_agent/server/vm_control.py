@@ -133,16 +133,9 @@ class VmController:
             except Exception:
                 logger.warning("VMコンテナが見つかりません: %s", self._container_name)
                 return None
-        project = os.environ.get("COMPOSE_PROJECT_NAME")
-        candidates = client.containers.list(
-            all=True, filters={"label": f"{SERVICE_LABEL}={VM_SERVICE}"}
-        )
-        if project:
-            for c in candidates:
-                labels = (c.attrs.get("Config") or {}).get("Labels") or {}
-                if labels.get(PROJECT_LABEL) == project:
-                    return c
-            return None
+        from ai_desktop_agent.server.vm_pool import VmPool
+
+        candidates = VmPool(client=client)._fixed_containers(client, VM_SERVICE)
         return candidates[0] if candidates else None
 
 
