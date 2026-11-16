@@ -21,7 +21,7 @@ async def test_interleaved_and_concurrent_submissions_keep_one_task_per_vm(monke
     monkeypatch.setattr(
         server,
         "_create_session",
-        lambda: TaskSession(llm=WaitingLLM(), display=FakeDisplayBackend()),
+        lambda display: TaskSession(llm=WaitingLLM(), display=display),
     )
     try:
         for vm_id in ["A", "B", "A"]:

@@ -34,7 +34,7 @@ def _reset_session(tmp_path):
     _orig_connect = server_app._connect_vm_display
     server_app._connect_vm_display = lambda vm: FakeDisplayBackend()
     # セッションファクトリをモックに差し替え（本番コードパスはそのまま）
-    server_app._create_session = lambda: TaskSession(
+    server_app._create_session = lambda display: TaskSession(
         llm=MockLLMProvider(),
         display=FakeDisplayBackend(),
         store=server_app._store,
