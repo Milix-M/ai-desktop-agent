@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -10,14 +11,15 @@ from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
 async def test_cancel_releases_held_key():
     display = FakeDisplayBackend()
-    display.key_down = Mock()
+    pressed = threading.Event()
+    display.key_down = Mock(side_effect=lambda key: pressed.set())
     display.key_up = Mock()
     task = asyncio.create_task(
         ActionExecutor(display).execute(
             Action(ActionType.KEY_HOLD, {"key": "shift", "duration_ms": 1000})
         )
     )
-    await asyncio.sleep(0)
+    assert await asyncio.to_thread(pressed.wait, 5)
     display.key_down.assert_called_once_with("shift")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
