@@ -490,8 +490,15 @@ async def delete_task(task_id: str) -> dict[str, str]:
 
     global _active_session
 
-    if _active_session and _active_session.id == task_id:
-        _active_session.stop()
+    session = _sessions.get(task_id)
+    if session is None and _active_session and _active_session.id == task_id:
+        session = _active_session
+    if session is not None:
+        session.stop()
+        if session._task is not None:
+            await asyncio.gather(session._task, return_exceptions=True)
+        _sessions.pop(task_id, None)
+    if _active_session is session:
         _active_session = None
 
     if not get_store().delete(task_id):
