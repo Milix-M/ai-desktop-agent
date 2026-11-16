@@ -11,6 +11,7 @@ from typing import Any
 
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+from ai_desktop_agent.privacy import install_log_redaction, protect, protect_url
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,11 @@ def create_llm_provider(
     model = model or os.environ.get("LLM_MODEL") or default_model
     base_url = base_url or default_base_url
 
+    if api_key:
+        protect(api_key)
+    if base_url:
+        protect_url(base_url)
+    install_log_redaction()
     logger.info("OpenAICompatProvider: provider=%s model=%s base_url=%s", provider, model, base_url)
     extra: dict[str, Any] = {}
     if provider in _PROVIDERS_WITH_UA:

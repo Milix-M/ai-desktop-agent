@@ -470,9 +470,25 @@ class TestSlowVmGuards:
 
         s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
         s.loop.record_action(Action(action_type=ActionType.TYPE, params={"text": "hello"}), True)
+        from ai_desktop_agent.server.session import _image_hash
+
+        s._prev_turn_hash = _image_hash((await s._capture_screenshot()).image_bytes)
         await s._execute_phase()
         last = s.loop.context.action_history[-1]
         assert last.action.action_type == ActionType.WAIT
+
+    @pytest.mark.asyncio
+    async def test_repeated_navigation_still_runs_when_the_screen_changed(self):
+        from ai_desktop_agent.server.session import _image_hash
+
+        action = Action(ActionType.KEY_PRESS, {"key": "down"})
+        s = _executing_session(_CaptureLLM(_decision(ActionType.KEY_PRESS, {"key": "down"})))
+        for _ in range(2):
+            s.loop.record_action(action, True)
+        s._prev_turn_hash = _image_hash(b"previous cell selection")
+        await s._execute_phase()
+        assert s.loop.context.action_history[-1].action == action
+        assert s.display.key_presses.count("down") == 1
 
     @pytest.mark.asyncio
     async def test_unchanged_screen_hints_next_decide(self):

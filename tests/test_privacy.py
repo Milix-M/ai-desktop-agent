@@ -43,6 +43,20 @@ def test_generated_access_key_and_browser_cookie_are_protected():
     assert access.valid_key(access._key.decode())
 
 
+async def test_factory_does_not_log_a_credential_from_an_explicit_url(caplog):
+    from ai_desktop_agent.agent.llm.factory import create_llm_provider
+
+    secret = "gateway-key-" + uuid.uuid4().hex
+    with caplog.at_level(logging.INFO):
+        provider = create_llm_provider(
+            provider="openai",
+            api_key="configured-api-key",
+            base_url="https://example.test/v1?key=" + secret,
+        )
+    await provider.aclose()
+    assert secret not in caplog.text
+
+
 def test_url_credentials_headers_and_nested_tokens_are_not_exposed(monkeypatch):
     password = uuid.uuid4().hex
     token = uuid.uuid4().hex
