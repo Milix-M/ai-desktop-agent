@@ -15,9 +15,11 @@ from typing import Annotated
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
+from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.server.vm_control import (
@@ -62,12 +64,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # seccompでptrace/py-spyが使えない環境向け。
     with contextlib.suppress(Exception):
         faulthandler.register(signal.SIGUSR1)
-    try:
-        marked = get_store().mark_interrupted()
-        if marked:
-            logger.info("起動時に中断タスク %d 件をマーク", marked)
-    except Exception:
-        logger.exception("タスクストアの初期化に失敗")
+    marked = get_store().mark_interrupted()
+    if marked:
+        logger.info("起動時に中断タスク %d 件をマーク", marked)
     from ai_desktop_agent.server.android_provision import AndroidProvisioner
 
     def _android_busy(vm_id: str) -> bool:
@@ -108,6 +107,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(StorageError)
+async def storage_error_handler(request, error: StorageError):
+    return JSONResponse(status_code=503, content={"detail": str(error)})
+
 
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
 app.add_middleware(
@@ -284,6 +289,8 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     vm_id 省略時は稼働中の既定VMを使う。複数VMで並列実行できる。
     """
     global _active_session
+
+    await asyncio.to_thread(get_store().check_writable)
 
     vm = await run_vm_call(_resolve_vm, req.vm_id)
     display = await run_display_call(_connect_vm_display, vm)
@@ -776,7 +783,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 async def _task_snapshot() -> list[TaskStatus]:
     """Return the latest task for every VM, including tasks finished while disconnected."""
-    records = await asyncio.to_thread(get_store().list, limit=1000)
+    records = await asyncio.to_thread(get_store().list, limit=None)
     statuses: dict[str, TaskStatus] = {}
     for record in records:
         if record.vm_id is None or record.vm_id in statuses:

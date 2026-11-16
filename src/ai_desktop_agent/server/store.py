@@ -14,6 +14,8 @@ import re
 import time
 from pathlib import Path
 
+from ai_desktop_agent.server.persistence import StorageError, atomic_json, check_writable
+
 logger = logging.getLogger(__name__)
 
 # 実行中とみなす状態（これらで残っていたら起動時に interrupted へ）
@@ -126,14 +128,10 @@ class TaskStore:
     def __init__(self, root: str | Path | None = None) -> None:
         base = root or os.environ.get("DATA_DIR", "./data")
         self._dir = Path(base) / "tasks"
-        try:
-            self._dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            # 書き込めない環境（権限等）では一時ディレクトリに退避
-            import tempfile
+        self.check_writable()
 
-            self._dir = Path(tempfile.mkdtemp(prefix="ai-agent-tasks-"))
-            logger.warning("タスク保存先に書き込めないため %s を使用", self._dir)
+    def check_writable(self) -> None:
+        check_writable(self._dir)
 
     def save(self, record: TaskRecord) -> None:
         """レコードを保存（upsert）。"""
@@ -143,9 +141,7 @@ class TaskStore:
         if not record.created_at:
             record.created_at = record.updated_at
         path = self._dir / f"{record.id}.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
+        atomic_json(path, record.to_dict())
 
     def load(self, task_id: str) -> TaskRecord | None:
         """1件読み出し。なければ None。"""
@@ -160,7 +156,7 @@ class TaskStore:
             logger.warning("タスク記録の読み出しに失敗 %s: %s", task_id, e)
             return None
 
-    def list(self, limit: int = 50) -> list[TaskRecord]:
+    def list(self, limit: int | None = 50) -> list[TaskRecord]:
         """更新が新しい順に一覧。壊れたファイルは読み飛ばす。"""
         records: list[TaskRecord] = []
         for path in self._dir.glob("*.json"):
@@ -185,8 +181,7 @@ class TaskStore:
         try:
             path.unlink()
         except OSError as e:
-            logger.warning("タスク記録の削除に失敗 %s: %s", task_id, e)
-            return False
+            raise StorageError(f"タスク記録を削除できません: {task_id}") from e
         return True
 
     def mark_interrupted(self) -> int:
@@ -196,7 +191,7 @@ class TaskStore:
             更新した件数。
         """
         count = 0
-        for rec in self.list(limit=1000):
+        for rec in self.list(limit=None):
             if rec.state in ACTIVE_STATES:
                 rec.state = INTERRUPTED
                 rec.success = False

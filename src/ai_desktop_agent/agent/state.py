@@ -48,7 +48,7 @@ _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
     },
     AgentState.RECOVERING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.FAILED},
     AgentState.PAUSED: {AgentState.EXECUTING, AgentState.IDLE, AgentState.FAILED},
-    AgentState.COMPLETED: {AgentState.IDLE},
+    AgentState.COMPLETED: {AgentState.IDLE, AgentState.FAILED},
     AgentState.FAILED: {AgentState.IDLE},
 }
 

@@ -17,11 +17,17 @@ import os
 import socket
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ai_desktop_agent.server.persistence import (  # noqa: E402
+    StorageError,
+    atomic_json,
+    metadata_lock,
+)
 from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E402
 
 LABEL_VM_ID = "ai-desktop-agent.vm-id"
@@ -201,6 +207,8 @@ class VmPool:
         # 動的VM
         try:
             dynamic = self._dynamic_containers(docker)
+        except StorageError:
+            raise
         except Exception:
             dynamic = []
         for c in dynamic:
@@ -275,121 +283,131 @@ class VmPool:
         vm_name = f"ai-desktop-agent-{vm_id}"
         logger.info("VM作成: %s kind=%s (vnc=%d ws=%d)", vm_id, kind, vnc_port, ws_port)
 
-        adb_port = 0
-        if kind == KIND_ANDROID:
-            iso_host = self._android_iso_host()
-            if iso_host is None:
-                raise ValueError(
-                    "Android ISO がありません。android/README.md の手順で取得してください"
+        allocation = {"vnc_port": vnc_port, "ws_port": ws_port, "name": name or vm_id}
+        with self._creation(docker, vm_id, allocation):
+            adb_port = 0
+            if kind == KIND_ANDROID:
+                iso_host = self._android_iso_host()
+                if iso_host is None:
+                    raise ValueError(
+                        "Android ISO がありません。android/README.md の手順で取得してください"
+                    )
+                image = self._android_image_ref(docker)
+                # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
+                use_kvm = resolve_use_kvm()
+                memory = os.environ.get("ANDROID_MEMORY", "2048")
+                cpus = os.environ.get("ANDROID_CPUS", "4")
+                # ADB転送のホスト側ポート（backendの強制経路＋開発者の手動adb用）。
+                # コンテナ側は entrypoint の ANDROID_ADB_PORT（既定5555）に転送される。
+                adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
+                docker.containers.run(
+                    image,
+                    name=vm_name,
+                    detach=True,
+                    # TCGの明示許可時はKVMデバイスを要求しない。
+                    devices=["/dev/kvm:/dev/kvm"] if is_kvm_available(docker) else [],
+                    ports={
+                        "5900/tcp": ("127.0.0.1", vnc_port),
+                        "5555/tcp": ("127.0.0.1", adb_port),
+                    },
+                    environment={
+                        "ANDROID_ISO": "/android/boot.iso",
+                        "ANDROID_MEMORY": memory,
+                        "ANDROID_CPUS": cpus,
+                        "ANDROID_VNC_PORT": "5900",
+                        "ANDROID_ADB_FORWARD": "1",
+                        "ANDROID_ADB_PORT": "5555",
+                        "USE_KVM": use_kvm,
+                        "ALLOW_TCG_VM": os.environ.get("ALLOW_TCG_VM", "false"),
+                    },
+                    volumes={
+                        iso_host: {"bind": "/android/boot.iso", "mode": "ro"},
+                        **self._android_ro_files(),
+                    },
+                    labels=common_labels,
+                    network=network,
+                    restart_policy={"Name": "unless-stopped"},
                 )
-            image = self._android_image_ref(docker)
-            # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
-            use_kvm = resolve_use_kvm()
-            memory = os.environ.get("ANDROID_MEMORY", "2048")
-            cpus = os.environ.get("ANDROID_CPUS", "4")
-            # ADB転送のホスト側ポート（backendの強制経路＋開発者の手動adb用）。
-            # コンテナ側は entrypoint の ANDROID_ADB_PORT（既定5555）に転送される。
-            adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
-            docker.containers.run(
-                image,
-                name=vm_name,
-                detach=True,
-                # Android-x86もKVM必須。非対応ホストでは起動前段で弾く。
-                devices=["/dev/kvm:/dev/kvm"],
-                ports={"5900/tcp": ("127.0.0.1", vnc_port), "5555/tcp": ("127.0.0.1", adb_port)},
-                environment={
-                    "ANDROID_ISO": "/android/boot.iso",
-                    "ANDROID_MEMORY": memory,
-                    "ANDROID_CPUS": cpus,
-                    "ANDROID_VNC_PORT": "5900",
-                    "ANDROID_ADB_FORWARD": "1",
-                    "ANDROID_ADB_PORT": "5555",
-                    "USE_KVM": use_kvm,
-                },
-                volumes={
-                    iso_host: {"bind": "/android/boot.iso", "mode": "ro"},
-                    **self._android_ro_files(),
-                },
-                labels=common_labels,
-                network=network,
-                restart_policy={"Name": "unless-stopped"},
-            )
+                self._start_relay_or_rollback(
+                    docker, vm_id, vm_name, ws_port, network, common_labels
+                )
+                self._save_state(
+                    vm_id,
+                    {
+                        "vnc_port": vnc_port,
+                        "ws_port": ws_port,
+                        "adb_port": adb_port,
+                        "name": name or vm_id,
+                    },
+                )
+                return VmInfo(
+                    id=vm_id,
+                    name=name or vm_id,
+                    status="creating",
+                    vnc_port=vnc_port,
+                    ws_port=ws_port,
+                    vnc_host=vm_name,
+                    managed=True,
+                    kind=kind,
+                    adb_port=adb_port,
+                )
+
+            if kind == KIND_QEMU:
+                overlay_host = self._create_overlay(vm_id)
+                image = self._vm_image_ref(docker)
+                # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
+                use_kvm = resolve_use_kvm()
+                memory = os.environ.get("VM_MEMORY", "4096")
+                cpus = os.environ.get("VM_CPUS", "4")
+
+                host_repo = self._host_repo_dir()
+                volumes = {
+                    overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
+                    f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
+                    **self._ro_vm_files(),
+                }
+                docker.containers.run(
+                    image,
+                    name=vm_name,
+                    detach=True,
+                    # TCGの明示許可時はKVMデバイスを要求しない。
+                    devices=["/dev/kvm:/dev/kvm"] if is_kvm_available(docker) else [],
+                    ports={"5900/tcp": ("127.0.0.1", vnc_port)},
+                    environment={
+                        "VM_MEMORY": memory,
+                        "VM_CPUS": cpus,
+                        "VM_VNC_PORT": "5900",
+                        "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
+                        "CMDLINE_FILE": "/vm/cmdline.txt",
+                        "USE_KVM": use_kvm,
+                        "ALLOW_TCG_VM": os.environ.get("ALLOW_TCG_VM", "false"),
+                        "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
+                        "QGA_SOCK": f"/vm/sockets/{vm_id}-qga.sock",
+                    },
+                    volumes=volumes,
+                    labels=common_labels,
+                    network=network,
+                    restart_policy={"Name": "unless-stopped"},
+                )
+            else:
+                image = self._desktop_image_ref(docker)
+                docker.containers.run(
+                    image,
+                    name=vm_name,
+                    detach=True,
+                    shm_size="1g",
+                    ports={"5900/tcp": ("127.0.0.1", vnc_port)},
+                    environment={
+                        "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
+                        "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
+                    },
+                    labels=common_labels,
+                    network=network,
+                    restart_policy={"Name": "unless-stopped"},
+                )
+
             self._start_relay_or_rollback(docker, vm_id, vm_name, ws_port, network, common_labels)
-            self._save_state(
-                vm_id,
-                {
-                    "vnc_port": vnc_port,
-                    "ws_port": ws_port,
-                    "adb_port": adb_port,
-                    "name": name or vm_id,
-                },
-            )
-            return VmInfo(
-                id=vm_id,
-                name=name or vm_id,
-                status="creating",
-                vnc_port=vnc_port,
-                ws_port=ws_port,
-                vnc_host=vm_name,
-                managed=True,
-                kind=kind,
-                adb_port=adb_port,
-            )
-
-        if kind == KIND_QEMU:
-            overlay_host = self._create_overlay(vm_id)
-            image = self._vm_image_ref(docker)
-            # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
-            use_kvm = resolve_use_kvm()
-            memory = os.environ.get("VM_MEMORY", "4096")
-            cpus = os.environ.get("VM_CPUS", "4")
-
-            host_repo = self._host_repo_dir()
-            volumes = {
-                overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
-                f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
-                **self._ro_vm_files(),
-            }
-            docker.containers.run(
-                image,
-                name=vm_name,
-                detach=True,
-                # QEMU VMはKVM必須。非対応ホストでは起動前段で弾くため常時要求する。
-                devices=["/dev/kvm:/dev/kvm"],
-                ports={"5900/tcp": ("127.0.0.1", vnc_port)},
-                environment={
-                    "VM_MEMORY": memory,
-                    "VM_CPUS": cpus,
-                    "VM_VNC_PORT": "5900",
-                    "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
-                    "CMDLINE_FILE": "/vm/cmdline.txt",
-                    "USE_KVM": use_kvm,
-                    "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
-                    "QGA_SOCK": f"/vm/sockets/{vm_id}-qga.sock",
-                },
-                volumes=volumes,
-                labels=common_labels,
-                network=network,
-                restart_policy={"Name": "unless-stopped"},
-            )
-        else:
-            image = self._desktop_image_ref(docker)
-            docker.containers.run(
-                image,
-                name=vm_name,
-                detach=True,
-                ports={"5900/tcp": ("127.0.0.1", vnc_port)},
-                environment={
-                    "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
-                    "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
-                },
-                labels=common_labels,
-                network=network,
-                restart_policy={"Name": "unless-stopped"},
-            )
-
-        self._start_relay_or_rollback(docker, vm_id, vm_name, ws_port, network, common_labels)
-        return self._finish_create(vm_id, name, vm_name, vnc_port, ws_port, kind)
+            return self._finish_create(vm_id, name, vm_name, vnc_port, ws_port, kind)
 
     def _start_relay_or_rollback(self, docker: Any, vm_id: str, *args) -> None:
         try:
@@ -551,6 +569,8 @@ class VmPool:
             return [*list(mains), *list(relays)]
         try:
             all_targets = self._dynamic_containers(docker, vm_id)
+        except StorageError:
+            raise
         except Exception:
             return []
         if include_relay:
@@ -692,9 +712,8 @@ class VmPool:
     def _create_overlay(self, vm_id: str) -> str:
         """baseのフルコピーを作り、ホスト側パスを返す。
 
-        注意: qcow2 backing参照（overlay）は使わない。
-        baseを別QEMUが読み書きオープン中の場合、backing参照側が
-        ファイルロックで開けないため。容量と引き換えに堅牢性を取る。
+        読み取り専用テンプレートから独立したディスクを複製する。
+        backing参照を使わず、テンプレートへの依存を残さない。
         """
         docker = self._docker()
         overlay_host_dir = f"{self._host_repo_dir()}/vm/overlays"
@@ -706,7 +725,9 @@ class VmPool:
             image,
             # 注意: vmイメージのENTRYPOINTはQEMU起動のため上書きする
             entrypoint=["cp"],
-            command=(f"--sparse=always /vm/desktop.qcow2 /vm/overlays/{vm_id}.qcow2"),
+            command=(
+                f"--sparse=always --reflink=auto /vm/desktop.qcow2 /vm/overlays/{vm_id}.qcow2"
+            ),
             volumes={
                 overlay_host_dir: {"bind": "/vm/overlays", "mode": "rw"},
                 # 複製元（読取専用）
@@ -886,30 +907,61 @@ class VmPool:
         return self._state_file
 
     def _load_all_states(self) -> dict:
+        path = self._state_path()
         try:
-            return json.loads(self._state_path().read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            states = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise StorageError(
+                f"VM情報を読み込めません: {path}。バックアップから復元してください"
+            ) from error
+        if not isinstance(states, dict) or any(
+            not isinstance(value, dict) for value in states.values()
+        ):
+            raise StorageError(f"VM情報の形式が不正です: {path}")
+        return states
 
     def _load_state(self, vm_id: str) -> dict | None:
         return self._load_all_states().get(vm_id)
 
     def _save_state(self, vm_id: str, info: dict) -> None:
-        try:
-            path = self._state_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            all_states = self._load_all_states()
-            all_states[vm_id] = {**info, "updated_at": time.time()}
-            path.write_text(json.dumps(all_states, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            logger.warning("VM状態ファイルの保存に失敗", exc_info=True)
+        path = self._state_path()
+        with metadata_lock(path):
+            states = self._load_all_states()
+            states[vm_id] = {**info, "updated_at": time.time()}
+            atomic_json(path, states)
 
     def _drop_state(self, vm_id: str) -> None:
+        path = self._state_path()
+        with metadata_lock(path):
+            states = self._load_all_states()
+            states.pop(vm_id, None)
+            atomic_json(path, states)
+
+    @contextmanager
+    def _creation(self, docker: Any, vm_id: str, allocation: dict):
+        # Reserve durable metadata before allocating containers or disk space.
+        self._save_state(vm_id, allocation)
         try:
-            all_states = self._load_all_states()
-            all_states.pop(vm_id, None)
-            self._state_path().write_text(
-                json.dumps(all_states, ensure_ascii=False), encoding="utf-8"
-            )
-        except OSError:
-            pass
+            yield
+        except Exception:
+            removed = True
+            try:
+                targets = docker.containers.list(
+                    all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
+                )
+                for container in targets:
+                    if self._labels(container).get(LABEL_PROJECT) != self._project_name(docker):
+                        continue
+                    try:
+                        container.remove(force=True)
+                    except Exception:
+                        removed = False
+                        logger.exception("作成失敗後のコンテナ削除に失敗: %s", container.name)
+                if removed:
+                    (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
+                    self._drop_state(vm_id)
+            except Exception:
+                logger.exception("作成失敗後のリソースを回収できませんでした: %s", vm_id)
+            raise
