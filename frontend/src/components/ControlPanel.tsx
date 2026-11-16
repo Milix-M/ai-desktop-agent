@@ -19,8 +19,7 @@ export default function ControlPanel({ onControl, state }: Props) {
   const disabled = !isRunning && state !== "paused";
 
   return (
-    <div className="vm-subsection">
-      <h3>タスク操作</h3>
+    <div className="section">
       <div className="controls">
         <button
           disabled={state !== "executing"}

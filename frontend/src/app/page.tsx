@@ -413,13 +413,14 @@ export default function Home() {
             subtasks={subtasks}
           />
 
+          <ControlPanel onControl={handleControl} state={state} />
+
           <ConnectionPanel
             vncConnected={vncConnected}
             vmResolution={vmResolution}
           />
 
           <CollapsibleSection title="VM管理（デバッグ）">
-            <ControlPanel onControl={handleControl} state={state} />
             <div className="vm-subsection vm-status-block">
               <VMControls onLog={(message, level) => addLog(message, level)} />
             </div>
