@@ -337,7 +337,7 @@ class TestDockerCompose:
     def test_has_all_services(self):
         data = self._compose_data()
         services = data.get("services", {})
-        for name in ("vm", "backend", "frontend", "websockify", "desktop", "websockify-desktop"):
+        for name in ("vm", "backend", "frontend", "desktop", "android"):
             assert name in services, f"docker-compose.yml に {name} サービスが必要です"
 
     def test_vm_uses_kvm_auto_by_default(self):
@@ -346,10 +346,10 @@ class TestDockerCompose:
             "USE_KVM のデフォルトは auto（/dev/kvm の有無で自動切替）であるべき"
         )
 
-    def test_vm_exposes_vnc_port(self):
+    def test_vm_does_not_expose_a_raw_vnc_port(self):
         vm = self._vm_service()
         ports = vm.get("ports", [])
-        assert "127.0.0.1:5900:5900" in ports, "vm サービスは 5900 ポートを公開する必要があります"
+        assert ports == []
 
     def test_backend_depends_on_desktop_healthy(self):
         data = self._compose_data()
@@ -432,9 +432,6 @@ class TestDockerCompose:
         assert "kvm" in (data["services"]["vm"].get("profiles") or []), (
             "vm サービスは kvm プロファイルに属する必要があります"
         )
-        assert "kvm" in (data["services"]["websockify"].get("profiles") or []), (
-            "websockify サービスは kvm プロファイルに属する必要があります"
-        )
         desktop_profiles = data["services"]["desktop"].get("profiles") or []
         assert "container" in desktop_profiles, (
             "desktop サービスは container プロファイルに属する必要があります"
@@ -443,12 +440,9 @@ class TestDockerCompose:
             "desktop サービスは kvm プロファイルに属してはいけません"
         )
 
-    def test_websockify_command(self):
+    def test_no_unauthenticated_relay_is_started(self):
         data = self._compose_data()
-        ws = data["services"]["websockify"]
-        cmd = ws.get("command", "")
-        assert "6080" in cmd, "websockify はポート 6080 を使用する必要があります"
-        assert "vm:5900" in cmd, "websockify は vm:5900 に接続する必要があります"
+        assert not any(name.startswith("websockify") for name in data["services"])
 
 
 # ── バックエンド Dockerfile ───────────────────────────
@@ -536,12 +530,10 @@ class TestDesktopCompose:
 
     def test_desktop_ports(self):
         desktop = self._compose_data()["services"]["desktop"]
-        assert "127.0.0.1:5901:5900" in desktop.get("ports", [])
+        assert not desktop.get("ports")
 
     def test_desktop_websockify(self):
-        ws = self._compose_data()["services"]["websockify-desktop"]
-        assert "6081" in str(ws.get("command", "")) + str(ws.get("ports", ""))
-        assert "desktop:5900" in str(ws.get("command", ""))
+        assert "websockify-desktop" not in self._compose_data()["services"]
 
     def test_backend_default_vnc_is_desktop(self):
         backend = self._compose_data()["services"]["backend"]
@@ -555,9 +547,6 @@ class TestDesktopCompose:
         data = self._compose_data()
         assert "container" in (data["services"]["desktop"].get("profiles") or []), (
             "desktop サービスは container プロファイルに属する必要があります"
-        )
-        assert "container" in (data["services"]["websockify-desktop"].get("profiles") or []), (
-            "websockify-desktop は container プロファイルに属する必要があります"
         )
 
 
@@ -623,10 +612,6 @@ class TestAndroidCompose:
         assert "kvm" in (android.get("profiles") or []), (
             "android サービスは kvm プロファイルに属する必要があります"
         )
-        ws = data["services"]["websockify-android"]
-        assert "kvm" in (ws.get("profiles") or []), (
-            "websockify-android は kvm プロファイルに属する必要があります"
-        )
 
     def test_android_build_and_devices(self):
         android = self._compose_data()["services"]["android"]
@@ -660,9 +645,7 @@ class TestAndroidCompose:
 
     def test_android_ports(self):
         android = self._compose_data()["services"]["android"]
-        assert "127.0.0.1:5590:5900" in android.get("ports", [])
-        ws = self._compose_data()["services"]["websockify-android"]
-        assert "6070" in str(ws.get("ports", ""))
+        assert not android.get("ports")
 
 
 class TestAndroidScripts:

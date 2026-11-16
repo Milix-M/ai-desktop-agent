@@ -45,10 +45,10 @@ main() {
   profile="$(choose_profile "$mode" /dev/kvm "$(uname -m)")"
   if [[ "$profile" == kvm ]]; then
     export VNC_HOST=vm USE_KVM=true
-    exec docker compose --profile kvm up -d --build "$@" vm websockify backend frontend
+    exec docker compose --profile kvm up -d --build "$@" vm backend frontend
   else
     export VNC_HOST=desktop USE_KVM=false
-    exec docker compose --profile container up -d --build "$@" desktop websockify-desktop backend frontend
+    exec docker compose --profile container up -d --build "$@" desktop backend frontend
   fi
 }
 

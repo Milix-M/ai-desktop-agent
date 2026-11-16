@@ -3,12 +3,13 @@ import threading
 from unittest.mock import Mock
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.server.app import app
 from ai_desktop_agent.vm.vnc_client import VNCClient
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 async def test_stop_is_served_while_typing_and_worker_drains():

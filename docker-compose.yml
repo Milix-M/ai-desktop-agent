@@ -7,8 +7,6 @@ services:
     build:
       context: ./desktop
       dockerfile: Dockerfile
-    ports:
-      - "127.0.0.1:5901:5900"
     environment:
       - VNC_GEOMETRY=1280x800
       - VNC_DEPTH=24
@@ -31,8 +29,6 @@ services:
     # KVMアクセラレーション用（kvmプロファイルでのみ起動するため常時マウント）
     devices:
       - /dev/kvm:/dev/kvm
-    ports:
-      - "127.0.0.1:5900:5900"
     environment:
       # auto（既定）: /dev/kvm の有無で自動切替。.envでの指定は不要。
       # 明示指定時はそれに従う（true=必須、false=TCG。TCGは既定で制限）。
@@ -116,33 +112,6 @@ services:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
-  # vm用画面配信（kvmプロファイル時のみ）
-  websockify:
-    profiles: ["kvm"]
-    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
-    build:
-      context: ./websockify
-      dockerfile: Dockerfile
-    command: 0.0.0.0:6080 vm:5900
-    ports:
-      - "127.0.0.1:6080:6080"
-    restart: unless-stopped
-
-  # desktop用画面配信（containerプロファイル時のみ）
-  websockify-desktop:
-    profiles: ["container"]
-    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
-    build:
-      context: ./websockify
-      dockerfile: Dockerfile
-    command: 0.0.0.0:6081 desktop:5900
-    ports:
-      - "127.0.0.1:6081:6081"
-    depends_on:
-      desktop:
-        condition: service_healthy
-    restart: unless-stopped
-
   # ── Android端末（Android-x86 on QEMU。VNC操作は通常VMと同一） ──
   # KVM必須のため kvm プロファイル配下。ISOは android/android-x86_64.iso を配置する。
   # 動的払い出し: POST /vms {"kind": "android"}（KVM必須）
@@ -153,8 +122,6 @@ services:
       dockerfile: Dockerfile
     devices:
       - /dev/kvm:/dev/kvm
-    ports:
-      - "127.0.0.1:5590:5900"
     environment:
       - ANDROID_ISO=/android/boot.iso
       - ANDROID_MEMORY=2048
@@ -176,17 +143,3 @@ services:
       interval: 10s
       retries: 10
       start_period: 180s
-
-  websockify-android:
-    profiles: ["kvm"]
-    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
-    build:
-      context: ./websockify
-      dockerfile: Dockerfile
-    command: 0.0.0.0:6070 android:5900
-    ports:
-      - "127.0.0.1:6070:6070"
-    depends_on:
-      android:
-        condition: service_healthy
-    restart: unless-stopped

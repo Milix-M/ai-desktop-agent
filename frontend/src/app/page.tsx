@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import VncViewer from "@/components/VncViewer";
 import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
@@ -11,6 +11,7 @@ import CollapsibleSection from "@/components/CollapsibleSection";
 import TaskHistory from "@/components/TaskHistory";
 import LogPanel from "@/components/LogPanel";
 import ConnectionPanel from "@/components/ConnectionPanel";
+import AuthGate from "@/components/AuthGate";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useSidebarWidth } from "@/hooks/useSidebarWidth";
 import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, stopVm, startVm, getVncWsUrl } from "@/lib/api";
@@ -58,6 +59,16 @@ const EMPTY_VIEW: VmView = {
 };
 
 export default function Home() {
+  const draft = useRef("");
+  return <AuthGate onLogout={() => { draft.current = ""; }}>
+    {(actions) => <DesktopWorkspace sessionActions={actions} draft={draft} />}
+  </AuthGate>;
+}
+
+function DesktopWorkspace({ sessionActions, draft }: {
+  sessionActions: ReactNode;
+  draft: { current: string };
+}) {
   const [vncConnected, setVncConnected] = useState(false);
   const [vmResolution, setVmResolution] = useState<string | undefined>();
   const [history, setHistory] = useState<TaskHistoryItem[]>([]);
@@ -401,7 +412,7 @@ export default function Home() {
     }
   }, [addLog, refreshVms]);
 
-  const vncUrl = getVncWsUrl(selectedVm?.ws_port);
+  const vncUrl = getVncWsUrl(selectedVm?.id);
 
   return (
     <div className="app-container">
@@ -417,6 +428,7 @@ export default function Home() {
         onStop={handleStopVm}
         onStart={handleStartVm}
         creating={creatingVm}
+        actions={sessionActions}
       />
       <div className="main-layout">
         {selectedVm?.status === "running" ? (
@@ -449,6 +461,8 @@ export default function Home() {
           <InstructionInput
             onSubmit={handleSubmit}
             disabled={submitDisabled}
+            initialValue={draft.current}
+            onDraftChange={(value) => { draft.current = value; }}
           />
 
           <StatusPanel

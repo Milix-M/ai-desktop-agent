@@ -105,13 +105,13 @@ describe("API client", () => {
   });
 
   describe("getVncWsUrl", () => {
-    it("returns ws URL with port 6080", () => {
+    it("returns an authenticated backend path for the default VM", () => {
       const url = getVncWsUrl();
-      expect(url).toContain(":6080");
+      expect(url).toContain(":8081/vnc/vm");
     });
 
-    it("uses the given port", () => {
-      expect(getVncWsUrl(6090)).toContain(":6090");
+    it("encodes the environment ID", () => {
+      expect(getVncWsUrl("desk/one")).toContain(":8081/vnc/desk%2Fone");
     });
   });
 
@@ -124,7 +124,7 @@ describe("API client", () => {
 
       const result = await getVmStatus();
       expect(result.running).toBe(true);
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/vm/status"));
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/vm/status"), expect.objectContaining({ credentials: "include" }));
     });
 
     it("throws on HTTP error", async () => {
@@ -174,7 +174,7 @@ describe("API client", () => {
       const result = await getTaskHistory();
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe("a1");
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks"));
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks"), expect.objectContaining({ credentials: "include" }));
     });
   });
 
@@ -210,7 +210,7 @@ describe("API client", () => {
 
       const result = await getTaskDetail("a1");
       expect(result.actions).toHaveLength(1);
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks/a1"));
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks/a1"), expect.objectContaining({ credentials: "include" }));
     });
 
     it("throws on 404", async () => {
@@ -250,7 +250,7 @@ describe("API client", () => {
 
       const result = await getVms();
       expect(result).toHaveLength(1);
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/vms"));
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/vms"), expect.objectContaining({ credentials: "include" }));
     });
   });
 

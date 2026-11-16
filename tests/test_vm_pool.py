@@ -139,26 +139,23 @@ class TestCreateRemove:
         pool, client = pool
         info = pool.create_vm(name="test2")
         assert info.id.startswith("vm-")
-        assert info.vnc_port == 5910
-        assert info.ws_port == 6090
-        # overlay作成 + vm + websockify の3 run
-        assert len(client.containers.runs) == 3
+        assert info.vnc_port == info.ws_port == 0
+        # Independent disk copy and one private desktop; no public relay.
+        assert len(client.containers.runs) == 2
         overlay_run = client.containers.runs[0]
         assert overlay_run.get("entrypoint") == ["cp"]
         vm_run = client.containers.runs[1]
-        assert vm_run["ports"] == {"5900/tcp": ("127.0.0.1", 5910)}
+        assert not vm_run.get("ports")
         assert vm_run["labels"]["ai-desktop-agent.vm-id"].startswith("vm-")
-        ws_run = client.containers.runs[2]
-        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
         # 一覧に出る
         assert pool.get_vm(info.id).id == info.id
 
-    def test_port_allocation_skips_used(self, pool):
+    def test_creating_multiple_vms_uses_distinct_ids_without_public_ports(self, pool):
         pool, client = pool
         a = pool.create_vm()
         b = pool.create_vm()
-        assert (a.vnc_port, a.ws_port) == (5910, 6090)
-        assert (b.vnc_port, b.ws_port) == (5911, 6091)
+        assert a.id != b.id and a.vnc_host != b.vnc_host
+        assert all(not run.get("ports") for run in client.containers.runs)
 
     def test_remove_vm(self, pool, tmp_path):
         pool, client = pool
@@ -209,10 +206,11 @@ class TestCreateRemove:
 class TestVmEndpoints:
     @pytest.mark.asyncio
     async def test_vms_crud(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
@@ -230,7 +228,7 @@ class TestVmEndpoints:
                 assert (await c.get("/vms")).json() == []
                 created = (await c.post("/vms", json={"name": "e2e"})).json()
                 assert created["id"].startswith("vm-")
-                assert created["ws_port"] == 6090
+                assert created["ws_port"] == 0
                 listed = (await c.get("/vms")).json()
                 assert len(listed) == 1
                 assert (await c.delete(f"/vms/{created['id']}")).json() == {"status": "deleted"}
@@ -243,9 +241,10 @@ class TestVmEndpoints:
 
     @pytest.mark.asyncio
     async def test_vms_503_without_docker(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
+        from tests.http import AuthenticatedClient as AsyncClient
 
         class _Dead:
             def list_vms(self):
@@ -263,10 +262,11 @@ class TestVmEndpoints:
 
     @pytest.mark.asyncio
     async def test_delete_fixed_vm_endpoint(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
@@ -376,8 +376,8 @@ class TestDesktopDiscovery:
         assert len(vms) == 1
         assert vms[0].id == DESKTOP_SERVICE
         assert vms[0].managed is False
-        assert vms[0].vnc_port == 5901
-        assert vms[0].ws_port == 6081
+        assert vms[0].vnc_port == 0
+        assert vms[0].ws_port == 0
 
     def test_default_prefers_desktop(self, pool):
         pool, client = pool
@@ -448,10 +448,11 @@ class TestKvmGate:
 
     @pytest.mark.asyncio
     async def test_create_vm_409_without_kvm(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
@@ -481,16 +482,13 @@ class TestContainerProvisioning:
         info = pool.create_vm(name="c1", kind="container")
         assert info.id.startswith("desk-")
         assert info.kind == "container"
-        assert info.vnc_port == 5910
-        assert info.ws_port == 6090
-        # overlay複製なしのため本体 + 中継の2 run のみ
-        assert len(client.containers.runs) == 2
+        assert info.vnc_port == info.ws_port == 0
+        assert len(client.containers.runs) == 1
         desk_run = client.containers.runs[0]
         assert "devices" not in desk_run, "コンテナ作成で /dev/kvm を要求してはいけない"
         assert desk_run["labels"]["ai-desktop-agent.kind"] == "container"
         assert desk_run["environment"]["VNC_GEOMETRY"] == "1280x800"
-        ws_run = client.containers.runs[1]
-        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
+        assert not desk_run.get("ports")
         assert pool.get_vm(info.id).kind == "container"
 
     def test_create_invalid_kind(self, pool):
@@ -535,10 +533,11 @@ class TestContainerProvisioning:
 
     @pytest.mark.asyncio
     async def test_create_container_endpoint(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("DESKTOP_IMAGE_REF", "test-desktop-image:latest")
@@ -578,20 +577,17 @@ class TestAndroidProvisioning:
         info = pool.create_vm(name="droid", kind="android")
         assert info.id.startswith("and-")
         assert info.kind == "android"
-        # 本体 + 中継の2 run（overlayなし）
-        assert len(client.containers.runs) == 2
+        assert len(client.containers.runs) == 1
         run = client.containers.runs[0]
         assert run["image"] == "test-android-image:latest"
         assert run["devices"] == ["/dev/kvm:/dev/kvm"]
-        assert run["ports"] == {"5900/tcp": ("127.0.0.1", 5910), "5555/tcp": ("127.0.0.1", 5570)}
+        assert not run.get("ports")
         assert run["labels"]["ai-desktop-agent.kind"] == "android"
         assert run["environment"]["ANDROID_ISO"] == "/android/boot.iso"
         assert run["environment"]["ANDROID_MEMORY"] == "2048"
         assert run["environment"]["ANDROID_ADB_FORWARD"] == "1"
         assert run["environment"]["ANDROID_ADB_PORT"] == "5555"
-        assert info.adb_port == 5570
-        ws_run = client.containers.runs[1]
-        assert ws_run["ports"] == {"6080/tcp": ("127.0.0.1", 6090)}
+        assert info.adb_port == 0
         assert pool.get_vm(info.id).kind == "android"
 
     def test_create_android_blocked_without_kvm(self, pool, iso, monkeypatch):
@@ -639,8 +635,8 @@ class TestAndroidProvisioning:
         assert vms[0].id == ANDROID_SERVICE
         assert vms[0].managed is False
         assert vms[0].kind == "android"
-        assert vms[0].vnc_port == 5590
-        assert vms[0].ws_port == 6070
+        assert vms[0].vnc_port == 0
+        assert vms[0].ws_port == 0
 
     def test_fixed_android_prefers_compose_name(self, pool):
         """同一ラベルの手動コンテナがあっても正規コンテナを選ぶ（影武者対策）。"""
@@ -710,10 +706,11 @@ class TestAndroidProvisioning:
 
     @pytest.mark.asyncio
     async def test_create_android_endpoint(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         fake = tmp_path / "android-x86_64.iso"
         fake.write_bytes(b"fake-iso")
@@ -850,10 +847,11 @@ class TestStopStartVm:
 
     @pytest.mark.asyncio
     async def test_stop_start_endpoints(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")
@@ -892,10 +890,11 @@ class TestStopStartVm:
 
     @pytest.mark.asyncio
     async def test_start_409_without_kvm(self, tmp_path, monkeypatch):
-        from httpx import ASGITransport, AsyncClient
+        from httpx import ASGITransport
 
         from ai_desktop_agent.server import app as server_app
         from ai_desktop_agent.server.vm_pool import VmPool as Pool
+        from tests.http import AuthenticatedClient as AsyncClient
 
         monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
         monkeypatch.setenv("VM_IMAGE_REF", "test-vm-image:latest")

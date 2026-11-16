@@ -8,7 +8,7 @@ it("sends the selected VM with control requests", async () => {
   try {
     await controlTask("stop", "vm A");
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A"), { method: "POST" }
+      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A"), { method: "POST", credentials: "include" }
     );
   } finally { fetchMock.mockRestore(); }
 });

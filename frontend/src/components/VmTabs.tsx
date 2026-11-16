@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { VmInfo } from "@/lib/types";
 
 type Kind = "qemu" | "container" | "android";
@@ -14,6 +14,7 @@ interface Props {
   onStop?: (vmId: string) => void;
   onStart?: (vmId: string) => void;
   creating: boolean;
+  actions?: ReactNode;
 }
 
 const KIND_LABEL: Record<Kind, string> = {
@@ -27,7 +28,7 @@ function canDelete(vm: VmInfo): boolean {
   return vm.managed || vm.id === "vm" || vm.id === "desktop" || vm.id === "android";
 }
 
-export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, onStop, onStart, creating }: Props) {
+export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, onStop, onStart, creating, actions }: Props) {
   const [formKind, setFormKind] = useState<Kind | null>(null);
   const [name, setName] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -192,6 +193,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
           </button>
         </div>
       )}
+      {actions}
     </div>
   );
 }

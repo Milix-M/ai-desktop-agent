@@ -150,10 +150,13 @@ def test_disk_cleanup_uses_backend_mount_and_keeps_disk_if_container_removal_fai
     assert not disk.exists()
 
 
-def test_port_allocation_respects_other_projects_published_ports(tmp_path):
+def test_new_desktops_need_no_host_ports_even_when_other_projects_publish_them(tmp_path):
     docker = _FakeDocker()
     other = _FakeContainer("other-service")
     other.attrs["HostConfig"] = {"PortBindings": {"5900/tcp": [{"HostPort": "5910"}]}}
     docker.containers.items.append(other)
     pool = VmPool(client=docker, state_file=tmp_path / "state.json")
-    assert pool._alloc_port(5910, lambda vm: vm.vnc_port) == 5911
+    created = pool.create_vm(kind="container")
+    assert created.vnc_port == created.ws_port == 0
+    assert not docker.containers.runs[0].get("ports")
+    assert not other.removed

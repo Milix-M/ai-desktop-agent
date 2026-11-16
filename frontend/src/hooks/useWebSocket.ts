@@ -43,6 +43,10 @@ export function useWebSocket(onMessage: (msg: WsMessage) => void) {
         if (disposed || wsRef.current !== ws) return;
         clearInterval(heartbeat);
         clearTimeout(pongTimer);
+        // A rejected or expired session is checked by HTTP before reconnecting.
+        void import("@/lib/api").then(({ getAuthStatus }) => getAuthStatus()).then(({ authenticated }) => {
+          if (!disposed && !authenticated) window.dispatchEvent(new Event("auth-required"));
+        }).catch(() => {});
         retryTimer = setTimeout(connect, 3000);
       };
     }

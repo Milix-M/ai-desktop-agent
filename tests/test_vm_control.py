@@ -1,7 +1,7 @@
 """VM管理（作り直し機能）のテスト。"""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.server import app as server_app
 from ai_desktop_agent.server.vm_control import (
@@ -9,6 +9,7 @@ from ai_desktop_agent.server.vm_control import (
     VmController,
     VmStatusInfo,
 )
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 class _FakeContainer:

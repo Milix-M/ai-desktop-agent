@@ -1,7 +1,8 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.server.app import app
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 @pytest.mark.parametrize("instruction", ["", " \n\t ", "a" * 20001])

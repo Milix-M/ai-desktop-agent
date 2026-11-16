@@ -88,7 +88,7 @@ else:
     assert "never-print-this-value" not in result.stdout + result.stderr
     record = json.loads(output.read_text())
     assert record["vnc"] == "desktop" and record["kvm"] == "false"
-    assert record["args"][-4:] == ["desktop", "websockify-desktop", "backend", "frontend"]
+    assert record["args"][-3:] == ["desktop", "backend", "frontend"]
     assert "container" in record["args"]
 
 
