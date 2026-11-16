@@ -30,12 +30,31 @@ class ClipboardClient(VNCDoToolClient):
         self.clipboard_error = None
         self._clipboard_payload = None
         self._extended_cut = False
+        self._retried_empty_update = False
 
     def setEncodings(self, encodings):  # noqa: N802
         super().setEncodings([*encodings, EXTENDED_CLIPBOARD])
 
     def connection_ready(self):
         return self
+
+    def refreshScreen(self, incremental=False):  # noqa: N802
+        self._retried_empty_update = False
+        return super().refreshScreen(incremental)
+
+    def _doConnection(self):  # noqa: N802
+        empty = not self.rectangles and not self.rectanglePos
+        super()._doConnection()
+        if not empty or self.deferred is None:
+            return
+        # TigerVNC can answer the first request with only capability rectangles.
+        # vncdotool drops that update without completing or renewing the request.
+        if not self._retried_empty_update:
+            self._retried_empty_update = True
+            self.framebufferUpdateRequest(incremental=False)
+        else:
+            pending, self.deferred = self.deferred, None
+            pending.errback(RuntimeError("VNCから画面画像を取得できません"))
 
     def _send_clipboard(self, flags, payload=b""):
         message = pack("!I", flags) + payload

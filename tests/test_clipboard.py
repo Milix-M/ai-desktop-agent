@@ -1,9 +1,13 @@
+import io
 import threading
 import zlib
 from struct import pack, unpack
 from unittest.mock import Mock
 
 import pytest
+from PIL import Image
+from vncdotool.client import RGB24
+from vncdotool.rfb import Encoding
 
 from ai_desktop_agent.vm.clipboard import (
     CAPS,
@@ -36,6 +40,52 @@ def protocol():
 
 def negotiate(protocol):
     protocol.dataReceived(server_message(CAPS | TEXT | NOTIFY | PROVIDE, pack("!I", 0)))
+
+
+def test_initial_capability_only_update_requests_real_pixels_before_completing(protocol):
+    protocol.width, protocol.height = 2, 1
+    protocol.pixel_format, protocol.image_mode = RGB24, "RGB"
+    output, completed = io.BytesIO(), []
+    pending = protocol.captureScreen(output, format="png")
+    pending.addCallback(completed.append)
+    capabilities = pack("!BBH", 0, 0, 2) + pack(
+        "!HHHHi", 0, 0, 0, 0, Encoding.PSEUDO_QEMU_EXTENDED_KEY_EVENT
+    )
+    capabilities += pack("!HHHHi", 0, 0, 0, 0, Encoding.PSEUDO_LAST_RECT)
+    protocol.dataReceived(capabilities)
+    assert not completed and protocol.transport.write.call_count == 2
+    assert protocol.transport.write.call_args.args[0] == pack("!BBHHHH", 3, 0, 0, 0, 2, 1)
+    protocol.dataReceived(
+        pack("!BBH", 0, 0, 1) + pack("!HHHHi", 0, 0, 2, 1, Encoding.RAW) + b"\xff\0\0\0\xff\0"
+    )
+    assert completed == [protocol]
+    image = Image.open(output)
+    assert [image.getpixel((x, 0)) for x in range(2)] == [(255, 0, 0), (0, 255, 0)]
+
+
+def test_empty_update_requests_fresh_pixels_instead_of_returning_the_previous_screen(protocol):
+    protocol.width, protocol.height = 2, 1
+    protocol.pixel_format, protocol.image_mode = RGB24, "RGB"
+    protocol.screen = Image.new("RGB", (2, 1), "red")
+    output, completed = io.BytesIO(), []
+    protocol.captureScreen(output, format="png").addCallback(completed.append)
+    protocol.dataReceived(pack("!BBH", 0, 0, 0))
+    assert not completed and protocol.transport.write.call_count == 2
+    protocol.dataReceived(
+        pack("!BBH", 0, 0, 1) + pack("!HHHHi", 0, 0, 2, 1, Encoding.RAW) + b"\0\xff\0" * 2
+    )
+    assert completed == [protocol] and Image.open(output).getpixel((0, 0)) == (0, 255, 0)
+
+
+def test_repeated_empty_initial_updates_fail_without_a_request_storm(protocol):
+    protocol.width, protocol.height = 2, 1
+    failures = []
+    protocol.captureScreen(io.BytesIO(), format="png").addErrback(failures.append)
+    for _ in range(3):
+        protocol.dataReceived(pack("!BBH", 0, 0, 0))
+    assert len(failures) == 1 and failures[0].check(RuntimeError)
+    assert "画面画像" in failures[0].getErrorMessage()
+    assert protocol.transport.write.call_count == 2
 
 
 def test_fragmented_capabilities_and_utf8_transfer_follow_the_wire_format(protocol):
