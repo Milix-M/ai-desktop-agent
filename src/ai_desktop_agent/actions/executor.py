@@ -30,6 +30,7 @@ class ActionExecutor:
         backend: DisplayBackend,
     ) -> None:
         self._backend = backend
+        self.last_error = ""
 
     async def execute(self, action: Action) -> bool:
         """1つのアクションを実行する。
@@ -38,6 +39,7 @@ class ActionExecutor:
             実行に成功したかどうか。
         """
         start = time.monotonic()
+        self.last_error = ""
         try:
             await self._dispatch(action)
             duration = (time.monotonic() - start) * 1000
@@ -45,6 +47,7 @@ class ActionExecutor:
             return True
         except Exception as e:
             duration = (time.monotonic() - start) * 1000
+            self.last_error = str(e)
             logger.error("[FAIL] %s: %s (%.0fms)", action.description, e, duration)
             return False
 

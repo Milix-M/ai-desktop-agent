@@ -470,9 +470,15 @@ class VNCClient(DisplayBackend):
         さらに Shift が必要な `>` や `"` 等は、Shift修飾を使わず
         文字自体のX11 keysymを keyPress 1回で送る（Shift修飾は
         VNC経路で外れる実測があるため）。
-        非ASCII文字は QEMU が変換できない場合があり、その場合は送らない。
+        非ASCII文字はこの経路では扱えないため、入力前にエラーにする。
         """
         self._ensure_connected()
+        unsupported = [
+            ch for ch in text if ch not in "\n\t" and not (ch.isascii() and ch.isprintable())
+        ]
+        if unsupported:
+            codes = ", ".join(f"U+{ord(ch):04X}" for ch in dict.fromkeys(unsupported))
+            raise ValueError(f"このVNC入力経路では送信できない文字があります: {codes}")
         sent = 0
         for ch in text:
             self._check_stop()
