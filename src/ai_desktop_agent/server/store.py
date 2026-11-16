@@ -70,6 +70,10 @@ class TaskRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     revision: int = 0
+    execution_limits: dict = dataclasses.field(default_factory=dict)
+    execution_usage: dict = dataclasses.field(default_factory=dict)
+    stop_reason: str | None = None
+    error_message: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +94,10 @@ class TaskRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "revision": self.revision,
+            "execution_limits": self.execution_limits,
+            "execution_usage": self.execution_usage,
+            "stop_reason": self.stop_reason,
+            "error_message": self.error_message,
             "action_count": len(self.actions),
             "success_count": sum(1 for a in self.actions if a.success),
             "failure_count": sum(1 for a in self.actions if not a.success),
@@ -115,6 +123,10 @@ class TaskRecord:
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),
             revision=int(d.get("revision", 0)),
+            execution_limits=dict(d.get("execution_limits", {})),
+            execution_usage=dict(d.get("execution_usage", {})),
+            stop_reason=d.get("stop_reason"),
+            error_message=str(d.get("error_message", "")),
         )
 
 

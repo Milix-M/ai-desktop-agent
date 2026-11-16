@@ -18,6 +18,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+from ai_desktop_agent.agent.budget import model_request
 from ai_desktop_agent.agent.decision import routing
 from ai_desktop_agent.agent.decision.types import DecisionRecovery, DecisionVerify
 
@@ -278,14 +279,23 @@ class WorkersAiClefProvider(DecisionProvider):
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         import httpx
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                self._endpoint(),
-                headers={"Authorization": f"Bearer {self._api_token}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        async with model_request() as budget:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(
+                    self._endpoint(),
+                    headers={"Authorization": f"Bearer {self._api_token}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    if budget is not None:
+                        budget.record_usage(None)
+                    raise
+            if budget is not None:
+                result = data.get("result", data) if isinstance(data, dict) else {}
+                budget.record_usage(result.get("usage") if isinstance(result, dict) else None)
         # Workers AIは {"result": {...}} 包みが通例。素の形も許す。
         if isinstance(data, dict) and isinstance(data.get("result"), dict):
             return data["result"]
@@ -447,14 +457,22 @@ class OpenRouterClefProvider(DecisionProvider):
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         import httpx
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                self._endpoint(),
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        async with model_request() as budget:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(
+                    self._endpoint(),
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    if budget is not None:
+                        budget.record_usage(None)
+                    raise
+            if budget is not None:
+                budget.record_usage(data.get("usage") if isinstance(data, dict) else None)
         # Decisions APIは {"answers": {...}, "usage": {...}} を返す。answers辞書を渡す。
         if isinstance(data, dict) and isinstance(data.get("answers"), dict):
             return data["answers"]

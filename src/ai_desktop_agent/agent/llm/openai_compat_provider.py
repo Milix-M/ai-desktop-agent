@@ -22,9 +22,10 @@ import logging
 import os
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import APIResponseValidationError, AsyncOpenAI
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.agent.budget import TaskLimitError, model_request
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
@@ -772,7 +773,8 @@ class OpenAICompatProvider(LLMProvider):
         self.call_count = 0
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY") or "***"
-        client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+        # Retries belong to _call so every real send is counted by the task budget.
+        client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout, "max_retries": 0}
         if base_url:
             client_kwargs["base_url"] = base_url
         if default_headers:
@@ -1072,8 +1074,16 @@ ID: {subtask.id}
                 if self.session_id:
                     kwargs["extra_headers"] = {"x-opencode-session": self.session_id}
 
-                response = await self._client.chat.completions.create(**kwargs)
-                self._record_usage(response)
+                async with model_request() as budget:
+                    try:
+                        response = await self._client.chat.completions.create(**kwargs)
+                    except (json.JSONDecodeError, APIResponseValidationError):
+                        if budget is not None:
+                            budget.record_usage(None)
+                        raise
+                    self._record_usage(response)
+                    if budget is not None:
+                        budget.record_usage(getattr(response, "usage", None))
                 text = response.choices[0].message.content or ""
                 if not text:
                     empty_count += 1
@@ -1081,6 +1091,8 @@ ID: {subtask.id}
 
                 return self._parse_json(text)
 
+            except TaskLimitError:
+                raise
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(
                     "API 応答のパースに失敗 (attempt %d/%d): %s",
