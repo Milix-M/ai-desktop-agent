@@ -306,13 +306,13 @@ export default function Home() {
   const handleControl = useCallback(
     async (action: "pause" | "resume" | "stop") => {
       try {
-        await controlTask(action);
+        await controlTask(action, selectedVmId);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         addLog(`操作エラー: ${msg}`, "error");
       }
     },
-    [addLog]
+    [addLog, selectedVmId]
   );
 
   const handleCreateVm = useCallback(async (kind: "qemu" | "container" | "android", name?: string) => {
