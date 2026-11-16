@@ -1,4 +1,13 @@
 declare module "@novnc/novnc" {
-  const RFB: any;
-  export default RFB;
+  export default class RFB extends EventTarget {
+    constructor(target: HTMLElement, url: string, options?: {
+      credentials?: { password?: string };
+      shared?: boolean;
+      wsProtocols?: string[];
+    });
+    viewOnly: boolean;
+    scaleViewport: boolean;
+    resizeSession: boolean;
+    disconnect(): void;
+  }
 }

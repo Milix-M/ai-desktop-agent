@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type KeyboardEvent } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 
 interface Props {
   onSubmit: (instruction: string, allowVmRestart: boolean) => Promise<void>;
@@ -10,19 +10,28 @@ interface Props {
 export default function InstructionInput({ onSubmit, disabled }: Props) {
   const [value, setValue] = useState("");
   const [allowVmRestart, setAllowVmRestart] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const pendingRef = useRef(false);
+  const unavailable = disabled || submitting;
 
   async function handleSubmit() {
     const trimmed = value.trim();
-    if (!trimmed || disabled) return;
-    setValue("");
+    if (!trimmed || disabled || pendingRef.current) return;
+    pendingRef.current = true;
+    setSubmitting(true);
     try {
       await onSubmit(trimmed, allowVmRestart);
+      setValue("");
     } catch {
-      // handled by parent
+      // The parent shows the error; keep the instruction for retry.
+    } finally {
+      pendingRef.current = false;
+      setSubmitting(false);
     }
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -34,29 +43,31 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
       <h2>指示</h2>
       <textarea
         id="instruction"
+        aria-label="指示"
+        maxLength={20000}
         className="instruction-input"
         placeholder="例: LibreOfficeで表を作成して /data/report.ods に保存してください"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
-        disabled={disabled}
+        disabled={unavailable}
       />
       <button
         id="submit-btn"
         className="submit-btn"
         onClick={handleSubmit}
-        disabled={disabled || !value.trim()}
+        disabled={unavailable || !value.trim()}
       >
-        {disabled ? "処理中..." : "実行"}
+        {unavailable ? "処理中..." : "実行"}
       </button>
       <label className="allow-restart">
         <input
           type="checkbox"
           checked={allowVmRestart}
           onChange={(e) => setAllowVmRestart(e.target.checked)}
-          disabled={disabled}
+          disabled={unavailable}
         />
-        VM作り直しを許可する
+        VM再起動を許可する
       </label>
     </div>
   );

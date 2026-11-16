@@ -312,3 +312,11 @@ describe("API client", () => {
     });
   });
 });
+
+it("preserves actionable backend errors", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+    ok: false, status: 409,
+    json: async () => ({ detail: "KVMを利用できません。コンテナ環境を選んでください" }),
+  } as Response);
+  await expect(createVm("作業環境", "qemu")).rejects.toThrow("コンテナ環境を選んでください");
+});

@@ -5,37 +5,40 @@ const BACKEND_URL =
     ? `${window.location.protocol}//${window.location.hostname}:8081`
     : "http://localhost:8081";
 
-export async function createTask(
-  instruction: string,
-  vmId?: string | null,
-  allowVmRestart?: boolean
-): Promise<TaskStatus> {
-  const resp = await fetch(`${BACKEND_URL}/tasks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false }),
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const url = `${BACKEND_URL}${path}`;
+  const response = init ? await fetch(url, init) : await fetch(url);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === "object" && "detail" in body && typeof body.detail === "string") {
+        detail = body.detail;
+      }
+    } catch {
+      // Non-JSON responses (for example a proxy error) still have a useful status.
+    }
+    throw new Error(detail ? `${detail} (HTTP ${response.status})` : `HTTP ${response.status}`);
+  }
+  return response.json();
 }
 
-export async function getCurrentTask(): Promise<TaskStatus> {
-  const resp = await fetch(`${BACKEND_URL}/tasks/current`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+function post(body?: object): RequestInit {
+  return body
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : { method: "POST" };
 }
 
-export async function controlTask(
-  action: "pause" | "resume" | "stop",
-  vmId?: string | null
-): Promise<{ status: string }> {
-  const query = vmId ? `?vm_id=${encodeURIComponent(vmId)}` : "";
-  const resp = await fetch(
-    `${BACKEND_URL}/tasks/current/${action}${query}`,
-    { method: "POST" }
-  );
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function createTask(instruction: string, vmId?: string | null, allowVmRestart?: boolean): Promise<TaskStatus> {
+  return request("/tasks", post({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false }));
+}
+
+export function getCurrentTask(vmId?: string | null): Promise<TaskStatus> {
+  return request(`/tasks/current${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`);
+}
+
+export function controlTask(action: "pause" | "resume" | "stop", vmId?: string | null): Promise<{ status: string }> {
+  return request(`/tasks/current/${action}${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`, post());
 }
 
 export function getWsUrl(): string {
@@ -51,66 +54,42 @@ export function getVncWsUrl(wsPort?: number): string {
   return `${protocol}//${window.location.hostname}:${port}`;
 }
 
-export async function getVms(): Promise<VmInfo[]> {
-  const resp = await fetch(`${BACKEND_URL}/vms`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function getVms(): Promise<VmInfo[]> {
+  return request("/vms");
 }
 
-export async function createVm(name?: string, kind?: string): Promise<VmInfo> {
-  const resp = await fetch(`${BACKEND_URL}/vms`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name ?? null, kind: kind ?? null }),
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function createVm(name?: string, kind?: string): Promise<VmInfo> {
+  return request("/vms", post({ name: name ?? null, kind: kind ?? null }));
 }
 
-export async function deleteVm(vmId: string): Promise<{ status: string }> {
-  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}`, { method: "DELETE" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function deleteVm(vmId: string): Promise<{ status: string }> {
+  return request(`/vms/${encodeURIComponent(vmId)}`, { method: "DELETE" });
 }
 
-export async function stopVm(vmId: string): Promise<VmInfo> {
-  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}/stop`, { method: "POST" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function stopVm(vmId: string): Promise<VmInfo> {
+  return request(`/vms/${encodeURIComponent(vmId)}/stop`, post());
 }
 
-export async function startVm(vmId: string): Promise<VmInfo> {
-  const resp = await fetch(`${BACKEND_URL}/vms/${vmId}/start`, { method: "POST" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function startVm(vmId: string): Promise<VmInfo> {
+  return request(`/vms/${encodeURIComponent(vmId)}/start`, post());
 }
 
-export async function getVmStatus(): Promise<VmStatus> {
-  const resp = await fetch(`${BACKEND_URL}/vm/status`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function getVmStatus(): Promise<VmStatus> {
+  return request("/vm/status");
 }
 
-export async function restartVm(): Promise<VmStatus> {
-  const resp = await fetch(`${BACKEND_URL}/vm/restart`, { method: "POST" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function restartVm(): Promise<VmStatus> {
+  return request("/vm/restart", post());
 }
 
-export async function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
-  const resp = await fetch(`${BACKEND_URL}/tasks?limit=${limit}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
+  return request(`/tasks?limit=${limit}`);
 }
 
-export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
-  const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  return request(`/tasks/${encodeURIComponent(taskId)}`);
 }
 
-export async function deleteTask(taskId: string): Promise<{ status: string }> {
-  const resp = await fetch(`${BACKEND_URL}/tasks/${taskId}`, { method: "DELETE" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+export function deleteTask(taskId: string): Promise<{ status: string }> {
+  return request(`/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
 }

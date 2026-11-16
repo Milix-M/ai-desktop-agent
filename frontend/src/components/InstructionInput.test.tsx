@@ -80,3 +80,27 @@ describe("InstructionInput", () => {
     expect(screen.getByRole("button")).toHaveTextContent("処理中...");
   });
 });
+
+it("keeps the instruction after failure and blocks duplicate submissions", async () => {
+  let reject: (reason: Error) => void = () => {};
+  const onSubmit = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+  render(<InstructionInput onSubmit={onSubmit} disabled={false} />);
+  const input = screen.getByRole("textbox");
+  fireEvent.change(input, { target: { value: "文書を保存する" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onSubmit).toHaveBeenCalledOnce();
+  expect(input).toBeDisabled();
+  reject(new Error("接続できません"));
+  await vi.waitFor(() => expect(input).toBeEnabled());
+  expect(input).toHaveValue("文書を保存する");
+});
+
+it("does not submit Enter while Japanese IME composition is active", () => {
+  const onSubmit = vi.fn();
+  render(<InstructionInput onSubmit={onSubmit} disabled={false} />);
+  const input = screen.getByRole("textbox");
+  fireEvent.change(input, { target: { value: "報告書" } });
+  fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+  expect(onSubmit).not.toHaveBeenCalled();
+});

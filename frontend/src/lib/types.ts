@@ -13,6 +13,7 @@ export interface TaskStatus {
   subtasks: SubtaskInfo[];
   current_subtask_index: number;
   vm_id?: string | null;
+  revision?: number;
 }
 
 export interface VmInfo {
@@ -37,6 +38,7 @@ export interface WsStateMessage {
   subtask_count: number;
   action_count: number;
   subtasks?: SubtaskInfo[];
+  revision?: number;
 }
 
 export interface WsActionMessage {
@@ -60,9 +62,11 @@ export interface WsCompleteMessage {
   session_id?: string | null;
   vm_id?: string | null;
   success: boolean;
+  revision?: number;
 }
 
 export type WsMessage =
+  | { type: "snapshot"; tasks: TaskStatus[] }
   | WsStateMessage
   | WsActionMessage
   | WsErrorMessage

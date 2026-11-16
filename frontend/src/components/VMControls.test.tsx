@@ -60,15 +60,15 @@ describe("VMControls", () => {
     });
     render(<VMControls onLog={onLog} pollIntervalMs={60000} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
     // 1クリックでは実行されない
     expect(api.restartVm).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "作り直す" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
 
     await waitFor(() => {
       expect(api.restartVm).toHaveBeenCalled();
     });
-    expect(onLog).toHaveBeenCalledWith("VM作り直し開始", "action");
+    expect(onLog).toHaveBeenCalledWith("VM再起動開始", "action");
   });
 
   it("tracks restart until healthy", async () => {
@@ -85,11 +85,11 @@ describe("VMControls", () => {
     );
     render(<VMControls pollIntervalMs={10} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
-    await userEvent.click(screen.getByRole("button", { name: "作り直す" }));
-    // 指示応答待ちの間は作り直し中表示
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
+    // 指示応答待ちの間は再起動中表示
     await waitFor(() => {
-      expect(screen.getByTestId("vm-status")).toHaveTextContent("作り直し中");
+      expect(screen.getByTestId("vm-status")).toHaveTextContent("再起動中");
     });
     done = true;
     resolveRestart({ running: true, status: "restarting", health: null, name: "vm-1" });
@@ -102,9 +102,9 @@ describe("VMControls", () => {
   it("cancels restart", async () => {
     render(<VMControls pollIntervalMs={60000} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "VM作り直し" }));
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
     await userEvent.click(screen.getByRole("button", { name: "やめる" }));
     expect(api.restartVm).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "VM作り直し" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "VM再起動" })).toBeInTheDocument();
   });
 });
