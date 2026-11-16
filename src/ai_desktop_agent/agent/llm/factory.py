@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # プロバイダ設定: (api_key 環境変数, デフォルトモデル, base_url)
 _PROVIDER_CONFIGS: dict[str, tuple[str, str, str | None]] = {
     "openai": ("OPENAI_API_KEY", "gpt-4o", None),
-    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-4-20250514", None),
+    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-4-20250514", "https://api.anthropic.com/v1/"),
     "openrouter": (
         "OPENROUTER_API_KEY",
         "anthropic/claude-sonnet-4",
