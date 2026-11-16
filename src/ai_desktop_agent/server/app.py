@@ -21,6 +21,7 @@ from ai_desktop_agent.server.vm_control import (
     get_vm_controller,
 )
 from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logging.basicConfig(level=logging.INFO)
@@ -247,16 +248,16 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     """
     global _active_session
 
-    vm = _resolve_vm(req.vm_id)
-    display = _connect_vm_display(vm)
+    vm = await run_vm_call(_resolve_vm, req.vm_id)
+    display = await run_display_call(_connect_vm_display, vm)
 
     if _active_session and _active_session.is_running and _active_session.vm_id == vm.id:
         _active_session.stop()
 
-    session = _create_session()
+    session = await run_display_call(_create_session)
     session.vm_id = vm.id
     session.allow_vm_restart = req.allow_vm_restart
-    session.set_display(display)
+    await run_display_call(session.set_display, display)
 
     # 全 WebSocket 接続にセッション情報を付与して配送する
     _forward_registrations(session)
@@ -304,7 +305,7 @@ async def list_vms() -> list[VmInfoModel]:
     from fastapi import HTTPException
 
     try:
-        return [VmInfoModel(**v.to_dict()) for v in get_pool().list_vms()]
+        return [VmInfoModel(**v.to_dict()) for v in await run_vm_call(get_pool().list_vms)]
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -323,7 +324,7 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
     if kind not in ("qemu", "container", "android"):
         raise HTTPException(status_code=400, detail="kind は qemu/container/android のいずれか")
     try:
-        info = get_pool().create_vm(name=req.name, kind=kind)
+        info = await run_vm_call(get_pool().create_vm, name=req.name, kind=kind)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -346,7 +347,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
     _stop_sessions_for_vm(vm_id)
 
     try:
-        ok = get_pool().remove_vm(vm_id)
+        ok = await run_vm_call(get_pool().remove_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
@@ -364,7 +365,7 @@ async def stop_vm(vm_id: str) -> VmInfoModel:
     _stop_sessions_for_vm(vm_id)
 
     try:
-        info = get_pool().stop_vm(vm_id)
+        info = await run_vm_call(get_pool().stop_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
@@ -383,7 +384,7 @@ async def start_vm(vm_id: str) -> VmInfoModel:
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
     try:
-        info = get_pool().start_vm(vm_id)
+        info = await run_vm_call(get_pool().start_vm, vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -512,7 +513,7 @@ async def vm_status() -> VmStatus:
     from fastapi import HTTPException
 
     try:
-        info = _get_vm_controller().status()
+        info = await run_vm_call(_get_vm_controller().status)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return VmStatus(
@@ -543,7 +544,7 @@ async def vm_restart() -> VmStatus:
         _active_session = None
 
     try:
-        info = _get_vm_controller().restart()
+        info = await run_vm_call(_get_vm_controller().restart)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
