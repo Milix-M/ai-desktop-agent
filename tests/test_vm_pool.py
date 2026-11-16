@@ -1,6 +1,10 @@
 """動的VMプールのテスト（Dockerはフェイク）。"""
 
+import os
+import socket
+
 import pytest
+from docker.errors import NotFound
 
 from ai_desktop_agent.server.vm_pool import VmPool
 
@@ -8,6 +12,7 @@ from ai_desktop_agent.server.vm_pool import VmPool
 class _FakeContainer:
     def __init__(self, name, status="running", labels=None, health=None):
         self.name = name
+        self.id = name
         self.status = status
         self.attrs = {
             "Config": {
@@ -42,10 +47,16 @@ class _FakeContainer:
 
     def remove(self, force=False):
         self.removed = True
+        registry = getattr(self, "_networks", None)
+        if registry is not None:
+            for network in registry.items.values():
+                network.attrs["Containers"].pop(self.id, None)
+        self.attrs.setdefault("NetworkSettings", {})["Networks"] = {}
 
 
 class _FakeContainers:
-    def __init__(self):
+    def __init__(self, client):
+        self.client = client
         self.items: list[_FakeContainer] = []
         self.runs: list[dict] = []
 
@@ -57,12 +68,16 @@ class _FakeContainers:
             return [
                 c for c in items if ((c.attrs.get("Config") or {}).get("Labels") or {}).get(k) == v
             ]
+        if label:
+            return [c for c in items if label in c.attrs["Config"]["Labels"]]
         return list(items)
 
     def get(self, name):
         for c in self.items:
             if c.name == name:
                 return c
+        if name == socket.gethostname():
+            return self.client.backend
         raise ValueError(f"no such container: {name}")
 
     def run(self, image, **kwargs):
@@ -75,12 +90,66 @@ class _FakeContainers:
             labels=kwargs.get("labels", {}),
         )
         self.items.append(c)
+        if kwargs.get("network"):
+            self.client.networks.get(kwargs["network"]).connect(c)
         return c
+
+
+class _FakeNetwork:
+    def __init__(self, collection, name, labels=None, driver="bridge"):
+        self.collection = collection
+        self.name = self.id = name
+        self.attrs = {
+            "Labels": labels or {},
+            "Driver": driver,
+            "Containers": {},
+            "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+        }
+
+    def reload(self):
+        pass
+
+    def connect(self, container):
+        container._networks = self.collection
+        self.attrs["Containers"][container.id] = {"Name": container.name}
+        endpoints = container.attrs.setdefault("NetworkSettings", {}).setdefault("Networks", {})
+        endpoints[self.name] = {"IPAddress": "172.30.0.2", "GwPriority": 0}
+
+    def disconnect(self, container):
+        self.attrs["Containers"].pop(container.id, None)
+        container.attrs.setdefault("NetworkSettings", {}).setdefault("Networks", {}).pop(
+            self.name, None
+        )
+
+    def remove(self):
+        assert not self.attrs["Containers"]
+        self.collection.items.pop(self.name, None)
+
+
+class _FakeNetworks:
+    def __init__(self):
+        self.items = {}
+
+    def get(self, name):
+        if name not in self.items:
+            raise NotFound("no network")
+        return self.items[name]
+
+    def create(self, name, **kwargs):
+        network = _FakeNetwork(self, name, **kwargs)
+        self.items[name] = network
+        return network
 
 
 class _FakeDocker:
     def __init__(self):
-        self.containers = _FakeContainers()
+        self.backend = _FakeContainer(socket.gethostname())
+        self.networks = _FakeNetworks()
+        self.containers = _FakeContainers(self)
+        project = os.environ.get("COMPOSE_PROJECT_NAME", "ai-desktop-agent")
+        management = self.networks.create(f"{project}_default")
+        management.connect(self.backend)
+        self.backend.attrs["NetworkSettings"]["Networks"][management.name]["GwPriority"] = 1
 
     def ping(self):
         return True
@@ -251,6 +320,8 @@ class TestVmEndpoints:
                 from ai_desktop_agent.server.vm_pool import DockerUnavailableError
 
                 raise DockerUnavailableError("no socket")
+
+            isolate_environments = list_vms
 
         server_app._pool = _Dead()
         try:

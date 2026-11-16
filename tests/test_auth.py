@@ -125,7 +125,7 @@ def test_unauthenticated_websockets_are_rejected_before_a_desktop_is_opened(path
 
     with (
         pytest.raises(WebSocketDisconnect) as error,
-        TestClient(server.app).websocket_connect(path),
+        TestClient(server.app, client=("127.0.0.1", 50000)).websocket_connect(path),
     ):
         pytest.fail("unauthenticated WebSocket accepted")
     assert error.value.code == 1008

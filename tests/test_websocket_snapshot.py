@@ -28,7 +28,7 @@ def store(tmp_path, monkeypatch):
 def test_reconnect_reports_tasks_that_finished_while_offline(store):
     store.save(TaskRecord("old-a", "保存する", "executing", vm_id="A"))
     store.save(TaskRecord("done-b", "入力する", "completed", success=True, vm_id="B"))
-    client = TestClient(server.app, headers=AUTH_HEADERS)
+    client = TestClient(server.app, headers=AUTH_HEADERS, client=("127.0.0.1", 50000))
     with client.websocket_connect("/ws") as ws:
         snapshot = ws.receive_json()
         states = {task["vm_id"]: task["state"] for task in snapshot["tasks"]}

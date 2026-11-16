@@ -6,6 +6,9 @@ from ai_desktop_agent.server.android_provision import AndroidProvisioner
 
 
 class _FakePool:
+    def prepare_vm(self, vm_id):
+        pass
+
     def __init__(self, vms=None):
         self._vms = vms or []
 
