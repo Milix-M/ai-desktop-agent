@@ -60,6 +60,7 @@ export default function Home() {
   const [vmResolution, setVmResolution] = useState<string | undefined>();
   const [history, setHistory] = useState<TaskHistoryItem[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [historyView, setHistoryView] = useState<{ vmId: string | null; view: VmView } | null>(null);
   const [vms, setVms] = useState<VmInfo[]>([]);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [creatingVm, setCreatingVm] = useState(false);
@@ -97,7 +98,10 @@ export default function Home() {
     []
   );
 
-  const view = (selectedVmId && vmViews[selectedVmId]) || EMPTY_VIEW;
+  const liveView = (selectedVmId && vmViews[selectedVmId]) || EMPTY_VIEW;
+  const view = selectedTaskId && historyView?.vmId === selectedVmId
+    ? historyView.view
+    : liveView;
   const { state, subtaskIndex, subtaskCount, subtasks, logs } = view;
 
   const showTaskDetail = useCallback(
@@ -152,18 +156,21 @@ export default function Home() {
             return [main];
           }),
         ];
-        updateView(vmId, {
-          state: detail.state,
-          subtaskCount: detail.subtasks.length,
-          subtaskIndex: detail.current_subtask_index,
-          subtasks: detail.subtasks.map((s) => ({ id: s.id, description: s.description })),
-          logs: entries,
+        setHistoryView({
+          vmId,
+          view: {
+            state: detail.state,
+            subtaskCount: detail.subtasks.length,
+            subtaskIndex: detail.current_subtask_index,
+            subtasks: detail.subtasks.map((s) => ({ id: s.id, description: s.description })),
+            logs: entries,
+          },
         });
       } catch {
         addLog("タスク詳細の取得に失敗", "error");
       }
     },
-    [addLog, updateView]
+    [addLog]
   );
 
   const refreshHistory = useCallback(async () => {
@@ -277,8 +284,8 @@ export default function Home() {
     "verifying",
     "recovering",
   ];
-  const isRunning = RUNNING_STATES.includes(state);
-  const submitDisabled = isRunning || state === "paused";
+  const isRunning = RUNNING_STATES.includes(liveView.state);
+  const submitDisabled = isRunning || liveView.state === "paused";
 
   const handleSubmit = useCallback(
     async (instruction: string, allowVmRestart: boolean) => {
@@ -368,7 +375,10 @@ export default function Home() {
       <VmTabs
         vms={vms}
         selectedId={selectedVm?.id ?? null}
-        onSelect={setSelectedVmId}
+        onSelect={(vmId) => {
+          setSelectedVmId(vmId);
+          setSelectedTaskId(null);
+        }}
         onCreate={handleCreateVm}
         onDelete={handleDeleteVm}
         onStop={handleStopVm}
@@ -413,7 +423,7 @@ export default function Home() {
             subtasks={subtasks}
           />
 
-          <ControlPanel onControl={handleControl} state={state} />
+          <ControlPanel onControl={handleControl} state={liveView.state} />
 
           <ConnectionPanel
             vncConnected={vncConnected}
@@ -432,18 +442,11 @@ export default function Home() {
             onSelect={showTaskDetail}
             onDelete={async (taskId) => {
               try {
-                const target = history.find((t) => t.id === taskId);
                 await deleteTask(taskId);
                 setHistory((prev) => prev.filter((t) => t.id !== taskId));
                 if (selectedTaskId === taskId) {
                   setSelectedTaskId(null);
-                  updateView(target?.vm_id ?? selectedVmId, {
-                    state: "idle",
-                    subtaskIndex: 0,
-                    subtaskCount: 0,
-                    subtasks: [],
-                    logs: [],
-                  });
+                  setHistoryView(null);
                 }
                 addLog("履歴を削除", "state");
               } catch {
