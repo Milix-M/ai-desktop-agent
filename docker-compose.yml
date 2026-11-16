@@ -13,6 +13,8 @@ services:
       - VNC_GEOMETRY=1280x800
       - VNC_DEPTH=24
     shm_size: 1gb
+    volumes:
+      - home_desktop:/home/agent
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 5900 || exit 1"]
@@ -168,3 +170,9 @@ networks:
     labels:
       ai-desktop-agent.vm-id: android
       ai-desktop-agent.isolated: "true"
+
+volumes:
+  home_desktop:
+    labels:
+      ai-desktop-agent.vm-id: desktop
+      ai-desktop-agent.workspace: home

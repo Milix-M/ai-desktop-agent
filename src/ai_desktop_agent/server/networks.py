@@ -102,14 +102,18 @@ class EnvironmentNetworks:
         try:
             network = self.client.networks.get(name)
         except NotFound:
+            labels = {LABEL_PROJECT: self.project, LABEL_VM_ID: vm_id, LABEL_ISOLATED: "true"}
+            if vm_id in {"desktop", "vm", "android"}:
+                labels.update(
+                    {
+                        "com.docker.compose.project": self.project,
+                        "com.docker.compose.network": f"env_{vm_id}",
+                    }
+                )
             network = self.client.networks.create(
                 name,
                 driver="bridge",
-                labels={
-                    LABEL_PROJECT: self.project,
-                    LABEL_VM_ID: vm_id,
-                    LABEL_ISOLATED: "true",
-                },
+                labels=labels,
             )
         network.reload()
         if not self.owned(network, vm_id):

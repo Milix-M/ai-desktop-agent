@@ -73,6 +73,9 @@ import json,os,sys
 from pathlib import Path
 if sys.argv[1:]==['compose','config','--environment']:
     print('USE_KVM=false\\nOPENAI_API_KEY=never-print-this-value')
+elif 'ai_desktop_agent.server.workspace_migration' in sys.argv:
+    print('WORKSPACE_READY',flush=True)
+    assert sys.stdin.readline().strip()=='commit'
 else:
     Path(os.environ['STARTUP_RECORD']).write_text(json.dumps({'args':sys.argv[1:],'vnc':os.environ.get('VNC_HOST'),'kvm':os.environ.get('USE_KVM')}))
 """)
@@ -90,6 +93,93 @@ else:
     assert record["vnc"] == "desktop" and record["kvm"] == "false"
     assert record["args"][-3:] == ["desktop", "backend", "frontend"]
     assert "container" in record["args"]
+
+
+def guarded_startup(tmp_path, failure=""):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    startup = scripts / "up.sh"
+    startup.write_bytes((ROOT / "scripts/up.sh").read_bytes())
+    (tmp_path / ".env").write_text("USE_KVM=false\n")
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    docker = tools / "docker"
+    docker.write_text("""#!/usr/bin/env python3
+import fcntl,json,os,sys,time
+from pathlib import Path
+args=sys.argv[1:]
+def log(event):
+    with Path(os.environ['STARTUP_EVENTS']).open('a') as out: out.write(event+'\\n')
+if args==['compose','config','--environment']:
+    print('USE_KVM=false')
+elif 'build' in args:
+    if os.environ.get('STARTUP_FAILURE')=='build':sys.exit(1)
+elif 'ai_desktop_agent.server.workspace_migration' in args:
+    with Path(os.environ['STARTUP_EVENTS']+'.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        log('prepare')
+        if os.environ.get('STARTUP_FAILURE')=='backup':sys.exit(1)
+        print('WORKSPACE_READY',flush=True)
+        log('commit' if sys.stdin.readline().strip()=='commit' else 'rollback')
+elif 'up' in args:
+    log('up')
+    time.sleep(.15)
+    if os.environ.get('STARTUP_FAILURE')=='up':sys.exit(1)
+""")
+    docker.chmod(0o755)
+    events = tmp_path / "events"
+    env = {
+        **os.environ,
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "STARTUP_EVENTS": str(events),
+        "STARTUP_FAILURE": failure,
+    }
+    return startup, events, env
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [("build", []), ("backup", ["prepare"]), ("up", ["prepare", "up", "rollback"])],
+)
+def test_failed_update_never_commits_a_partial_migration(tmp_path, failure, expected):
+    startup, events, env = guarded_startup(tmp_path, failure)
+    result = subprocess.run(
+        ["bash", str(startup)], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode != 0
+    assert (events.read_text().splitlines() if events.exists() else []) == expected
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--no-recreate", "--no-recreate=true", "--no-recreate=1", "--no-start", "--no-start=TRUE"],
+)
+def test_update_rejects_options_that_skip_migration_before_stopping_anything(tmp_path, option):
+    startup, events, env = guarded_startup(tmp_path)
+    result = subprocess.run(
+        ["bash", str(startup), option], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 2
+    assert "Remove --no-recreate and --no-start" in result.stderr
+    assert not events.exists()
+
+
+def test_update_lock_stays_held_until_compose_finishes(tmp_path):
+    startup, events, env = guarded_startup(tmp_path)
+    processes = [
+        subprocess.Popen(
+            ["bash", str(startup)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stdout + stderr
+    assert events.read_text().splitlines() == ["prepare", "up", "commit"] * 2
 
 
 def guest_env(tmp_path):

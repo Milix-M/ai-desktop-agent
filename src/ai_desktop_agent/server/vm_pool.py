@@ -34,6 +34,7 @@ from ai_desktop_agent.server.persistence import (  # noqa: E402
     metadata_lock,
 )
 from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E402
+from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes  # noqa: E402
 
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
 LABEL_KIND = "ai-desktop-agent.kind"
@@ -326,6 +327,10 @@ class VmPool:
                 vm_id
             ),
         }
+        if kind == KIND_CONTAINER:
+            allocation["home_volume"] = WorkspaceVolumes(
+                docker, self._project_name(docker)
+            ).name_for(vm_id)
         with self._creation(docker, vm_id, allocation):
             network = EnvironmentNetworks(docker, self._project_name(docker)).ensure(vm_id).name
             adb_port = 0
@@ -426,12 +431,14 @@ class VmPool:
                 )
             else:
                 image = self._desktop_image_ref(docker)
+                home = WorkspaceVolumes(docker, self._project_name(docker)).ensure(vm_id)
                 docker.containers.run(
                     image,
                     name=vm_name,
                     detach=True,
                     cap_drop=["NET_RAW"],
                     shm_size="1g",
+                    volumes={home.name: {"bind": HOME, "mode": "rw"}},
                     environment={
                         "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
                         "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
@@ -618,6 +625,7 @@ class VmPool:
         if Path(vm_id).name != vm_id or vm_id in {".", ".."}:
             raise ValueError("環境IDが不正です")
         EnvironmentNetworks(docker, self._project_name(docker)).remove(vm_id)
+        WorkspaceVolumes(docker, self._project_name(docker)).remove(vm_id)
         # This path is mounted into the backend; host paths belong to the Docker daemon.
         try:
             (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
@@ -945,6 +953,8 @@ class VmPool:
                         logger.exception("作成失敗後のコンテナ削除に失敗: %s", container.name)
                 if removed:
                     EnvironmentNetworks(docker, self._project_name(docker)).remove(vm_id)
+                    if allocation.get("home_volume"):
+                        WorkspaceVolumes(docker, self._project_name(docker)).remove(vm_id)
                     (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
                     self._drop_state(vm_id)
             except Exception:
