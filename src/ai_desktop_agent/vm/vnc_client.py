@@ -165,7 +165,7 @@ class VNCClient(DisplayBackend):
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._connected and getattr(self._client, "closed", False) is not True
 
     @property
     def cursor_x(self) -> int:
@@ -209,7 +209,12 @@ class VNCClient(DisplayBackend):
         """VNCサーバーに接続する。"""
         from vncdotool import api
 
-        from ai_desktop_agent.vm.clipboard import ClipboardFactory
+        from ai_desktop_agent.vm.vnc_transport import ManagedVNCFactory, ManagedVNCProxy
+
+        self.disconnect()
+        self._stop_requested.clear()
+        self._width = self._height = 0
+        self._cursor_x = self._cursor_y = 0
 
         # vncdotool: double-colon for explicit port (single colon = display number)
         server = f"{host}::{port}"
@@ -219,7 +224,8 @@ class VNCClient(DisplayBackend):
             server,
             password=password,
             timeout=10.0,
-            factory_class=ClipboardFactory,
+            factory_class=ManagedVNCFactory,
+            proxy=ManagedVNCProxy,
         )
         try:
             self._client.connection_ready()
@@ -560,7 +566,7 @@ class VNCClient(DisplayBackend):
             raise RuntimeError("入力操作は停止されました")
 
     def _ensure_connected(self) -> None:
-        if not self._connected or self._client is None:
+        if not self.is_connected or self._client is None:
             raise RuntimeError("VNCに接続されていません")
 
     @staticmethod

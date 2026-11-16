@@ -1,6 +1,7 @@
 """Real container, browser, and VNC checks. Opt in with RUN_DESKTOP_SMOKE=1."""
 
 import asyncio
+import contextlib
 import os
 import shlex
 import subprocess
@@ -378,3 +379,123 @@ HTTPServer(('127.0.0.1',8765),Handler).serve_forever()
             session.stop()
             await asyncio.gather(session._task, return_exceptions=True)
             await asyncio.to_thread(user_display.disconnect)
+
+
+async def test_vnc_errors_timeouts_and_reconnect_do_not_leave_connections_or_stale_results(desktop):
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    count_script = """from pathlib import Path
+count=0
+for name in ('tcp','tcp6'):
+ for line in Path('/proc/net/'+name).read_text().splitlines()[1:]:
+  fields=line.split()
+  count += fields[1].endswith(':170C') and fields[3]=='01'
+print(count)
+"""
+
+    def connections():
+        result = desktop.exec_run(["python3", "-c", count_script])
+        assert result.exit_code == 0, result.output.decode()
+        return int(result.output)
+
+    async def disconnected():
+        async with asyncio.timeout(3):
+            while await asyncio.to_thread(connections):
+                await asyncio.sleep(0.05)
+
+    await disconnected()
+
+    display = VNCClient()
+    paused = False
+    try:
+        await asyncio.to_thread(display.connect, "127.0.0.1", port)
+        with pytest.raises((TypeError, ValueError)):
+            await asyncio.to_thread(display.key_down, "not-a-valid-key")
+        await asyncio.to_thread(display.mouse_move, 10, 10)
+        await asyncio.to_thread(display.disconnect)
+        await disconnected()
+
+        # A new handshake closes the old connection and clears a previous stop request.
+        await asyncio.to_thread(display.connect, "127.0.0.1", port)
+        display.request_stop()
+        await asyncio.to_thread(display.connect, "127.0.0.1", port)
+        display._check_stop()
+        screen = await asyncio.to_thread(display.capture_raw)
+        assert (screen.width, screen.height) == (1280, 800)
+
+        display._client.timeout = 0.2
+        desktop.pause()
+        paused = True
+        with pytest.raises(TimeoutError):
+            await asyncio.to_thread(display.capture_raw)
+        assert not display.is_connected
+        with pytest.raises(RuntimeError, match="接続されていません"):
+            await asyncio.to_thread(display.mouse_move, 20, 20)
+        desktop.unpause()
+        paused = False
+        await disconnected()
+
+        await asyncio.to_thread(display.connect, "127.0.0.1", port)
+        restored = await asyncio.to_thread(display.capture_raw)
+        assert restored.image_bytes.startswith(b"\x89PNG")
+        assert (restored.width, restored.height) == (1280, 800)
+    finally:
+        if paused:
+            desktop.unpause()
+        await asyncio.to_thread(display.disconnect)
+    await disconnected()
+
+
+@pytest.mark.parametrize("mode", ["stall", "close"])
+async def test_incomplete_vnc_handshake_releases_the_real_tcp_connection(
+    vnc_runtime, monkeypatch, mode
+):
+    from twisted.internet.error import ConnectionDone, ConnectionLost
+    from vncdotool import api
+
+    connected, closed = asyncio.Event(), asyncio.Event()
+    handlers = set()
+
+    async def serve(reader, writer):
+        handler = asyncio.current_task()
+        handlers.add(handler)
+        try:
+            connected.set()
+            writer.write(b"RFB 003.008\n")
+            await writer.drain()
+            with contextlib.suppress(ConnectionResetError):
+                await reader.readexactly(12)
+                if mode == "stall":
+                    assert await reader.read() == b""
+        finally:
+            writer.close()
+            with contextlib.suppress(ConnectionResetError):
+                await writer.wait_closed()
+            handlers.discard(handler)
+            closed.set()
+
+    original_connect = api.connect
+
+    def bounded_connect(*args, **kwargs):
+        kwargs["timeout"] = 0.2
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(api, "connect", bounded_connect)
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    display = VNCClient()
+    try:
+        expected = (
+            TimeoutError if mode == "stall" else (ConnectionDone, ConnectionLost, ConnectionError)
+        )
+        with pytest.raises(expected):
+            await asyncio.to_thread(
+                display.connect, "127.0.0.1", server.sockets[0].getsockname()[1]
+            )
+        assert connected.is_set() and not display.is_connected
+        await asyncio.wait_for(closed.wait(), 1)
+    finally:
+        await asyncio.to_thread(display.disconnect)
+        server.close()
+        await server.wait_closed()
+        if handlers:
+            await asyncio.wait_for(asyncio.gather(*handlers), 1)
