@@ -283,7 +283,7 @@ class VmPool:
                 network=network,
                 restart_policy={"Name": "unless-stopped"},
             )
-            self._start_relay(docker, vm_id, vm_name, ws_port, network, common_labels)
+            self._start_relay_or_rollback(docker, vm_id, vm_name, ws_port, network, common_labels)
             self._save_state(
                 vm_id,
                 {
@@ -357,8 +357,15 @@ class VmPool:
                 restart_policy={"Name": "unless-stopped"},
             )
 
-        self._start_relay(docker, vm_id, vm_name, ws_port, network, common_labels)
+        self._start_relay_or_rollback(docker, vm_id, vm_name, ws_port, network, common_labels)
         return self._finish_create(vm_id, name, vm_name, vnc_port, ws_port, kind)
+
+    def _start_relay_or_rollback(self, docker: Any, vm_id: str, *args) -> None:
+        try:
+            self._start_relay(docker, vm_id, *args)
+        except Exception:
+            self.remove_vm(vm_id)
+            raise
 
     def _start_relay(
         self,

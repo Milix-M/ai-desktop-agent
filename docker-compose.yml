@@ -94,6 +94,7 @@ services:
   # vm用画面配信（kvmプロファイル時のみ）
   websockify:
     profiles: ["kvm"]
+    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
     build:
       context: ./websockify
       dockerfile: Dockerfile
@@ -105,6 +106,7 @@ services:
   # desktop用画面配信（containerプロファイル時のみ）
   websockify-desktop:
     profiles: ["container"]
+    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
     build:
       context: ./websockify
       dockerfile: Dockerfile
@@ -152,6 +154,7 @@ services:
 
   websockify-android:
     profiles: ["kvm"]
+    image: ${WEBSOCKIFY_IMAGE:-ai-desktop-agent-websockify}
     build:
       context: ./websockify
       dockerfile: Dockerfile
