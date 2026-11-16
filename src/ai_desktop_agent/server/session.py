@@ -531,6 +531,7 @@ class TaskSession:
         self.loop.record_action(
             action,
             success,
+            error=self.executor.last_error,
             reasoning=decision.reasoning,
             confidence=decision.confidence,
         )

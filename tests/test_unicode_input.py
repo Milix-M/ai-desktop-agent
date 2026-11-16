@@ -24,3 +24,38 @@ def test_supported_text_still_types(monkeypatch):
     display._client = Mock()
     display.type_text("hello!")
     assert display._client.keyPress.call_count == 6
+
+
+async def test_input_failure_reason_reaches_recovery():
+    from unittest.mock import AsyncMock
+
+    from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+    from ai_desktop_agent.agent.llm.types import ActionDecision
+    from ai_desktop_agent.agent.state import Goal, Subtask
+    from ai_desktop_agent.server.session import TaskSession
+    from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+    vnc = VNCClient()
+    vnc._connected = True
+    vnc._client = Mock()
+    display = FakeDisplayBackend()
+    display.type_text = vnc.type_text
+    session = TaskSession(llm=MockLLMProvider(), display=display)
+    session.loop.start(Goal(description="input"))
+    session.loop.understanding_done()
+    session.loop.plan_ready([Subtask(id="s", description="input")])
+    session._capture_screenshot = AsyncMock(return_value=display.capture_screen())
+    session._decide_action = AsyncMock(
+        return_value=ActionDecision(
+            action=Action(ActionType.TYPE, {"text": "こんにちは"}),
+            expected_effect="input",
+            confidence=1.0,
+            reasoning="test",
+        )
+    )
+    session.executor.wait_for_still = AsyncMock()
+    await session._execute_phase()
+    await session._verify_phase()
+    assert "U+3053" in session._pending_error.error_message
+    assert "U+3053" in session.snapshot().actions[-1].error_message
+    assert not vnc._client.mock_calls
