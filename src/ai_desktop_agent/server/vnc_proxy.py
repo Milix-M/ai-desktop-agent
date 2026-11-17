@@ -4,16 +4,19 @@ import asyncio
 import contextlib
 import logging
 
+from anyio import CancelScope
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ai_desktop_agent.server.websocket_io import MAX_MESSAGE_BYTES, close_websocket
+
 logger = logging.getLogger(__name__)
-MAX_MESSAGE_BYTES = 1024 * 1024
 IO_TIMEOUT = 10
 
 
 async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
     writer = None
     pumps: list[asyncio.Task] = []
+    close_code = 1000
     try:
         async with asyncio.timeout(IO_TIMEOUT):
             reader, writer = await asyncio.open_connection(host, port)
@@ -27,16 +30,17 @@ async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
                     await ws.send_bytes(data)
 
         async def to_desktop():
+            nonlocal close_code
             while True:
                 message = await ws.receive()
                 if message["type"] == "websocket.disconnect":
                     return
                 data = message.get("bytes")
                 if data is None:
-                    await ws.close(1003)
+                    close_code = 1003
                     return
                 if len(data) > MAX_MESSAGE_BYTES:
-                    await ws.close(1009)
+                    close_code = 1009
                     return
                 writer.write(data)
                 async with asyncio.timeout(IO_TIMEOUT):
@@ -49,13 +53,13 @@ async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
     except (WebSocketDisconnect, ConnectionError, OSError, TimeoutError):
         logger.debug("画面配信を終了: %s", host, exc_info=True)
     finally:
-        for task in pumps:
-            task.cancel()
-        await asyncio.gather(*pumps, return_exceptions=True)
-        if writer is not None:
-            writer.close()
-            with contextlib.suppress(OSError, TimeoutError):
-                async with asyncio.timeout(IO_TIMEOUT):
-                    await writer.wait_closed()
-        with contextlib.suppress(RuntimeError, OSError):
-            await ws.close()
+        with CancelScope(shield=True):
+            for task in pumps:
+                task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(OSError, TimeoutError):
+                    async with asyncio.timeout(IO_TIMEOUT):
+                        await writer.wait_closed()
+            await close_websocket(ws, code=close_code)

@@ -3,9 +3,12 @@
 import asyncio
 import contextlib
 import hmac
+import math
 import os
 import secrets
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,13 +21,34 @@ from ai_desktop_agent.server.persistence import StorageError, atomic_text, metad
 COOKIE_NAME = "ai_desktop_agent_session"
 SESSION_SECONDS = 12 * 60 * 60
 MAX_SESSIONS = 128
-PUBLIC_ROUTES = {("GET", "/health"), ("GET", "/auth/status"), ("POST", "/auth/login")}
+AUTH_FAILURE_LIMIT = 10
+AUTH_FAILURE_WINDOW = 60.0
+PUBLIC_ROUTES = {
+    ("GET", "/health"),
+    ("GET", "/auth/status"),
+    ("POST", "/auth/login"),
+    ("POST", "/auth/logout"),
+}
 
 
 @dataclass
 class BrowserSession:
     expires: float
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class AuthenticationRateLimitError(Exception):
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(f"認証の失敗が続いています。{retry_after}秒後にもう一度操作してください")
+
+
+def authentication_rate_limit_response(error: AuthenticationRateLimitError) -> JSONResponse:
+    return JSONResponse(
+        {"detail": str(error)},
+        status_code=429,
+        headers={"Retry-After": str(error.retry_after), "Cache-Control": "no-store"},
+    )
 
 
 class AccessControl:
@@ -34,6 +58,8 @@ class AccessControl:
         self._key = key.encode()
         protect(key)
         self._sessions: dict[str, BrowserSession] = {}
+        self._key_failures: deque[float] = deque()
+        self._key_attempt_lock = threading.Lock()
 
     @classmethod
     def from_environment(cls):
@@ -52,6 +78,22 @@ class AccessControl:
 
     def valid_key(self, key: str) -> bool:
         return key.isascii() and hmac.compare_digest(self._key, key.encode("ascii"))
+
+    def verify_key(self, key: str) -> bool:
+        """Share a bounded failure window across every route using the operator key."""
+        with self._key_attempt_lock:
+            now = time.monotonic()
+            while self._key_failures and self._key_failures[0] + AUTH_FAILURE_WINDOW <= now:
+                self._key_failures.popleft()
+            if len(self._key_failures) >= AUTH_FAILURE_LIMIT:
+                raise AuthenticationRateLimitError(
+                    max(1, math.ceil(self._key_failures[0] + AUTH_FAILURE_WINDOW - now))
+                )
+            if self.valid_key(key):
+                self._key_failures.clear()
+                return True
+            self._key_failures.append(now)
+            return False
 
     def new_session(self) -> str:
         self._prune()
@@ -74,12 +116,18 @@ class AccessControl:
             unprotect(token)
 
     def authenticate(self, connection: HTTPConnection) -> tuple[bool, BrowserSession | None]:
-        authorization = connection.headers.get("authorization", "")
-        scheme, _, value = authorization.partition(" ")
-        if scheme.lower() == "bearer" and self.valid_key(value):
-            return True, None
         self._prune()
         session = self._sessions.get(connection.cookies.get(COOKIE_NAME, ""))
+        authorization = connection.headers.get("authorization", "")
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            try:
+                if self.verify_key(value):
+                    return True, None
+            except AuthenticationRateLimitError:
+                # A verified session remains usable while new key guesses are throttled.
+                if session is None:
+                    raise
         return session is not None, session
 
 
@@ -104,7 +152,20 @@ class AuthenticationMiddleware:
         if scope["type"] == "http" and (scope["method"], scope["path"]) in PUBLIC_ROUTES:
             await self.app(scope, receive, send)
             return
-        authenticated, session = get_access().authenticate(HTTPConnection(scope))
+        try:
+            authenticated, session = get_access().authenticate(HTTPConnection(scope))
+        except AuthenticationRateLimitError as error:
+            if scope["type"] == "websocket":
+                await send(
+                    {
+                        "type": "websocket.close",
+                        "code": 1008,
+                        "reason": "認証の試行回数が上限に達しました",
+                    }
+                )
+            else:
+                await authentication_rate_limit_response(error)(scope, receive, send)
+            return
         if not authenticated:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
