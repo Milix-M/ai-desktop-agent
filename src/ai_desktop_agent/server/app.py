@@ -58,12 +58,19 @@ from ai_desktop_agent.server.vm_control import (
     DockerUnavailableError,
     get_vm_controller,
 )
+from ai_desktop_agent.server.vm_creations import (
+    CreationConflictError,
+    CreationStore,
+    VmCreationService,
+)
 from ai_desktop_agent.server.vm_locks import AsyncKeyedLocks
 from ai_desktop_agent.server.vm_pool import VmPool
 from ai_desktop_agent.server.websocket_io import close_websocket
 from ai_desktop_agent.vm.async_io import (
+    VmCreationBusyError,
     run_display_call,
     run_vm_call,
+    run_vm_creation,
 )
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.vnc_client import VNCClient
@@ -96,7 +103,7 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
-    global _active_session, _server_id
+    global _active_session, _server_id, _vm_creations
     import faulthandler
     import signal
 
@@ -122,35 +129,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if getattr(sess, "vm_id", None) == vm_id and sess.is_running:
                     return True
             except Exception:
-                continue
+                return True
         if _active_session is not None:
             try:
                 if getattr(_active_session, "vm_id", None) == vm_id and _active_session.is_running:
                     return True
             except Exception:
-                pass
+                return True
         return False
 
     provisioner = AndroidProvisioner(is_running_check=_android_busy)
-    await provisioner.start()
+    creations = get_vm_creations()
     try:
+        await creations.start()
+        await provisioner.start()
         yield
     finally:
-        await provisioner.stop()
-        sessions = list(_sessions.values())
-        for session in sessions:
-            session.stop()
-        await asyncio.gather(
-            *(s._task for s in sessions if s._task is not None), return_exceptions=True
-        )
-        await asyncio.gather(
-            *(s._cleanup_task for s in sessions if s._cleanup_task is not None),
-            return_exceptions=True,
-        )
-        await asyncio.gather(*(s.aclose() for s in sessions), return_exceptions=True)
-        _sessions.clear()
-        _active_session = None
-        await asyncio.to_thread(VNCClient.shutdown_runtime)
+        try:
+            await provisioner.stop()
+        finally:
+            sessions = list(_sessions.values())
+            for session in sessions:
+                session.stop()
+            try:
+                await asyncio.gather(
+                    *(s._task for s in sessions if s._task is not None), return_exceptions=True
+                )
+            finally:
+                try:
+                    await creations.close()
+                finally:
+                    _vm_creations = None
+            await asyncio.gather(
+                *(s._cleanup_task for s in sessions if s._cleanup_task is not None),
+                return_exceptions=True,
+            )
+            await asyncio.gather(*(s.aclose() for s in sessions), return_exceptions=True)
+            _sessions.clear()
+            _active_session = None
+            await asyncio.to_thread(VNCClient.shutdown_runtime)
 
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
@@ -265,6 +282,7 @@ _create_session = _default_create_session  # type: ignore[var-annotated]
 
 # VMプール（遅延初期化：テスト時は差し替え可能）
 _pool: VmPool | None = None
+_vm_creations: VmCreationService | None = None
 
 
 def get_pool() -> VmPool:
@@ -385,6 +403,17 @@ class TaskDetail(TaskSummary):
     created_at: float = 0.0
     execution_limits: dict = {}
     execution_usage: dict = {}
+
+
+def get_vm_creations() -> VmCreationService:
+    global _vm_creations
+    if _vm_creations is None:
+        import os
+        from pathlib import Path
+
+        directory = Path(os.environ.get("DATA_DIR", "./data")) / "vm-creations"
+        _vm_creations = VmCreationService(get_pool(), CreationStore(directory))
+    return _vm_creations
 
 
 def _to_summary(d: dict) -> TaskSummary:
@@ -655,7 +684,13 @@ async def list_vms() -> list[VmInfoModel]:
 
 
 @app.post("/vms", response_model=VmInfoModel)
-async def create_vm(req: CreateVmRequest) -> VmInfoModel:
+async def create_vm(
+    req: CreateVmRequest,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
+    ] = None,
+) -> VmInfoModel:
     """新しい環境を作成して起動する。kind=qemu（既定・KVM必須）/ container。
 
     KVM非対応環境での qemu 作成は409。container はどこでも作れる。
@@ -668,7 +703,23 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
     if kind not in ("qemu", "container", "android"):
         raise HTTPException(status_code=400, detail="kind は qemu/container/android のいずれか")
     try:
-        info = await run_vm_call(get_pool().create_vm, name=req.name, kind=kind)
+        if idempotency_key is None:
+            info = await run_vm_creation(get_pool().create_vm, name=req.name, kind=kind)
+        else:
+            service = get_vm_creations()
+            accepted = await service.submit(idempotency_key, req.name, kind)
+            finished = await service.wait(accepted.id)
+            if finished is None:
+                raise HTTPException(status_code=503, detail="環境作成の記録を確認できません")
+            if finished.state == "failed":
+                raise HTTPException(status_code=finished.error_status, detail=finished.error)
+            info = finished.result
+            if info is None:
+                raise HTTPException(status_code=503, detail="環境作成の結果を確認できません")
+    except CreationConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except VmCreationBusyError as e:
+        raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "1"}) from e
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -676,6 +727,51 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return VmInfoModel(**info.to_dict())
+
+
+@app.post("/vm-creations")
+async def submit_vm_creation(
+    req: CreateVmRequest,
+    idempotency_key: Annotated[
+        str,
+        Header(alias="Idempotency-Key", min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
+    ],
+) -> JSONResponse:
+    kind = (req.kind or "qemu").lower()
+    try:
+        record = await get_vm_creations().submit(idempotency_key, req.name, kind)
+    except CreationConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except VmCreationBusyError as error:
+        raise HTTPException(
+            status_code=429, detail=str(error), headers={"Retry-After": "1"}
+        ) from error
+    except DockerUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return JSONResponse(
+        status_code=202 if record.state in {"queued", "running"} else 200,
+        content=record.public(),
+        headers={"Location": "/vm-creations/" + record.id, "Cache-Control": "no-store"},
+    )
+
+
+@app.get("/vm-creations/{job_id}")
+async def get_vm_creation(job_id: str) -> JSONResponse:
+    try:
+        record = await get_vm_creations().get(job_id)
+    except VmCreationBusyError as error:
+        raise HTTPException(
+            status_code=429, detail=str(error), headers={"Retry-After": "1"}
+        ) from error
+    except DockerUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="作成要求が見つかりません") from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="作成要求が見つかりません")
+    return JSONResponse(content=record.public(), headers={"Cache-Control": "no-store"})
 
 
 @app.delete("/vms/{vm_id}")
