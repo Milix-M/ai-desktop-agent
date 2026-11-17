@@ -90,7 +90,7 @@ async def test_a_slow_viewer_cannot_block_task_events(store, monkeypatch):
             started.set()
             await asyncio.Event().wait()
 
-        async def receive_text(self):
+        async def receive(self):
             await asyncio.Event().wait()
             raise WebSocketDisconnect()
 

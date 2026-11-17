@@ -89,6 +89,15 @@ async def test_manual_input_blocks_screen_and_model_calls_until_explicit_consent
         ) as client:
             status = (await client.get("/tasks/current?vm_id=desktop")).json()
             assert status["manual_input"] == pending and status["is_running"]
+            response = await client.post(
+                "/tasks/current/resume",
+                params={"vm_id": "desktop", "session_id": "previous-task"},
+                json={"manual_input_id": pending["id"], "allow_screen_share": True},
+            )
+            assert response.status_code == 409
+            assert session.loop.state == AgentState.AWAITING_USER
+            assert session.llm.decide_next_action.call_count == calls
+            assert session.display.capture_screen.calls == captures
             for body in [
                 None,
                 {"manual_input_id": pending["id"]},
@@ -98,7 +107,8 @@ async def test_manual_input_blocks_screen_and_model_calls_until_explicit_consent
                 assert response.status_code == 409
                 assert session.loop.state == AgentState.AWAITING_USER
             response = await client.post(
-                "/tasks/current/resume?vm_id=desktop",
+                "/tasks/current/resume",
+                params={"vm_id": "desktop", "session_id": session.id},
                 json={"manual_input_id": pending["id"], "allow_screen_share": True},
             )
             assert response.status_code == 200
@@ -119,6 +129,7 @@ async def test_new_task_cannot_replace_a_session_waiting_for_private_input(tmp_p
     monkeypatch.setattr(server_app, "_active_session", session)
     monkeypatch.setattr(server_app, "_store", session._store)
     monkeypatch.setattr(server_app, "_resolve_vm", lambda _: SimpleNamespace(id="desktop"))
+    monkeypatch.setattr(server_app, "_default_vm_id", lambda: "desktop")
     connect = Mock()
     monkeypatch.setattr(server_app, "_connect_vm_display", connect)
     await session.start_async("ログインする")
@@ -148,6 +159,7 @@ async def test_manual_handoff_during_new_display_connection_still_blocks_replace
     monkeypatch.setattr(server_app, "_store", TaskStore(tmp_path))
     monkeypatch.setattr(server_app, "_sessions", {"previous": previous})
     monkeypatch.setattr(server_app, "_resolve_vm", lambda _: SimpleNamespace(id="desktop"))
+    monkeypatch.setattr(server_app, "_default_vm_id", lambda: "desktop")
 
     def connect(_):
         previous.manual_input = {"id": "pending", "reason": "パスワードを入力してください"}
@@ -187,11 +199,27 @@ async def test_stop_while_waiting_records_an_interruption_and_closes_connections
     assert session.manual_input is None and not session.display.is_connected
 
 
-async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path):
-    session = manual_session(tmp_path, limits=ExecutionLimits(max_seconds=0.2))
+async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path, monkeypatch):
+    session = manual_session(tmp_path, limits=ExecutionLimits(max_seconds=600))
+    loop = asyncio.get_running_loop()
+    schedule = loop.call_later
+    deadlines = []
+
+    def record_deadline(delay, callback, *args, **kwargs):
+        timer = schedule(delay, callback, *args, **kwargs)
+        if delay == 600:
+            deadlines.append((timer, callback, args))
+        return timer
+
+    monkeypatch.setattr(loop, "call_later", record_deadline)
     session._capture_screenshot = AsyncMock(return_value=session.display.capture_screen())
     await session.start_async("ログインする")
     await wait_for_manual(session)
+    # Fire the registered duration timer only once the state being tested is reached.
+    assert len(deadlines) == 1
+    timer, expire, args = deadlines[0]
+    timer.cancel()
+    expire(*args)
     assert not await asyncio.wait_for(session._task, 2)
     record = session._store.load(session.id)
     assert record.stop_reason == "duration_limit" and record.state == "failed"
