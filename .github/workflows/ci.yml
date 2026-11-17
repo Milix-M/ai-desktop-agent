@@ -1,19 +1,21 @@
 name: CI
 
-# develop と PR で実行
+# develop・PR・週次で実行
 on:
   push:
     branches: [develop]
   pull_request:
     branches: [develop]
+  schedule:
+    - cron: "17 21 * * 1"
+
+permissions:
+  contents: read
 
 # 同一ブランチの連続push時は前のrunをキャンセル
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
   changes:
@@ -146,7 +148,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -155,12 +157,16 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen
+      - name: Set production package refresh date
+        id: refresh
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: Build desktop image
         uses: docker/build-push-action@v6
         with:
           context: desktop
           tags: ai-desktop-agent-desktop-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
           load: true
           pull: true
           cache-from: type=gha,scope=desktop-smoke
@@ -170,6 +176,7 @@ jobs:
         with:
           context: .
           tags: ai-desktop-agent-backend-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
           load: true
           pull: true
           cache-from: type=gha,scope=backend-smoke
@@ -179,10 +186,31 @@ jobs:
         with:
           context: vm
           tags: ai-desktop-agent-qmp-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
           load: true
           pull: true
           cache-from: type=gha,scope=qmp-smoke
           cache-to: type=gha,scope=qmp-smoke,mode=max
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          tags: ai-desktop-agent-frontend-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=frontend-smoke
+          cache-to: type=gha,scope=frontend-smoke,mode=max
+      - name: Build android image
+        uses: docker/build-push-action@v6
+        with:
+          context: android
+          tags: ai-desktop-agent-android-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=android-smoke
+          cache-to: type=gha,scope=android-smoke,mode=max
       - name: Build guest-agent image
         uses: docker/build-push-action@v6
         with:
@@ -209,6 +237,22 @@ jobs:
           RUN_DESKTOP_SMOKE: "1"
           DOCKER_CONFIG: ${{ runner.temp }}/agent-compose
           DESKTOP_EVAL_RESULTS_DIR: ${{ runner.temp }}/agent-evaluations
+      - name: Install pinned Trivy
+        run: |
+          curl -fLSs --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz -o "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/trivy-bin"
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/trivy-bin" trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+      - name: Audit production OS packages
+        run: ./scripts/audit-images.sh "$RUNNER_TEMP/os-audit"
+      - name: Upload OS audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-audit
+          path: ${{ runner.temp }}/os-audit/
+          retention-days: 30
       - name: Upload desktop evaluation evidence
         if: always()
         uses: actions/upload-artifact@v4

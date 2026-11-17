@@ -23,6 +23,7 @@ from ai_desktop_agent.server.persistence import (
     StorageError,
     atomic_json,
     check_writable,
+    durable_unlink,
     metadata_lock,
 )
 from ai_desktop_agent.server.submissions import (
@@ -476,13 +477,7 @@ class TaskStore:
         if not TASK_ID.fullmatch(task_id):
             return False
         path = self._dir / f"{task_id}.json"
-        if not path.is_file():
-            return False
-        try:
-            path.unlink()
-        except OSError as e:
-            raise StorageError(f"タスク記録を削除できません: {task_id}") from e
-        return True
+        return durable_unlink(path)
 
     def mark_interrupted(self) -> int:
         """実行中のまま残っているレコードを interrupted に倒す。

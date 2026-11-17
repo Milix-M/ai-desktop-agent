@@ -14,6 +14,34 @@ class StorageError(RuntimeError):
     """A durable write or a trustworthy metadata read could not complete."""
 
 
+class DeletionError(StorageError):
+    """Deletion failed, possibly after the entry disappeared from directory reads."""
+
+    def __init__(self, path: Path, *, removed: bool) -> None:
+        self.removed = removed
+        reason = "削除結果を保存できません" if removed else "削除できません"
+        super().__init__(f"{reason}: {path}。保存先を確認して再試行してください")
+
+
+def durable_unlink(path: Path) -> bool:
+    """Sync the parent even on a retry after an earlier unlink succeeded."""
+    removed = False
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                path.unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise DeletionError(path, removed=removed) from error
+    return removed
+
+
 def check_writable(directory: Path) -> None:
     try:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)

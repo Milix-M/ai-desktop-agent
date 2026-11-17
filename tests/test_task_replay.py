@@ -11,6 +11,7 @@ from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.state import AgentState
 from ai_desktop_agent.server import app as server
+from ai_desktop_agent.server import task_admission
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
@@ -90,6 +91,28 @@ async def test_lost_acknowledgement_and_retry_perform_the_action_only_once(repla
     assert len(made) == 1
     assert writes == ["report"]
     assert len(store.list()) == 1
+
+
+async def test_overload_and_later_retry_still_reuse_the_accepted_task(replay_server, monkeypatch):
+    _, made, writes = replay_server
+    now = [0.0]
+    monkeypatch.setattr(task_admission, "TASK_SUBMISSION_LIMIT", 1)
+    monkeypatch.setattr(
+        task_admission, "_task_admission", task_admission.TaskAdmission(clock=lambda: now[0])
+    )
+    async with AuthenticatedClient(
+        transport=LostAcknowledgement(app=server.app), base_url="http://test"
+    ) as api:
+        with pytest.raises(httpx.ReadError):
+            await api.post("/tasks", json=BODY, headers=KEY)
+        await finish_all(made)
+        assert (await api.post("/tasks", json=BODY, headers=KEY)).status_code == 429
+        now[0] = 60.0
+        replay = await api.post("/tasks", json=BODY, headers=KEY)
+        assert replay.status_code == 200
+        assert replay.json()["session_id"] == made[0].id
+        assert replay.json()["replayed"] is True
+    assert len(made) == 1 and writes == ["report"]
 
 
 @pytest.mark.parametrize(

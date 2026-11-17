@@ -3,7 +3,9 @@
 # ISO 自体は容量のためイメージに含めず、docker-compose で volume マウントする。
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     qemu-system-x86 \
     qemu-utils \
     dosfstools \

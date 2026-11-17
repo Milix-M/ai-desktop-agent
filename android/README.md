@@ -24,6 +24,8 @@ python3 scripts/extract-android-kernel.py
 
 ```bash
 ./scripts/up.sh   # Androidは初期起動に含まない
+docker compose --profile kvm build --pull \
+  --build-arg "PACKAGE_REFRESH=$(date -u +%F)" android
 docker compose --profile kvm up -d android
 ```
 
