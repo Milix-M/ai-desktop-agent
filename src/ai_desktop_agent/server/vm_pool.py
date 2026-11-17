@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import time
@@ -317,7 +318,9 @@ class VmPool:
     # ── 作成・削除 ──────────────────────────────────
 
     @serialize_creation
-    def create_vm(self, name: str | None = None, kind: str = KIND_QEMU) -> VmInfo:
+    def create_vm(
+        self, name: str | None = None, kind: str = KIND_QEMU, *, vm_id: str | None = None
+    ) -> VmInfo:
         """新しい専用環境を作成する。公開ポートと中継は作らない。
 
         kind=qemu: QEMU VM（専用ディスクとコンテナ）。KVM必須のため、KVMが
@@ -342,11 +345,17 @@ class VmPool:
             and not is_kvm_available(docker)
         ):
             raise KvmUnavailableError()
-        if len([v for v in self.list_vms() if v.managed]) >= MAX_VMS:
+        listed = self.list_vms()
+        if len([v for v in listed if v.managed]) >= MAX_VMS:
             raise ValueError(f"VM数の上限に達しています（{MAX_VMS}）")
 
         prefix = ID_PREFIX[kind]
-        vm_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
+        if vm_id is None:
+            vm_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
+        elif not re.fullmatch(rf"{prefix}-[0-9a-f]{{24}}", vm_id):
+            raise ValueError("作成する環境のIDが不正です")
+        elif any(vm.id == vm_id for vm in listed) or self._load_state(vm_id) is not None:
+            raise ValueError("同じIDの環境が既に存在します")
         vnc_port = ws_port = 0
 
         common_labels = {

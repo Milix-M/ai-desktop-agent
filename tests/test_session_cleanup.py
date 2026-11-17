@@ -68,7 +68,9 @@ async def test_server_shutdown_closes_sessions_before_the_shared_vnc_runtime(
     from ai_desktop_agent.server import app as server
     from ai_desktop_agent.server.android_provision import AndroidProvisioner
     from ai_desktop_agent.server.store import TaskStore
+    from ai_desktop_agent.server.vm_pool import VmPool
     from ai_desktop_agent.vm.vnc_client import VNCClient
+    from tests.test_vm_pool import _FakeDocker
 
     entered = asyncio.Event()
     llm = MockLLMProvider()
@@ -81,6 +83,11 @@ async def test_server_shutdown_closes_sessions_before_the_shared_vnc_runtime(
     llm.understand_instruction = wait
     display = FakeDisplayBackend()
     session = TaskSession(llm=llm, display=display)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        server, "_pool", VmPool(client=_FakeDocker(), state_file=tmp_path / "vms.json")
+    )
+    monkeypatch.setattr(server, "_vm_creations", None)
     monkeypatch.setattr(server, "_store", TaskStore(tmp_path))
     monkeypatch.setattr(server, "_sessions", {session.id: session})
     monkeypatch.setattr(server, "_active_session", session)
