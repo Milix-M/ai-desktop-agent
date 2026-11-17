@@ -1,15 +1,15 @@
-"""QMPクライアント — QEMU Machine Protocol の最小実装。
-
-VMの稼働状態照会など、Dockerの外側からゲスト状態を取る。
-"""
+"""QEMU monitor client with bounded, correlated responses over a UNIX socket."""
 
 from __future__ import annotations
 
 import json
-import logging
+import math
 import socket
+import threading
+import time
+from contextlib import suppress
 
-logger = logging.getLogger(__name__)
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
 class QmpError(RuntimeError):
@@ -17,13 +17,17 @@ class QmpError(RuntimeError):
 
 
 class QmpClient:
-    """UNIXソケット経由のQMPクライアント（コンテキストマネージャ対応）。"""
+    """Serialize monitor commands and discard unsolicited events and unmatched replies."""
 
     def __init__(self, path: str, timeout: float = 5.0) -> None:
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("QMP timeout must be finite and positive")
         self._path = path
         self._timeout = timeout
         self._sock: socket.socket | None = None
-        self._file = None
+        self._buffer = bytearray()
+        self._request_id = 0
+        self._lock = threading.RLock()
 
     def __enter__(self) -> QmpClient:
         self.connect()
@@ -33,63 +37,103 @@ class QmpClient:
         self.close()
 
     def connect(self) -> None:
-        """接続して capabilities ネゴシエーションする。"""
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(self._timeout)
-            sock.connect(self._path)
-        except OSError as e:
-            raise QmpError(f"QMP接続に失敗: {self._path}: {e}") from e
-        self._sock = sock
-        self._file = sock.makefile("r", encoding="utf-8")
-        greeting = self._readline()  # QMP greeting を読み飛ばす
-        if "QMP" not in greeting:
-            raise QmpError(f"QMPグリーティング不正: {greeting[:80]}")
-        result = self.execute("qmp_capabilities")
-        if "error" in result:
-            raise QmpError(f"capabilities失敗: {result['error']}")
+        """Negotiate capabilities within one deadline; close every failed connection."""
+        with self._lock:
+            self.close()
+            deadline = time.monotonic() + self._timeout
+            try:
+                self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self._set_deadline(deadline)
+                self._sock.connect(self._path)
+                greeting = self._read_message(deadline)
+                if not isinstance(greeting.get("QMP"), dict):
+                    raise QmpError("QMPグリーティング不正")
+                result = self._exchange("qmp_capabilities", None, deadline)
+                if "error" in result:
+                    raise QmpError(f"capabilities失敗: {result['error']}")
+            except (OSError, QmpError) as error:
+                self.close()
+                raise QmpError(f"QMP接続に失敗: {self._path}: {error}") from error
 
     def execute(self, command: str, arguments: dict | None = None) -> dict:
-        """コマンドを実行して応答dictを返す。"""
-        if self._sock is None or self._file is None:
-            raise QmpError("未接続です")
-        payload: dict = {"execute": command}
-        if arguments:
+        """Return the response for this command, never an asynchronous monitor event."""
+        with self._lock:
+            if self._sock is None:
+                raise QmpError("未接続です")
+            try:
+                return self._exchange(command, arguments, time.monotonic() + self._timeout)
+            except (OSError, QmpError) as error:
+                # A late reply must never be consumed by the next command.
+                self.close()
+                raise QmpError(f"QMP送受信に失敗: {error}") from error
+
+    def _exchange(self, command: str, arguments: dict | None, deadline: float) -> dict:
+        assert self._sock is not None
+        self._request_id += 1
+        request_id = self._request_id
+        payload: dict = {"execute": command, "id": request_id}
+        if arguments is not None:
             payload["arguments"] = arguments
-        try:
-            self._sock.sendall((json.dumps(payload) + "\n").encode())
-            line = self._readline()
-        except OSError as e:
-            raise QmpError(f"QMP送受信に失敗: {e}") from e
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError as e:
-            raise QmpError(f"QMP応答のパースに失敗: {line[:120]}") from e
+        encoded = (json.dumps(payload) + "\r\n").encode("utf-8")
+        self._set_deadline(deadline)
+        self._sock.sendall(encoded)
+        while True:
+            response = self._read_message(deadline)
+            if "event" in response:
+                continue
+            if type(response.get("id")) is not int or response["id"] != request_id:
+                continue
+            if ("return" in response) == ("error" in response):
+                raise QmpError("QMP応答にreturnまたはerrorが必要です")
+            return response
 
     def query_status(self) -> dict:
-        """VM稼働状態（status/endian等）を返す。"""
-        result = self.execute("query-status")
-        if "error" in result:
-            raise QmpError(f"query-status失敗: {result['error']}")
-        return result.get("return", {})
+        """VM稼働状態を返す。"""
+        with self._lock:
+            result = self.execute("query-status")
+            if "error" in result:
+                raise QmpError(f"query-status失敗: {result['error']}")
+            status = result["return"]
+            if not isinstance(status, dict) or not isinstance(status.get("status"), str):
+                self.close()
+                raise QmpError("query-statusの応答形式が不正です")
+            return status
 
     def close(self) -> None:
-        try:
-            if self._file is not None:
-                self._file.close()
-        except Exception:
-            pass
-        try:
-            if self._sock is not None:
-                self._sock.close()
-        except Exception:
-            pass
-        self._sock = None
-        self._file = None
+        with self._lock:
+            sock, self._sock = self._sock, None
+            self._buffer.clear()
+            if sock is not None:
+                with suppress(OSError):
+                    sock.close()
 
-    def _readline(self) -> str:
-        assert self._file is not None
-        line = self._file.readline()
-        if not line:
-            raise QmpError("QMP接続が切断されました")
-        return line
+    def _set_deadline(self, deadline: float) -> None:
+        assert self._sock is not None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise QmpError("QMP応答待ちが上限に達しました")
+        self._sock.settimeout(remaining)
+
+    def _read_message(self, deadline: float) -> dict:
+        assert self._sock is not None
+        while True:
+            self._set_deadline(deadline)
+            end = self._buffer.find(b"\n")
+            if end >= 0:
+                if end > MAX_MESSAGE_BYTES:
+                    raise QmpError("QMP応答がサイズ上限を超えました")
+                line = self._buffer[:end]
+                del self._buffer[: end + 1]
+                try:
+                    message = json.loads(line)
+                except (ValueError, UnicodeError, RecursionError) as error:
+                    raise QmpError("QMP応答のJSONが不正です") from error
+                if not isinstance(message, dict):
+                    raise QmpError("QMP応答はJSONオブジェクトである必要があります")
+                return message
+            if len(self._buffer) > MAX_MESSAGE_BYTES:
+                raise QmpError("QMP応答がサイズ上限を超えました")
+            chunk = self._sock.recv(min(65536, MAX_MESSAGE_BYTES + 1 - len(self._buffer)))
+            if not chunk:
+                raise QmpError("QMP接続が切断されました")
+            self._buffer.extend(chunk)
