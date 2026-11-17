@@ -13,13 +13,14 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Annotated
 
-from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 from ai_desktop_agent.agent.budget import ExecutionLimits
+from ai_desktop_agent.privacy import install_log_redaction, redact_data
 from ai_desktop_agent.server.auth import (
     COOKIE_NAME,
     SESSION_SECONDS,
@@ -44,6 +45,7 @@ from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logging.basicConfig(level=logging.INFO)
+install_log_redaction()
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +79,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # seccompでptrace/py-spyが使えない環境向け。
     with contextlib.suppress(Exception):
         faulthandler.register(signal.SIGUSR1)
-    marked = get_store().mark_interrupted()
     get_access()
+    get_store().redact_existing()
+    marked = get_store().mark_interrupted()
     await run_vm_call(get_pool().retire_legacy_relays)
     await run_vm_call(get_pool().isolate_environments)
     if marked:
@@ -136,7 +139,16 @@ async def invalid_request_handler(request: Request, error: RequestValidationErro
 
 @app.exception_handler(StorageError)
 async def storage_error_handler(request, error: StorageError):
-    return JSONResponse(status_code=503, content={"detail": str(error)})
+    return JSONResponse(status_code=503, content=redact_data({"detail": str(error)}))
+
+
+@app.exception_handler(HTTPException)
+async def http_error_handler(request, error: HTTPException):
+    return JSONResponse(
+        status_code=error.status_code,
+        content=redact_data({"detail": error.detail}),
+        headers=error.headers,
+    )
 
 
 app.add_middleware(AuthenticationMiddleware)
@@ -258,6 +270,12 @@ class TaskStatus(BaseModel):
     current_subtask_index: int = 0
     vm_id: str | None = None
     revision: int = 0
+    manual_input: dict | None = None
+
+
+class ResumeTaskRequest(BaseModel):
+    manual_input_id: str | None = Field(default=None, max_length=64)
+    allow_screen_share: bool = False
 
 
 class VmStatus(BaseModel):
@@ -387,15 +405,17 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=503, detail=str(error)) from error
+    previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
+    _check_task_replacement(previous)
     display = await run_display_call(_connect_vm_display, vm)
 
-    previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
-    for running in previous:
-        running.stop()
-    if previous:
-        await asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
-
     try:
+        # The running task may start a manual handoff while VNC is connecting.
+        _check_task_replacement(previous)
+        for running in previous:
+            running.stop()
+        if previous:
+            await asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
         session = await run_display_call(_create_session, display)
     except BaseException:
         await run_display_call(display.disconnect)
@@ -413,6 +433,13 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     if session._task is not None:
         session._task.add_done_callback(lambda _: _sessions.pop(session.id, None))
     return _make_status(session)
+
+
+def _check_task_replacement(sessions):
+    if any(isinstance(getattr(session, "manual_input", None), dict) for session in sessions):
+        raise HTTPException(
+            status_code=409, detail="手動入力を終えて再開するか、タスクを停止してください"
+        )
 
 
 def _resolve_vm(vm_id: str | None):
@@ -673,10 +700,23 @@ async def pause_task(vm_id: str | None = None) -> dict[str, str]:
 
 
 @app.post("/tasks/current/resume")
-async def resume_task(vm_id: str | None = None) -> dict[str, str]:
+async def resume_task(
+    vm_id: str | None = None, req: ResumeTaskRequest | None = None
+) -> dict[str, str]:
     session = _control_session(vm_id)
     if session:
-        session.resume()
+        if isinstance(getattr(session, "manual_input", None), dict):
+            from fastapi import HTTPException
+
+            try:
+                session.resume(
+                    manual_input_id=req.manual_input_id if req else None,
+                    allow_screen_share=req.allow_screen_share if req else False,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+        else:
+            session.resume()
         return {"status": "resumed"}
     return {"status": "no_session"}
 
@@ -775,7 +815,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         if overloaded:
             return
         try:
-            outbound.put_nowait(payload)
+            outbound.put_nowait(redact_data(payload))
         except asyncio.QueueFull:
             overloaded = True
 
@@ -798,6 +838,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "session_id": session.id,
                 "vm_id": getattr(session, "vm_id", None),
                 "state": state.value,
+                "manual_input": getattr(session, "manual_input", None),
                 "revision": session.loop.transition_count,
                 "subtask_index": ctx.current_subtask_index,
                 "subtask_count": len(ctx.subtasks),
@@ -976,6 +1017,7 @@ def _make_status(session: TaskSession) -> TaskStatus:
         current_subtask_index=ctx.current_subtask_index,
         vm_id=getattr(session, "vm_id", None),
         revision=session.loop.transition_count,
+        manual_input=getattr(session, "manual_input", None),
     )
 
 

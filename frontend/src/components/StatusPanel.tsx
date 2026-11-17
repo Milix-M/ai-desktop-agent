@@ -18,6 +18,7 @@ const STATE_CLASSES: Record<string, string> = {
   verifying: "state-executing",
   recovering: "state-executing",
   paused: "state-paused",
+  awaiting_user: "state-paused",
   completed: "state-completed",
   failed: "state-failed",
   interrupted: "state-failed",
@@ -42,7 +43,7 @@ export default function StatusPanel({
           id="state-badge"
           className={`state-badge ${STATE_CLASSES[state] || "state-idle"}`}
         >
-          {state.toUpperCase()}
+          {state === "awaiting_user" ? "手動入力待ち" : state.toUpperCase()}
         </span>
         {subtaskCount > 0 && (
           <span className="subtask-info">

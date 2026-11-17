@@ -301,6 +301,15 @@ body {
 }
 
 /* ── Controls ── */
+.manual-input {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .controls {
   display: flex;
   gap: 8px;
@@ -316,6 +325,10 @@ body {
   font-size: 12px;
   cursor: pointer;
   transition: background 0.2s;
+}
+
+.controls .manual-resume {
+  flex: 2;
 }
 
 .controls button:hover:not(:disabled) {

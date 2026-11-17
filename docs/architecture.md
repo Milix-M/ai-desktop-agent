@@ -112,6 +112,8 @@ GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とす�
 
 1タスクは1つのTaskSessionに対応し、_sessionsで管理する。_active_sessionは後方互換のための最新1件とする。vm_id省略時は稼働中のdesktopを優先する。WebSocketは接続時に全環境のsnapshotを送り、その後state・action・error・completeを送る。イベントにはsession_idとvm_id、状態更新にはrevisionも付ける。フロントは古いrevisionを適用しない。接続ごとの送信キューを使い、遅い閲覧者からタスクの実行を切り離す。
 
+request_user_inputはTaskSessionで処理し、awaiting_userの間は画面取得とモデル呼び出しを止める。状態通知とsnapshotにmanual_inputのid・reasonを付ける。POST /tasks/current/resumeはmanual_input_idとallow_screen_share=trueが一致する場合だけ再開する。入力値は受け取らない。同じ環境へのタスク投入も待機中は拒否する。
+
 ### 実行制限
 
 agent/budget.pyが実行制限を管理する。起動時に環境変数を検証し、TaskSession.runでタスクごとのContextVarを設定する。モデルへのHTTP送信前と使用量の受信時、画面操作前に上限を確認する。再試行と決定モデルも同じ予算を使う。OpenAI SDKの自動再試行は無効にし、送信ごとに回数を数える。
@@ -158,6 +160,7 @@ stateDiagram-v2
     EXECUTING --> WAITING : アクション実行
     EXECUTING --> EXECUTING : 継続 (自己遷移)
     EXECUTING --> PAUSED : 一時停止
+    EXECUTING --> AWAITING_USER : 手動入力を要求
     EXECUTING --> FAILED : fail_now() 上限・例外・取消
     EXECUTING --> RECOVERING : 即時回復 (稀)
     EXECUTING --> COMPLETED : 即時完了 (稀)
@@ -171,6 +174,10 @@ stateDiagram-v2
     RECOVERING --> EXECUTING : リトライ
     RECOVERING --> PLANNING : 再計画
     RECOVERING --> FAILED : 回復不能
+    RECOVERING --> AWAITING_USER : 手動入力を要求
+    AWAITING_USER --> EXECUTING : 画面送信を許可して再開
+    AWAITING_USER --> RECOVERING : 回復操作へ復帰
+    AWAITING_USER --> FAILED : 停止・期限切れ
     PAUSED --> EXECUTING : 再開
     PAUSED --> IDLE : 中断
     PAUSED --> FAILED : 停止
@@ -195,7 +202,7 @@ stateDiagram-v2
     end note
 ```
 
-interruptedはバックエンド再起動後の永続化上の目印で、状態機械の状態ではない。pauseはEXECUTINGから行う。上限超過・例外・取消ではFAILEDに移る。一時停止中の停止もFAILEDとして保存し、完了を通知する。
+interruptedはバックエンド再起動後の永続化上の目印で、状態機械の状態ではない。pauseはEXECUTINGから行う。手動入力を終えると要求前のEXECUTINGかRECOVERINGへ戻る。上限超過・例外・取消ではFAILEDに移る。一時停止中と手動入力中の停止もFAILEDとして保存し、完了を通知する。
 
 ### 実行フロー
 
@@ -301,7 +308,7 @@ LLMに渡すのは生画像ではない。座標ヒントを重ねた画像と�
 
 定義はactions/primitives.pyに置く。マウス7種とキー4種と待機3種、内部用のscreenshot、region_select、subtask_complete、vm_restartを持つ。クリック系は座標必須とする。allowed_paramsとrequired_paramsで検証する。
 
-実行はactions/executor.pyに置き、Actionをbackend操作に変える。REGION_SELECTとVM_RESTARTはセッション側で処理する。このため実行器に届いた場合は警告のみ出す。安定待ちのwait_for_stillを持つ。
+実行はactions/executor.pyに置き、Actionをbackend操作に変える。REGION_SELECTとVM_RESTARTはセッション側で処理する。このため実行器に届いた場合は警告のみ出す。REQUEST_USER_INPUTもセッションで処理し、実行器に届けば失敗とする。安定待ちのwait_for_stillを持つ。
 
 VNC実装はvm/vnc_client.pyに置き、vncdotoolを包む。接続時はRFBの初期化まで待つ。ASCIIのtype_textは1文字ずつキーイベントを送る。Shiftが必要な文字はShift修飾を使わず文字自体のX11 keysymを直接送る。Shift修飾はVNC経路で外れる実測があるためである。大文字AからZはそのまま通す。vncdotoolのKEYMAPに無い名前のbackspaceなどは起動時に補う。ThreadedVNCClientProxyは戻り値なし呼び出しで後続呼び出しが動かなくなる。deferred連鎖に前回戻り値が流れるためである。keyEventとmouseDragの直接利用は禁止とする。mouseDragはmouseMove連打の自前段階に置き換え済みとする。クリックは移動と整定待ち、50ms押下、解放の順に行う。ダブルクリックは同座標明示とする。組合せキーは20ms間隔とする。座標は画面内に収める。
 
@@ -406,6 +413,8 @@ Next.jsのApp Routerを使う。InstructionInputで指示と再起動許可を�
 ## 安全性
 
 安全性と未実装の対策は[safety.md](safety.md)にまとめる。バックエンドはDockerソケットを使うため、バックエンド侵害時までホストの隔離を保証する構成ではない。利用者ごとの権限分離と外部公開の検証は未対応とする。
+
+privacy.pyは登録済みのキーをモデルのテキストと保存・配信する記録から除く。ログのメッセージ・例外・最終出力も置き換え、VNCなどのプロトコルのDEBUGログは省く。画像の自動マスキングは行わない。
 
 ## 制限と今後
 

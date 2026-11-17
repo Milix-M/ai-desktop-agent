@@ -40,8 +40,11 @@ export function getCurrentTask(vmId?: string | null): Promise<TaskStatus> {
   return request(`/tasks/current${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`);
 }
 
-export function controlTask(action: "pause" | "resume" | "stop", vmId?: string | null): Promise<{ status: string }> {
-  return request(`/tasks/current/${action}${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`, post());
+export function controlTask(action: "pause" | "resume" | "stop", vmId?: string | null, manualInputId?: string): Promise<{ status: string }> {
+  const body = action === "resume" && manualInputId
+    ? { manual_input_id: manualInputId, allow_screen_share: true }
+    : undefined;
+  return request(`/tasks/current/${action}${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`, post(body));
 }
 
 export function getWsUrl(): string {

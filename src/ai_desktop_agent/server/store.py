@@ -14,6 +14,7 @@ import re
 import time
 from pathlib import Path
 
+from ai_desktop_agent.privacy import redact_data
 from ai_desktop_agent.server.persistence import StorageError, atomic_json, check_writable
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ ACTIVE_STATES = frozenset(
         "verifying",
         "recovering",
         "paused",
+        "awaiting_user",
     }
 )
 
@@ -153,7 +155,7 @@ class TaskStore:
         if not record.created_at:
             record.created_at = record.updated_at
         path = self._dir / f"{record.id}.json"
-        atomic_json(path, record.to_dict())
+        atomic_json(path, redact_data(record.to_dict()))
 
     def load(self, task_id: str) -> TaskRecord | None:
         """1件読み出し。なければ None。"""
@@ -163,7 +165,7 @@ class TaskStore:
         if not path.is_file():
             return None
         try:
-            return TaskRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return TaskRecord.from_dict(redact_data(json.loads(path.read_text(encoding="utf-8"))))
         except (ValueError, TypeError, KeyError, AttributeError, OSError) as e:
             logger.warning("タスク記録の読み出しに失敗 %s: %s", task_id, e)
             return None
@@ -212,4 +214,21 @@ class TaskStore:
                 count += 1
         if count:
             logger.info("中断タスクを %d 件マークしました", count)
+        return count
+
+    def redact_existing(self) -> int:
+        """Rewrite only valid records whose configured credentials need redaction."""
+        count = 0
+        for path in self._dir.glob("*.json"):
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", path.stem):
+                continue
+            try:
+                original = json.loads(path.read_text(encoding="utf-8"))
+                TaskRecord.from_dict(original)
+            except (ValueError, TypeError, KeyError, AttributeError, OSError):
+                continue
+            cleaned = redact_data(original)
+            if cleaned != original:
+                atomic_json(path, cleaned)
+                count += 1
         return count

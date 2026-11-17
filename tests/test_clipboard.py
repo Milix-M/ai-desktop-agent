@@ -86,6 +86,7 @@ def test_repeated_empty_initial_updates_fail_without_a_request_storm(protocol):
     assert len(failures) == 1 and failures[0].check(RuntimeError)
     assert "画面画像" in failures[0].getErrorMessage()
     assert protocol.transport.write.call_count == 2
+    protocol.transport.loseConnection.assert_called_once()
 
 
 def test_fragmented_capabilities_and_utf8_transfer_follow_the_wire_format(protocol):

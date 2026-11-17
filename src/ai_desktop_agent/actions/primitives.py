@@ -26,6 +26,7 @@ class ActionType(Enum):
     KEY_PRESS = "key_press"
     KEY_COMBO = "key_combo"
     KEY_HOLD = "key_hold"
+    REQUEST_USER_INPUT = "request_user_input"
 
     # 制御
     WAIT = "wait"
@@ -84,6 +85,7 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
     ActionType.DRAG: {"start_x", "start_y", "end_x", "end_y"},
     ActionType.SCROLL: {"direction", "amount"},
     ActionType.TYPE: {"text"},
+    ActionType.REQUEST_USER_INPUT: {"reason"},
     ActionType.KEY_PRESS: {"key"},
     ActionType.KEY_COMBO: {"keys"},
     ActionType.KEY_HOLD: {"key", "duration_ms"},
@@ -125,6 +127,7 @@ _ACTION_NAMES: dict[ActionType, str] = {
     ActionType.DRAG: "ドラッグ",
     ActionType.SCROLL: "スクロール",
     ActionType.TYPE: "テキスト入力",
+    ActionType.REQUEST_USER_INPUT: "手動入力",
     ActionType.KEY_PRESS: "キー押下",
     ActionType.KEY_COMBO: "キーコンボ",
     ActionType.KEY_HOLD: "キー長押し",
@@ -165,6 +168,11 @@ class Action:
                 f"不明なパラメータです: {unknown} (action_type={self.action_type.value})"
             )
 
+        if self.action_type == ActionType.REQUEST_USER_INPUT:
+            reason = params["reason"]
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+                raise ValueError("手動入力の理由は1〜1000文字で指定してください")
+
         # 説明文の自動生成
         if not self.description:
             object.__setattr__(self, "description", _generate_description(self.action_type, params))
@@ -188,9 +196,7 @@ def _generate_description(action_type: ActionType, params: dict) -> str:
         return f"{name}（座標不明）"
     elif action_type == ActionType.TYPE:
         text = str(params.get("text", ""))
-        if len(text) > 30:
-            text = text[:27] + "..."
-        return f'{name}: "{text}"'
+        return f"{name}（{len(text)}文字）"
     elif action_type == ActionType.KEY_PRESS:
         return f"{name}: {params.get('key', '')}"
     elif action_type == ActionType.KEY_COMBO:

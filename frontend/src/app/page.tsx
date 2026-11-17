@@ -15,7 +15,7 @@ import AuthGate from "@/components/AuthGate";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useSidebarWidth } from "@/hooks/useSidebarWidth";
 import { createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, stopVm, startVm, getVncWsUrl } from "@/lib/api";
-import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo, VmInfo } from "@/lib/types";
+import type { WsMessage, LogEntry, TaskHistoryItem, SubtaskInfo, VmInfo, ManualInputRequest } from "@/lib/types";
 
 let logIdCounter = 0;
 
@@ -48,6 +48,7 @@ interface VmView {
   subtaskCount: number;
   subtasks: SubtaskInfo[];
   logs: LogEntry[];
+  manualInput?: ManualInputRequest | null;
 }
 
 const EMPTY_VIEW: VmView = {
@@ -244,6 +245,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
             subtaskIndex: current.current_subtask_index,
             subtaskCount: current.subtasks.length,
             subtasks: current.subtasks,
+            manualInput: current.manual_input ?? null,
           });
           addLog("実行中のタスクに再接続", "state", vmId);
         }
@@ -270,6 +272,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
               subtaskIndex: task.current_subtask_index,
               subtaskCount: task.subtasks.length,
               subtasks: task.subtasks,
+              manualInput: task.manual_input ?? null,
             });
           }
           refreshHistory();
@@ -279,6 +282,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
             sessionId: data.session_id,
             revision: data.revision,
             state: data.state,
+            manualInput: data.manual_input ?? null,
             subtaskIndex: data.subtask_index,
             subtaskCount: data.subtask_count,
             ...(data.subtasks ? { subtasks: data.subtasks } : {}),
@@ -308,6 +312,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
             sessionId: data.session_id,
             revision: data.revision,
             state: data.success ? "completed" : "failed",
+            manualInput: null,
           });
           refreshHistory();
           break;
@@ -335,7 +340,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
     "recovering",
   ];
   const isRunning = RUNNING_STATES.includes(liveView.state);
-  const submitDisabled = isRunning || liveView.state === "paused" || selectedVm?.status !== "running";
+  const submitDisabled = isRunning || liveView.state === "paused" || liveView.state === "awaiting_user" || selectedVm?.status !== "running";
 
   const handleSubmit = useCallback(
     async (instruction: string, allowVmRestart: boolean) => {
@@ -343,6 +348,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
       setSelectedTaskId(null);
       updateView(vmId, {
         state: "idle",
+        manualInput: null,
         subtaskIndex: 0,
         subtaskCount: 0,
         subtasks: [],
@@ -368,13 +374,17 @@ function DesktopWorkspace({ sessionActions, draft }: {
   const handleControl = useCallback(
     async (action: "pause" | "resume" | "stop") => {
       try {
-        await controlTask(action, selectedVmId);
+        if (action === "resume" && liveView.manualInput?.id) {
+          await controlTask(action, selectedVmId, liveView.manualInput.id);
+        } else {
+          await controlTask(action, selectedVmId);
+        }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         addLog(`操作エラー: ${msg}`, "error");
       }
     },
-    [addLog, selectedVmId]
+    [addLog, selectedVmId, liveView.manualInput?.id]
   );
 
   const handleCreateVm = useCallback(async (kind: "qemu" | "container" | "android", name?: string) => {
@@ -482,7 +492,7 @@ function DesktopWorkspace({ sessionActions, draft }: {
             subtasks={subtasks}
           />
 
-          <ControlPanel onControl={handleControl} state={liveView.state} />
+          <ControlPanel onControl={handleControl} state={liveView.state} manualInput={liveView.manualInput} />
 
           <ConnectionPanel
             vncConnected={vncConnected}

@@ -12,6 +12,7 @@ from pathlib import Path
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
+from ai_desktop_agent.privacy import protect, unprotect
 from ai_desktop_agent.server.persistence import StorageError, atomic_text, metadata_lock
 
 COOKIE_NAME = "ai_desktop_agent_session"
@@ -31,6 +32,7 @@ class AccessControl:
         if not (32 <= len(key) <= 256 and key.isascii() and not any(c.isspace() for c in key)):
             raise ValueError("AGENT_ACCESS_TOKENは空白を含まない32〜256文字のASCIIにしてください")
         self._key = key.encode()
+        protect(key)
         self._sessions: dict[str, BrowserSession] = {}
 
     @classmethod
@@ -56,6 +58,7 @@ class AccessControl:
         while len(self._sessions) >= MAX_SESSIONS:
             self.revoke(next(iter(self._sessions)))
         token = secrets.token_urlsafe(32)
+        protect(token)
         self._sessions[token] = BrowserSession(time.monotonic() + SESSION_SECONDS)
         return token
 
@@ -68,6 +71,7 @@ class AccessControl:
         session = self._sessions.pop(token, None)
         if session is not None:
             session.revoked.set()
+            unprotect(token)
 
     def authenticate(self, connection: HTTPConnection) -> tuple[bool, BrowserSession | None]:
         authorization = connection.headers.get("authorization", "")

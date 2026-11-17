@@ -26,6 +26,24 @@ beforeEach(() => {
   vi.mocked(login).mockResolvedValue({ authenticated: true });
 });
 
+test("manual input survives reconnect and sends consent for only the current request", async () => {
+  render(<Home />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  act(() => ws.handler?.({ type: "snapshot", tasks: [{
+    session_id: "running", vm_id: "desktop", state: "awaiting_user", is_running: true,
+    action_count: 1, success_count: 1, failure_count: 0, subtasks: [], current_subtask_index: 0,
+    manual_input: { id: "current-request", reason: "ログイン情報を入力してください" },
+  }] }));
+  expect(await screen.findByText("ログイン情報を入力してください")).toBeVisible();
+  expect(screen.getByRole("textbox")).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
+  expect(controlTask).toHaveBeenCalledWith("resume", "desktop", "current-request");
+  act(() => ws.handler?.({ type: "state", session_id: "running", vm_id: "desktop", state: "executing", revision: 9,
+    action_count: 2, subtask_index: 0, subtask_count: 1, manual_input: null }));
+  await waitFor(() => expect(screen.queryByText("ログイン情報を入力してください")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "再開" })).toBeDisabled();
+});
+
 test("history keeps live controls available and receives live completion", async () => {
   render(<Home />);
   await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());

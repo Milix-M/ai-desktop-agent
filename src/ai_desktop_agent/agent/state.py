@@ -22,6 +22,7 @@ class AgentState(StrEnum):
     VERIFYING = "verifying"  # 実行結果を検証中
     RECOVERING = "recovering"  # エラーからの回復を試行中
     PAUSED = "paused"  # ユーザーによる一時停止
+    AWAITING_USER = "awaiting_user"  # 画面をAIへ送らず手動入力を待つ
     COMPLETED = "completed"  # タスク正常完了
     FAILED = "failed"  # タスク遂行不能
 
@@ -38,6 +39,7 @@ _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.FAILED,
         AgentState.EXECUTING,
         AgentState.PAUSED,
+        AgentState.AWAITING_USER,
     },
     AgentState.WAITING: {AgentState.VERIFYING, AgentState.RECOVERING, AgentState.FAILED},
     AgentState.VERIFYING: {
@@ -46,7 +48,13 @@ _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.COMPLETED,
         AgentState.FAILED,
     },
-    AgentState.RECOVERING: {AgentState.PLANNING, AgentState.EXECUTING, AgentState.FAILED},
+    AgentState.RECOVERING: {
+        AgentState.PLANNING,
+        AgentState.EXECUTING,
+        AgentState.FAILED,
+        AgentState.AWAITING_USER,
+    },
+    AgentState.AWAITING_USER: {AgentState.EXECUTING, AgentState.RECOVERING, AgentState.FAILED},
     AgentState.PAUSED: {AgentState.EXECUTING, AgentState.IDLE, AgentState.FAILED},
     AgentState.COMPLETED: {AgentState.IDLE, AgentState.FAILED},
     AgentState.FAILED: {AgentState.IDLE},
@@ -73,7 +81,11 @@ def is_terminal(state: AgentState) -> bool:
 
 def is_active(state: AgentState) -> bool:
     """エージェントがアクティブに動作中かどうか（IDLE/PAUSED/終端以外）。"""
-    return state not in (AgentState.IDLE, AgentState.PAUSED) and not is_terminal(state)
+    return state not in (
+        AgentState.IDLE,
+        AgentState.PAUSED,
+        AgentState.AWAITING_USER,
+    ) and not is_terminal(state)
 
 
 @dataclass

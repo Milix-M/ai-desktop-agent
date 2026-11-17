@@ -108,11 +108,12 @@ class TestActionDescription:
         )
         assert action.description == "ファイルメニューをクリック"
 
-    def test_type_description_truncates_long_text(self):
-        """長いテキストは説明で切り詰められる。"""
+    def test_type_description_does_not_preview_input(self):
+        """入力内容を説明へ複製しない。"""
         long_text = "a" * 100
         action = Action(action_type=ActionType.TYPE, params={"text": long_text})
-        assert len(action.description) <= 50  # 30 + "..." + 前後の文字
+        assert "aaaa" not in action.description
+        assert "100文字" in action.description
 
     def test_subtask_complete_description(self):
         """SUBTASK_COMPLETE の説明。"""
@@ -148,6 +149,7 @@ class TestAllActionTypesValid:
         ActionType.DRAG: {"start_x": 0, "start_y": 0, "end_x": 100, "end_y": 100},
         ActionType.SCROLL: {"direction": "down", "amount": 100},
         ActionType.TYPE: {"text": "hello"},
+        ActionType.REQUEST_USER_INPUT: {"reason": "ログインしてください"},
         ActionType.KEY_PRESS: {"key": "enter"},
         ActionType.KEY_COMBO: {"keys": ["ctrl", "c"]},
         ActionType.KEY_HOLD: {"key": "shift", "duration_ms": 500},

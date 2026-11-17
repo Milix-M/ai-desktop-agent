@@ -79,6 +79,14 @@ describe("API client", () => {
   });
 
   describe("controlTask", () => {
+    it("binds consent to the current manual request and VM", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ status: "resumed" }) } as Response);
+      await controlTask("resume", "desktop", "current-request");
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks/current/resume?vm_id=desktop"), expect.objectContaining({
+        body: JSON.stringify({ manual_input_id: "current-request", allow_screen_share: true }),
+      }));
+    });
+
     it.each(["pause", "resume", "stop"] as const)(
       "POSTs /tasks/current/%s",
       async (action) => {

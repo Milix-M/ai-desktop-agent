@@ -36,6 +36,7 @@ from ai_desktop_agent.agent.llm.types import (
 )
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
+from ai_desktop_agent.privacy import redact, redact_data
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
@@ -191,6 +192,8 @@ class TaskSession:
         # 連続する決定取得の失敗回数（空応答ストーム時の早期打切り用）
         self._consec_empty_decides: int = 0
         self._replan_count = 0
+        self.manual_input: dict | None = None
+        self._manual_resume: asyncio.Event | None = None
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
@@ -243,7 +246,7 @@ class TaskSession:
         await self._notify(self._on_action, action, success)
 
     async def _emit_error(self, error: str) -> None:
-        await self._notify(self._on_error, error)
+        await self._notify(self._on_error, redact(error))
 
     async def _emit_complete(self, success: bool) -> None:
         await self._notify(self._on_complete, success)
@@ -256,6 +259,7 @@ class TaskSession:
         Returns:
             タスクが正常に完了したかどうか。
         """
+        instruction = redact(instruction)
         goal = Goal(description=instruction)
         self._instruction = instruction
         self.loop.start(goal)
@@ -359,7 +363,7 @@ class TaskSession:
         goal = ctx.goal
         if success is None and self.loop.is_done:
             success = self.loop.state == AgentState.COMPLETED
-        return TaskRecord(
+        record = TaskRecord(
             id=self.id,
             instruction=self._instruction,
             state=self.loop.state.value,
@@ -410,6 +414,7 @@ class TaskSession:
             created_at=self._created_at,
             revision=self.loop.transition_count,
         )
+        return TaskRecord.from_dict(redact_data(record.to_dict()))
 
     def _persist(self, success: bool | None = None) -> None:
         """Persist before proceeding to another operation; a failed audit write stops the task."""
@@ -543,7 +548,9 @@ class TaskSession:
 
         # 同一アクションの足踏みは待機に置換する（低速VM対策）
         if self._is_stuck_repeat(decision.action):
-            logger.info("同一操作の連続を検出、待機に置換します: %s", decision.action.params)
+            logger.info(
+                "同一操作の連続を検出、待機に置換します: %s", decision.action.action_type.value
+            )
             decision = ActionDecision(
                 action=Action(action_type=ActionType.WAIT, params={"seconds": STUCK_WAIT_SECONDS}),
                 expected_effect="画面変化の待機",
@@ -557,9 +564,8 @@ class TaskSession:
         # アクション実行
         action = decision.action
         logger.info(
-            "アクション実行: %s %s (confidence=%.2f)",
+            "アクション実行: %s (confidence=%.2f)",
             action.action_type.value,
-            action.params,
             decision.confidence,
         )
         # 検証用に実行直前の生画像を保持（オーバーレイの影響を除外）
@@ -607,7 +613,11 @@ class TaskSession:
         self._budget.check()
         started = time.monotonic()
         try:
-            success = await self.executor.execute(action)
+            if action.action_type == ActionType.REQUEST_USER_INPUT:
+                await self._request_user_input(action)
+                success = True
+            else:
+                success = await self.executor.execute(action)
         except asyncio.CancelledError:
             # Cancellation drains any display worker first; preserve a possibly partial action.
             self.loop.record_action(
@@ -628,6 +638,18 @@ class TaskSession:
             duration_ms=(time.monotonic() - started) * 1000,
         )
         return success
+
+    async def _request_user_input(self, action: Action) -> None:
+        previous = self.loop.wait_for_user()
+        self._manual_resume = asyncio.Event()
+        self.manual_input = {"id": uuid.uuid4().hex, "reason": redact(action.params["reason"])}
+        try:
+            await self._emit_state_change()
+            await self._manual_resume.wait()
+            self.loop.user_input_done(previous)
+        finally:
+            self.manual_input = None
+            self._manual_resume = None
 
     async def _execute_vm_restart(self, decision: ActionDecision) -> None:
         """VM_RESTART を処理する：許可制で再起動、後は回復フローへ。
@@ -741,7 +763,7 @@ class TaskSession:
                 rw = int(params.get("width", ZOOM_AUTO_SIZE))
                 rh = int(params.get("height", ZOOM_AUTO_SIZE))
             except (TypeError, ValueError):
-                logger.warning("不正な region_select パラメータ: %s", params)
+                logger.warning("不正な region_select パラメータ")
                 return None
 
             # 現在画像座標系 → 絶対座標系へ変換
@@ -831,13 +853,12 @@ class TaskSession:
                     reasoning=pending.reasoning,
                 )
             except ValueError:
-                logger.exception("精密アクションの構築に失敗: %s", mapped_params)
+                logger.warning("精密アクションの構築に失敗: %s", pending.action.action_type.value)
                 return None
 
         logger.info(
-            "精密アクション: %s %s (confidence=%.2f, scale=%.2f)",
+            "精密アクション: %s (confidence=%.2f, scale=%.2f)",
             pending.action.action_type.value,
-            pending.action.params,
             pending.confidence,
             total_scale,
         )
@@ -931,7 +952,7 @@ class TaskSession:
 
     def _is_stuck_repeat(self, action: Action) -> bool:
         """同一アクションが連続しているか（SUBTASK_COMPLETE除く）。"""
-        if action.action_type == ActionType.SUBTASK_COMPLETE:
+        if action.action_type in (ActionType.SUBTASK_COMPLETE, ActionType.REQUEST_USER_INPUT):
             return False
         history = self.loop.context.action_history
         if len(history) < STUCK_REPEAT_COUNT - 1:
@@ -1346,7 +1367,7 @@ class TaskSession:
                     "決定応答の不備のため再試行します (%d/%d): %s",
                     attempt + 1,
                     max_attempts,
-                    str(e)[:80],
+                    redact(str(e))[:80],
                 )
                 await asyncio.sleep(2.0 * (attempt + 1))
         raise last_error or ValueError("応答が空です")
@@ -1359,6 +1380,8 @@ class TaskSession:
         ESC / Menu の1秒超ホールドが必要（公式doc準拠）のため、
         Android端末（vm_id が ``android`` / ``and-*``）では専用シーケンスを使う。
         """
+        if self.manual_input is not None:
+            raise RuntimeError("手動入力中はAI向けの画面を取得しません")
         self._budget.check()
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
@@ -1445,7 +1468,14 @@ class TaskSession:
             self.loop.pause()
             self._notify_control_change()
 
-    def resume(self) -> None:
+    def resume(
+        self, *, manual_input_id: str | None = None, allow_screen_share: bool = False
+    ) -> None:
+        if self.manual_input is not None:
+            if not allow_screen_share or manual_input_id != self.manual_input["id"]:
+                raise ValueError("手動入力を終え、画面を送信してよいことを確認してください")
+            self._manual_resume.set()
+            return
         if self.loop.state == AgentState.PAUSED:
             self.loop.resume()
             self._notify_control_change()
