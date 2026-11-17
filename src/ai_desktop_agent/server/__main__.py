@@ -7,6 +7,8 @@ import uvicorn
 
 from ai_desktop_agent.server.networks import EnvironmentNetworks
 from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.server.websocket_io import MAX_MESSAGE_BYTES, MAX_MESSAGE_QUEUE
+from ai_desktop_agent.server.websocket_protocol import AgentWebSocketProtocol
 
 
 def main():
@@ -21,6 +23,10 @@ def main():
         host=address,
         port=int(os.environ.get("PORT", "8081")),
         proxy_headers=False,
+        workers=1,
+        ws=AgentWebSocketProtocol,
+        ws_max_size=MAX_MESSAGE_BYTES,
+        ws_max_queue=MAX_MESSAGE_QUEUE,
     )
 
 

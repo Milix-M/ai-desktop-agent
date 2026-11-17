@@ -36,6 +36,8 @@ from ai_desktop_agent.server.auth import (
     COOKIE_NAME,
     SESSION_SECONDS,
     AuthenticationMiddleware,
+    AuthenticationRateLimitError,
+    authentication_rate_limit_response,
     get_access,
 )
 from ai_desktop_agent.server.browser_access import (
@@ -44,6 +46,7 @@ from ai_desktop_agent.server.browser_access import (
     ManagementNetworkMiddleware,
 )
 from ai_desktop_agent.server.persistence import StorageError
+from ai_desktop_agent.server.request_limits import RequestBodyLimitMiddleware
 from ai_desktop_agent.server.session import TaskSession, _drain_task
 from ai_desktop_agent.server.store import TaskRecord, TaskStore
 from ai_desktop_agent.server.submissions import (
@@ -189,6 +192,11 @@ async def storage_error_handler(request, error: StorageError):
     return JSONResponse(status_code=503, content=redact_data({"detail": str(error)}))
 
 
+@app.exception_handler(AuthenticationRateLimitError)
+async def authentication_limit_handler(request, error: AuthenticationRateLimitError):
+    return authentication_rate_limit_response(error)
+
+
 @app.exception_handler(HTTPException)
 async def http_error_handler(request, error: HTTPException):
     return JSONResponse(
@@ -198,6 +206,7 @@ async def http_error_handler(request, error: HTTPException):
     )
 
 
+app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(AuthenticationMiddleware)
 
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
@@ -228,7 +237,7 @@ async def login(request: Request, body: LoginRequest, response: Response):
     from fastapi import HTTPException
 
     access = get_access()
-    if not access.valid_key(body.key):
+    if not access.verify_key(body.key):
         raise HTTPException(
             status_code=401, detail="接続キーが違います", headers={"Cache-Control": "no-store"}
         )
@@ -293,6 +302,17 @@ def get_pool() -> VmPool:
     if _pool is None:
         _pool = VmPool()
     return _pool
+
+
+def get_vm_creations() -> VmCreationService:
+    global _vm_creations
+    if _vm_creations is None:
+        import os
+        from pathlib import Path
+
+        directory = Path(os.environ.get("DATA_DIR", "./data")) / "vm-creations"
+        _vm_creations = VmCreationService(get_pool(), CreationStore(directory))
+    return _vm_creations
 
 
 # WebSocket コールバックのグローバルレジストリ
@@ -405,17 +425,6 @@ class TaskDetail(TaskSummary):
     created_at: float = 0.0
     execution_limits: dict = {}
     execution_usage: dict = {}
-
-
-def get_vm_creations() -> VmCreationService:
-    global _vm_creations
-    if _vm_creations is None:
-        import os
-        from pathlib import Path
-
-        directory = Path(os.environ.get("DATA_DIR", "./data")) / "vm-creations"
-        _vm_creations = VmCreationService(get_pool(), CreationStore(directory))
-    return _vm_creations
 
 
 def _to_summary(d: dict) -> TaskSummary:
