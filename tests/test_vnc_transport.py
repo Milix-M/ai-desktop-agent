@@ -143,7 +143,9 @@ def test_connect_timeout_cancels_the_endpoint_and_closes_a_late_transport(monkey
     attempt = Deferred(lambda _: cancelled())
     endpoint = Mock()
     endpoint.connect.return_value = attempt
-    monkeypatch.setattr(vnc_transport, "HostnameEndpoint", lambda *args, **kwargs: endpoint)
+    monkeypatch.setattr(
+        vnc_transport, "ContainerHostnameEndpoint", lambda *args, **kwargs: endpoint
+    )
     factory = vnc_transport.ManagedVNCFactory()
     proxy = vnc_transport.ManagedVNCProxy(factory, timeout=0.01)
     proxy.connect("127.0.0.1")
@@ -183,7 +185,7 @@ def test_endpoint_setup_failure_is_reported_without_waiting_for_a_timeout(monkey
         vnc_transport, "reactor", SimpleNamespace(callFromThread=lambda fn, *args: fn(*args))
     )
     endpoint = Mock(side_effect=ValueError("invalid endpoint"))
-    monkeypatch.setattr(vnc_transport, "HostnameEndpoint", endpoint)
+    monkeypatch.setattr(vnc_transport, "ContainerHostnameEndpoint", endpoint)
     proxy = vnc_transport.ManagedVNCProxy(vnc_transport.ManagedVNCFactory(), timeout=0.1)
     proxy.connect("invalid")
     assert proxy.closed

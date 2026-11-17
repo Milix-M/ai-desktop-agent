@@ -93,7 +93,7 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
 
   desktop:
-    name: Desktop (real Firefox and VNC)
+    name: Desktop (Firefox, VNC, QMP, and guest agent)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -104,6 +104,8 @@ jobs:
       - run: uv sync --frozen
       - run: docker build -t ai-desktop-agent-desktop-smoke desktop
       - run: docker build -t ai-desktop-agent-backend-smoke .
+      - run: docker build -t ai-desktop-agent-qmp-smoke vm
+      - run: docker build -t ai-desktop-agent-qga-smoke -f tests/integration/qga.Dockerfile .
       - name: Install minimum supported Compose
         env:
           COMPOSE_TEST_DIR: ${{ runner.temp }}/agent-compose
