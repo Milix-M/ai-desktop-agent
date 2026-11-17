@@ -24,6 +24,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ai_desktop_agent.server.docker_discovery import (  # noqa: E402
+    container_labels,
+    refresh_existing,
+)
 from ai_desktop_agent.server.networks import (  # noqa: E402
     LABEL_PROJECT,
     LABEL_VM_ID,
@@ -35,6 +39,9 @@ from ai_desktop_agent.server.persistence import (  # noqa: E402
     metadata_lock,
 )
 from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E402
+from ai_desktop_agent.server.vm_locks import (  # noqa: E402
+    serialize_environment,
+)
 from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes  # noqa: E402
 
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
@@ -120,22 +127,38 @@ class VmPool:
 
     # ── 一覧・取得 ──────────────────────────────────
 
+    def instance_id(self, vm_id: str) -> str | None:
+        """Identify the current primary container, including replacement under the same VM ID."""
+        target = self._primary_container(vm_id, self._docker())
+        return target.id if target is not None else None
+
     def isolate_environments(self) -> None:
         # Snapshot discovery before detaching old shared networks used for legacy adoption.
         environments = self.list_vms()
         for vm in environments:
             self.prepare_vm(vm.id)
 
+    @serialize_environment
     def prepare_vm(self, vm_id: str) -> None:
         docker = self._docker()
         networks = EnvironmentNetworks(docker, self._project_name(docker))
-        for target in self._lifecycle_targets(vm_id, docker, include_relay=False):
-            network = networks.ensure(vm_id, target)
-            state = self._load_state(vm_id) or {}
-            if state.get("isolated_network") != network.name:
-                # Keep legacy environments discoverable even if a later migration step fails.
-                self._save_state(vm_id, {**state, "isolated_network": network.name})
-            networks.isolate(vm_id, target)
+        target = self._primary_container(vm_id, docker)
+        if target is None:
+            return
+        network = networks.ensure(vm_id, target)
+        state = self._load_state(vm_id) or {}
+        if state.get("isolated_network") != network.name:
+            # Keep legacy environments discoverable even if a later migration step fails.
+            self._save_state(vm_id, {**state, "isolated_network": network.name})
+        networks.isolate(vm_id, target)
+
+    def _primary_container(self, vm_id: str, docker: Any):
+        targets = self._lifecycle_targets(vm_id, docker, include_relay=False)
+        if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE, ANDROID_SERVICE):
+            return self._pick_fixed(targets, vm_id)
+        if len(targets) > 1:
+            raise DockerUnavailableError(f"同じ環境IDの本体が複数あります: {vm_id}")
+        return targets[0] if targets else None
 
     def retire_legacy_relays(self) -> None:
         """Remove this project's unauthenticated relays before exposing the authenticated API."""
@@ -165,44 +188,55 @@ class VmPool:
         """Find fixed services only in this backend's Compose project."""
         project = self._project_name(docker)
         candidates = docker.containers.list(
-            all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={service}"}
+            all=True,
+            filters={
+                "label": [
+                    f"{COMPOSE_SERVICE_LABEL}={service}",
+                    f"com.docker.compose.project={project}",
+                ]
+            },
+            sparse=True,
+        )
+        owned = (
+            c for c in candidates if self._labels(c).get("com.docker.compose.project") == project
         )
         return [
-            c for c in candidates if self._labels(c).get("com.docker.compose.project") == project
+            c
+            for c in refresh_existing(owned)
+            if self._labels(c).get("com.docker.compose.project") == project
         ]
 
     @_discovery_operation
     def _dynamic_containers(self, docker: Any, vm_id: str | None = None) -> list[Any]:
         label = LABEL_VM_ID if vm_id is None else f"{LABEL_VM_ID}={vm_id}"
-        candidates = docker.containers.list(all=True, filters={"label": label})
+        candidates = docker.containers.list(all=True, filters={"label": label}, sparse=True)
         project = self._project_name(docker)
         states = self._load_all_states()
         network = self._backend_network(docker)
-        owned = []
-        for container in candidates:
+
+        def owned(container):
             labels = self._labels(container)
             owner = labels.get(LABEL_PROJECT)
             if owner is not None:
-                if owner == project:
-                    owned.append(container)
-                continue
+                return owner == project
             # Legacy containers have no owner label. Require this store's allocation
             # AND this backend's network; a shared Docker daemon alone proves nothing.
             nets = (container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
             if labels.get(LABEL_VM_ID) in states and network and network in nets:
-                owned.append(container)
-                continue
+                return True
             vm_key = labels.get(LABEL_VM_ID, "")
             isolated = (states.get(vm_key) or {}).get("isolated_network")
             manager = EnvironmentNetworks(docker, project)
-            if (
+            return bool(
                 isolated
                 and isolated in nets
                 and isolated == manager.name_for(vm_key)
                 and manager.owned(docker.networks.get(isolated), vm_key)
-            ):
-                owned.append(container)
-        return owned
+            )
+
+        # Network membership is mutable: verify legacy ownership again after inspection.
+        candidates = (container for container in candidates if owned(container))
+        return [container for container in refresh_existing(candidates) if owned(container)]
 
     @staticmethod
     def _pick_fixed(candidates: list, service: str) -> Any | None:
@@ -210,15 +244,22 @@ class VmPool:
 
         同一ラベルを持つ手動コンテナが混ざると影武者になる
         （例: android-nowiz が android を乗っ取り、VNC接続先が到達不能に）。
-        compose命名（ai-desktop-agent-<service>-N）に一致するものを優先し、
+        Compose命名（<project>-<service>-Nと旧形式の区切り_）を優先し、
         なければ先頭を返す。
         """
         if not candidates:
             return None
-        prefix = f"ai-desktop-agent-{service}-"
         for c in candidates:
-            if getattr(c, "name", "").startswith(prefix):
-                return c
+            project = VmPool._labels(c).get("com.docker.compose.project", "ai-desktop-agent")
+            name = getattr(c, "name", "")
+            for separator in ("-", "_"):
+                prefix = f"{project}{separator}{service}{separator}"
+                if (
+                    name.startswith(prefix)
+                    and name[len(prefix) :].isascii()
+                    and name[len(prefix) :].isdigit()
+                ):
+                    return c
         return candidates[0]
 
     def list_vms(self) -> list[VmInfo]:
@@ -226,29 +267,16 @@ class VmPool:
         docker = self._docker()
         found: dict[str, VmInfo] = {}
 
-        # compose管理の既定VM（サービス名 vm。kvmプロファイル時のみ存在）
-        legacy = self._fixed_containers(docker, BASE_VM_SERVICE)
-        picked = self._pick_fixed(legacy, BASE_VM_SERVICE)
-        if picked is not None:
-            found[BASE_VM_SERVICE] = self._from_container(
-                picked, BASE_VM_SERVICE, managed=False, kind=KIND_QEMU
-            )
-
-        # compose管理の軽量コンテナ環境（サービス名 desktop。containerプロファイル時）
-        desktops = self._fixed_containers(docker, DESKTOP_SERVICE)
-        picked = self._pick_fixed(desktops, DESKTOP_SERVICE)
-        if picked is not None:
-            found[DESKTOP_SERVICE] = self._from_container(
-                picked, DESKTOP_SERVICE, managed=False, kind=KIND_CONTAINER
-            )
-
-        # compose管理の固定Android端末（サービス名 android。kvmプロファイル時のみ存在）
-        androids = self._fixed_containers(docker, ANDROID_SERVICE)
-        picked = self._pick_fixed(androids, ANDROID_SERVICE)
-        if picked is not None:
-            found[ANDROID_SERVICE] = self._from_container(
-                picked, ANDROID_SERVICE, managed=False, kind=KIND_ANDROID
-            )
+        for service, kind in (
+            (BASE_VM_SERVICE, KIND_QEMU),
+            (DESKTOP_SERVICE, KIND_CONTAINER),
+            (ANDROID_SERVICE, KIND_ANDROID),
+        ):
+            picked = self._primary_container(service, docker)
+            if picked is not None:
+                info = self._from_container(picked, service, managed=False, kind=kind)
+                if info is not None:
+                    found[service] = info
 
         # 動的VM
         dynamic = self._dynamic_containers(docker)
@@ -257,7 +285,11 @@ class VmPool:
                 continue
             vm_id = self._labels(c).get(LABEL_VM_ID, "")
             if vm_id and vm_id != BASE_VM_SERVICE:
-                found[vm_id] = self._from_container(c, vm_id, managed=True)
+                info = self._from_container(c, vm_id, managed=True)
+                if info is not None:
+                    if vm_id in found:
+                        raise DockerUnavailableError(f"同じ環境IDの本体が複数あります: {vm_id}")
+                    found[vm_id] = info
 
         return [found[k] for k in sorted(found)]
 
@@ -473,6 +505,7 @@ class VmPool:
             kind=kind,
         )
 
+    @serialize_environment
     def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
         """VMコンテナを再起動する（ゲストOSを含む再起動）。中継は触らない。
 
@@ -497,13 +530,19 @@ class VmPool:
         ):
             raise KvmUnavailableError()
         for c in targets:
-            c.restart(timeout=timeout)
+            try:
+                c.restart(timeout=timeout)
+            except Exception as error:
+                raise DockerUnavailableError(
+                    f"環境の再起動を確認できません。状態を確認してから操作してください: {c.name}"
+                ) from error
             logger.info("VM再起動: %s", c.name)
         info = self.get_vm(vm_id)
         if info is None:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         return info
 
+    @serialize_environment
     def stop_vm(self, vm_id: str, timeout: int = 10) -> VmInfo:
         """VM/コンテナを停止する（固定・動的とも可）。中継も連動して止める。
 
@@ -524,6 +563,7 @@ class VmPool:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         return info
 
+    @serialize_environment
     def start_vm(self, vm_id: str) -> VmInfo:
         """VM/コンテナを起動する（固定・動的とも可）。中継も連動して起動する。
 
@@ -583,6 +623,7 @@ class VmPool:
             if LABEL_WS_FOR not in self._labels(c) and LABEL_DISK_COPY not in self._labels(c)
         ]
 
+    @serialize_environment
     def remove_vm(self, vm_id: str) -> bool:
         """VM/コンテナを削除する（固定・動的とも可）。
 
@@ -615,7 +656,7 @@ class VmPool:
         if not targets:
             state = self._load_state(vm_id) or {}
             if not state.get("isolated_network") or docker.containers.list(
-                all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
+                all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}, sparse=True
             ):
                 return False
         for c in targets:
@@ -659,27 +700,23 @@ class VmPool:
 
     @staticmethod
     def _labels(container: Any) -> dict:
-        try:
-            return (container.attrs.get("Config") or {}).get("Labels") or {}
-        except Exception:
-            return {}
+        return container_labels(container)
 
     def _from_container(
         self, container: Any, vm_id: str, managed: bool, kind: str | None = None
-    ) -> VmInfo:
-        import contextlib
+    ) -> VmInfo | None:
+        from docker.errors import NotFound
 
-        with contextlib.suppress(Exception):
+        try:
             container.reload()
-        try:
             status = str(container.status)
-        except Exception:
-            status = "unknown"
-        health = None
-        try:
             health = ((container.attrs.get("State") or {}).get("Health") or {}).get("Status")
-        except Exception:
-            health = None
+        except NotFound:
+            return None
+        except Exception as error:
+            raise DockerUnavailableError(
+                "環境の状態を確認できません。Dockerの接続と権限を確認してください"
+            ) from error
         saved = self._load_state(vm_id)
         name = container.name if managed else vm_id
         if saved and saved.get("name"):
@@ -964,11 +1001,20 @@ class VmPool:
         except Exception:
             removed = True
             try:
+                project = self._project_name(docker)
                 targets = docker.containers.list(
-                    all=True, filters={"label": f"{LABEL_VM_ID}={vm_id}"}
+                    all=True,
+                    filters={
+                        "label": [
+                            f"{LABEL_VM_ID}={vm_id}",
+                            f"{LABEL_PROJECT}={project}",
+                        ]
+                    },
+                    sparse=True,
                 )
-                for container in targets:
-                    if self._labels(container).get(LABEL_PROJECT) != self._project_name(docker):
+                owned = (c for c in targets if self._labels(c).get(LABEL_PROJECT) == project)
+                for container in refresh_existing(owned):
+                    if self._labels(container).get(LABEL_PROJECT) != project:
                         continue
                     try:
                         container.remove(force=True)

@@ -4,6 +4,34 @@ from ai_desktop_agent.server.vm_pool import VmPool
 from tests.test_vm_pool import _FakeContainer, _FakeDocker
 
 
+@pytest.mark.parametrize("vm_id", ["", ".", "..", "../other", "/"])
+def test_disk_cleanup_rejects_paths_that_could_remove_other_instances(tmp_path, vm_id):
+    directory = tmp_path / "disks"
+    directory.mkdir()
+    other = directory / "other.qcow2"
+    other.write_bytes(b"another instance's saved work")
+    pool = VmPool(
+        client=_FakeDocker(), state_file=tmp_path / "state.json", overlays_dir=str(directory)
+    )
+    with pytest.raises(ValueError):
+        pool._remove_disk(vm_id)
+    assert other.read_bytes() == b"another instance's saved work"
+
+
+def test_disk_cleanup_never_follows_an_instance_directory_symlink(tmp_path):
+    directory, outside = tmp_path / "disks", tmp_path / "outside"
+    directory.mkdir()
+    outside.mkdir()
+    (outside / "saved.qcow2").write_bytes(b"keep")
+    (directory / "vm-owned").symlink_to(outside, target_is_directory=True)
+    pool = VmPool(
+        client=_FakeDocker(), state_file=tmp_path / "state.json", overlays_dir=str(directory)
+    )
+    with pytest.raises(OSError):
+        pool._remove_disk("vm-owned")
+    assert (outside / "saved.qcow2").read_bytes() == b"keep"
+
+
 @pytest.mark.parametrize("operation", ["stop_vm", "start_vm", "restart_vm", "remove_vm"])
 @pytest.mark.parametrize("source", ["environment", "backend"])
 def test_fixed_operations_leave_other_projects_untouched(tmp_path, monkeypatch, operation, source):
@@ -61,6 +89,27 @@ def test_legacy_controller_ignores_other_projects(monkeypatch):
             )
         )
     assert VmController(client=docker)._find_container().name == "mine-vm-1"
+
+
+def test_instance_identity_ignores_relays_and_other_projects(tmp_path, monkeypatch):
+    from ai_desktop_agent.server.vm_pool import LABEL_KIND, LABEL_PROJECT, LABEL_VM_ID, LABEL_WS_FOR
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "mine")
+    docker = _FakeDocker()
+    for name, project, relay in (
+        ("other", "other", False),
+        ("relay", "mine", True),
+        ("mine", "mine", False),
+    ):
+        labels = {LABEL_VM_ID: "and-shared", LABEL_KIND: "android", LABEL_PROJECT: project}
+        if relay:
+            labels[LABEL_WS_FOR] = "and-shared"
+        docker.containers.items.append(_FakeContainer(name, labels=labels))
+    pool = VmPool(client=docker, state_file=tmp_path / "state.json")
+    assert pool.instance_id("and-shared") == docker.containers.items[-1].id
+    docker.containers.items[-1].id = "replacement"
+    assert pool.instance_id("and-shared") == "replacement"
+    assert pool.instance_id("and-missing") is None
 
 
 @pytest.mark.parametrize("operation", ["stop_vm", "start_vm", "restart_vm", "remove_vm"])
@@ -141,13 +190,18 @@ def test_disk_cleanup_uses_backend_mount_and_keeps_disk_if_container_removal_fai
     pool = VmPool(client=docker, state_file=tmp_path / "state.json", overlays_dir=str(backend))
     disk = backend / "vm-owned.qcow2"
     disk.write_bytes(b"disk")
+    directory = backend / "vm-owned"
+    directory.mkdir()
+    (directory / "disk.qcow2").write_bytes(b"saved work")
     container.remove = Mock(side_effect=RuntimeError("Docker unavailable"))
     with pytest.raises(DockerUnavailableError):
         pool.remove_vm("vm-owned")
     assert disk.exists()
+    assert (directory / "disk.qcow2").read_bytes() == b"saved work"
     container.remove = Mock()
     assert pool.remove_vm("vm-owned") is True
     assert not disk.exists()
+    assert not directory.exists()
 
 
 def test_new_desktops_need_no_host_ports_even_when_other_projects_publish_them(tmp_path):

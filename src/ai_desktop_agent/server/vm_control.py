@@ -13,6 +13,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from ai_desktop_agent.server.vm_locks import environment_lock
+
 logger = logging.getLogger(__name__)
 
 SERVICE_LABEL = "com.docker.compose.service"
@@ -21,7 +23,7 @@ VM_SERVICE = "vm"
 
 
 class DockerUnavailableError(RuntimeError):
-    """Docker ソケットに接続できない場合のエラー。"""
+    """Dockerへの接続・環境の照会・操作に失敗した場合のエラー。"""
 
 
 @dataclass
@@ -59,18 +61,46 @@ class VmController:
         container = self._find_container()
         if container is None:
             return VmStatusInfo(running=False, status="not_found")
-        container.reload()
-        state = container.attrs.get("State", {})
-        health = (state.get("Health") or {}).get("Status")
-        return VmStatusInfo(
-            running=bool(state.get("Running")),
-            status=str(container.status),
-            health=health,
-            name=container.name,
-            qmp_status=self._qmp_status(),
+        return self._inspect_status(container)
+
+    def _inspect_status(self, container: Any) -> VmStatusInfo:
+        from docker.errors import NotFound
+
+        try:
+            container.reload()
+            state = container.attrs.get("State") or {}
+            info = VmStatusInfo(
+                running=bool(state.get("Running")),
+                status=str(container.status),
+                health=(state.get("Health") or {}).get("Status"),
+                name=container.name,
+            )
+        except NotFound:
+            return VmStatusInfo(running=False, status="not_found")
+        except Exception as error:
+            raise DockerUnavailableError(
+                "VMの状態を確認できません。Dockerの接続と権限を確認してください"
+            ) from error
+        info.qmp_status = self._qmp_status()
+        return info
+
+    def target_vm_id(self) -> str:
+        container = self._find_container()
+        if container is None:
+            raise DockerUnavailableError("vm コンテナが見つかりません")
+        return self._environment_id(container)
+
+    @staticmethod
+    def _environment_id(container: Any) -> str:
+        labels = (container.attrs.get("Config") or {}).get("Labels") or {}
+        service = labels.get(SERVICE_LABEL)
+        return (
+            service
+            if service in (VM_SERVICE, "desktop", "android")
+            else labels.get("ai-desktop-agent.vm-id") or VM_SERVICE
         )
 
-    def restart(self, timeout: int = 30) -> VmStatusInfo:
+    def restart(self, timeout: int = 30, *, expected_vm_id: str | None = None) -> VmStatusInfo:
         """VMコンテナを再起動する（ゲストOSを含む再起動）。
 
         KVMが利用できない環境ではTCG実行が遅すぎるため再起動を制限する
@@ -78,6 +108,16 @@ class VmController:
         `docker restart` はコンテナ再起動の完了で戻る。
         ゲストのデスクトップが使えるようになるまで数分かかる。
         """
+        container = self._find_container()
+        if container is None:
+            raise DockerUnavailableError("vm コンテナが見つかりません")
+        vm_id = self._environment_id(container)
+        if expected_vm_id is not None and expected_vm_id != vm_id:
+            raise DockerUnavailableError("再起動の対象が変わりました。状態を確認してください")
+        with environment_lock(vm_id):
+            return self._restart(container, timeout)
+
+    def _restart(self, container: Any, timeout: int) -> VmStatusInfo:
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
             is_kvm_available,
@@ -86,12 +126,14 @@ class VmController:
 
         if not is_tcg_allowed() and not is_kvm_available(self._client):
             raise KvmUnavailableError()
-        container = self._find_container()
-        if container is None:
-            raise DockerUnavailableError("vm コンテナが見つかりません")
         logger.info("VMコンテナを再起動します: %s", container.name)
-        container.restart(timeout=timeout)
-        return self.status()
+        try:
+            container.restart(timeout=timeout)
+        except Exception as error:
+            raise DockerUnavailableError(
+                "VMの再起動を確認できません。状態を確認してから操作してください"
+            ) from error
+        return self._inspect_status(container)
 
     # ── 内部 ──────────────────────────────────────────
 
@@ -128,15 +170,21 @@ class VmController:
     def _find_container(self) -> Any | None:
         client = self._docker()
         if self._container_name:
+            from docker.errors import NotFound
+
             try:
                 return client.containers.get(self._container_name)
-            except Exception:
+            except NotFound:
                 logger.warning("VMコンテナが見つかりません: %s", self._container_name)
                 return None
+            except Exception as error:
+                raise DockerUnavailableError(
+                    "VMを確認できません。Dockerの接続と権限を確認してください"
+                ) from error
         from ai_desktop_agent.server.vm_pool import VmPool
 
         candidates = VmPool(client=client)._fixed_containers(client, VM_SERVICE)
-        return candidates[0] if candidates else None
+        return VmPool._pick_fixed(candidates, VM_SERVICE)
 
 
 def get_vm_controller() -> VmController:
