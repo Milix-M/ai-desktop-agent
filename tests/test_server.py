@@ -162,7 +162,7 @@ class TestWasteReduction:
     def _session(self, llm) -> TaskSession:
         return TaskSession(llm=llm, display=FakeDisplayBackend())
 
-    async def test_empty_storm_short_circuits_second_turn(self):
+    async def test_empty_storm_short_circuits_second_turn(self, session_retry_sleep):
         from ai_desktop_agent.agent.state import Subtask
 
         class _Empty(MockLLMProvider):
@@ -185,8 +185,16 @@ class TestWasteReduction:
             await s._decide_action(sub, shot)
         assert llm.decide_calls == 6 + 2  # 連続失敗時は早期打切り
         assert s._consec_empty_decides == 2
+        assert [call.args for call in session_retry_sleep.await_args_list] == [
+            (2.0,),
+            (4.0,),
+            (6.0,),
+            (8.0,),
+            (10.0,),
+            (2.0,),
+        ]
 
-    async def test_success_resets_empty_counter(self):
+    async def test_success_resets_empty_counter(self, session_retry_sleep):
         from ai_desktop_agent.actions.primitives import Action, ActionType
         from ai_desktop_agent.agent.llm.types import ActionDecision
         from ai_desktop_agent.agent.state import Subtask
@@ -215,6 +223,7 @@ class TestWasteReduction:
         out = await s._decide_action(sub, s.display.capture_screen())
         assert out.action.action_type == ActionType.WAIT
         assert s._consec_empty_decides == 0
+        session_retry_sleep.assert_awaited_once_with(2.0)
 
     async def test_wait_action_skips_post_sleep(self, monkeypatch):
         import asyncio as _asyncio

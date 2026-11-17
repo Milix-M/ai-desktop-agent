@@ -127,11 +127,13 @@ Ollamaの既定接続先は `http://localhost:11434/v1` で、バックエンド
 
 ## 開発時に確認する
 
+Python 3.12以降・uv・Node.js 24が必要になる。対象を絞ったテスト、依存監査、CIの実行条件は[テストとCI](docs/testing.md)を参照する。
+
 ```bash
 uv sync --frozen
-uv run pytest -q
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
+uv run --frozen pytest -q -m 'not desktop_integration'
+uv run --frozen ruff check src/ tests/ scripts/ci_scope.py
+uv run --frozen ruff format --check src/ tests/ scripts/ci_scope.py
 cd frontend
 npm ci
 npm test
@@ -145,6 +147,8 @@ npm run build
 ```bash
 docker build -t ai-desktop-agent-desktop-smoke desktop
 docker build -t ai-desktop-agent-backend-smoke .
+docker build -t ai-desktop-agent-qmp-smoke vm
+docker build -t ai-desktop-agent-qga-smoke -f tests/integration/qga.Dockerfile .
 RUN_DESKTOP_SMOKE=1 uv run pytest -m desktop_integration tests/integration/
 ```
 

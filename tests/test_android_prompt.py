@@ -95,7 +95,7 @@ class TestEmptyDecideRetry:
         )
 
     @pytest.mark.asyncio
-    async def test_recovers_after_transient_empties(self):
+    async def test_recovers_after_transient_empties(self, session_retry_sleep):
         from ai_desktop_agent.agent.state import Subtask
 
         calls = []
@@ -113,9 +113,10 @@ class TestEmptyDecideRetry:
         assert out.reasoning == "retry-ok"
         assert len(calls) == 3
         assert session.loop.context.action_history == []
+        assert [call.args for call in session_retry_sleep.await_args_list] == [(2.0,), (4.0,)]
 
     @pytest.mark.asyncio
-    async def test_gives_up_after_cap(self):
+    async def test_gives_up_after_cap(self, session_retry_sleep):
         from ai_desktop_agent.agent.state import Subtask
         from ai_desktop_agent.server.session import MAX_EMPTY_RETRIES
 
@@ -132,9 +133,16 @@ class TestEmptyDecideRetry:
                 Subtask(id="s1", description="d"), FakeDisplayBackend().capture_screen()
             )
         assert len(calls) == MAX_EMPTY_RETRIES + 1
+        assert [call.args for call in session_retry_sleep.await_args_list] == [
+            (2.0,),
+            (4.0,),
+            (6.0,),
+            (8.0,),
+            (10.0,),
+        ]
 
     @pytest.mark.asyncio
-    async def test_non_empty_errors_propagate_immediately(self):
+    async def test_non_empty_errors_propagate_immediately(self, session_retry_sleep):
         from ai_desktop_agent.agent.state import Subtask
 
         calls = []
@@ -150,9 +158,10 @@ class TestEmptyDecideRetry:
                 Subtask(id="s1", description="d"), FakeDisplayBackend().capture_screen()
             )
         assert len(calls) == 1
+        session_retry_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_truncated_json_retries(self):
+    async def test_truncated_json_retries(self, session_retry_sleep):
         """JSON破損（切断）は再試行し、回復すれば進む。"""
         import json as _json
 
@@ -172,9 +181,10 @@ class TestEmptyDecideRetry:
         out = await session._decide_action(Subtask(id="s1", description="d"), shot)
         assert out.reasoning == "retry-ok"
         assert len(calls) == 3
+        assert [call.args for call in session_retry_sleep.await_args_list] == [(2.0,), (4.0,)]
 
     @pytest.mark.asyncio
-    async def test_validation_errors_not_retried(self):
+    async def test_validation_errors_not_retried(self, session_retry_sleep):
         """アクション検証エラー（決定的）は即時送出する。"""
         from ai_desktop_agent.agent.state import Subtask
 
@@ -191,3 +201,4 @@ class TestEmptyDecideRetry:
                 Subtask(id="s1", description="d"), FakeDisplayBackend().capture_screen()
             )
         assert len(calls) == 1
+        session_retry_sleep.assert_not_awaited()

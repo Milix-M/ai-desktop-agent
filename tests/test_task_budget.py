@@ -138,7 +138,7 @@ async def test_model_limits_stop_before_gui_and_survive_history_reload(
         assert detail["error_message"] == record.error_message
 
 
-async def test_json_retry_is_charged_before_another_request_can_start():
+async def test_json_retry_is_charged_before_another_request_can_start(provider_retry_sleep):
     sent = []
 
     def handle(request):
@@ -155,6 +155,7 @@ async def test_json_retry_is_charged_before_another_request_can_start():
         assert len(sent) == budget.requests == 2
         assert budget.input_tokens + budget.output_tokens == 10
         assert llm.total_tokens == 10
+        provider_retry_sleep.assert_awaited_once_with(1.5)
     finally:
         await llm.aclose()
 

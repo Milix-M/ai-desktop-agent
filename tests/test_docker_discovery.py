@@ -127,7 +127,10 @@ def engine(tmp_path, monkeypatch):
                 self.respond(404, {"message": "missing container"})
 
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    worker = threading.Thread(target=upstream.serve_forever, daemon=True)
+    # Poll shutdown promptly; socket and client timeouts remain unchanged.
+    worker = threading.Thread(
+        target=upstream.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     worker.start()
     client = docker.DockerClient(
         base_url=f"http://127.0.0.1:{upstream.server_port}", version="1.48", timeout=1
