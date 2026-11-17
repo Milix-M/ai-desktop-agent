@@ -451,13 +451,14 @@ class TaskSession:
 
         # 現在の画面を取得（オーバーレイ付き）
         screenshot = await self._capture_screenshot()
+        screen_unchanged = self._is_screen_unchanged(screenshot)
 
         # LLM に判断させる（手抜き完了は最大2回まで却下して再問い合わせ）。
         # 回復フローからのエラー情報があれば引き継ぐ。
         # 前ターンから画面が無変化なら、その旨も伝える（低速VM対策）。
         error_ctx = self._pending_error
         self._pending_error = None
-        if error_ctx is None and self._is_screen_unchanged(screenshot):
+        if error_ctx is None and screen_unchanged:
             error_ctx = ErrorContext(
                 action=self.loop.context.action_history[-1].action,
                 error_message=(
@@ -547,7 +548,7 @@ class TaskSession:
         decision = self._clamp_decision(decision, screenshot)
 
         # 同一アクションの足踏みは待機に置換する（低速VM対策）
-        if self._is_stuck_repeat(decision.action):
+        if screen_unchanged and self._is_stuck_repeat(decision.action):
             logger.info(
                 "同一操作の連続を検出、待機に置換します: %s", decision.action.action_type.value
             )
