@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   createTask,
+  ApiError,
   getCurrentTask,
   controlTask,
   getVmStatus,
@@ -20,9 +21,49 @@ import {
 describe("API client", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    sessionStorage.clear();
   });
 
   describe("createTask", () => {
+    it("sends the retry key and preserves definitive HTTP status", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false, status: 410, json: async () => ({ detail: "受付済み・履歴削除済み" }),
+      } as Response);
+      await expect(createTask("報告書", "desktop", false, "retry-0000000000000001"))
+        .rejects.toMatchObject({ status: 410 });
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/tasks"), expect.objectContaining({
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-0000000000000001" },
+        signal: expect.any(AbortSignal),
+      }));
+    });
+
+    it("bounds an uncertain response and retains a useful retry message", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => new Promise((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        }));
+        const result = expect(createTask("報告書", "desktop", false, "retry-0000000000000001"))
+          .rejects.toThrow("受付結果を確認できません");
+        await vi.advanceTimersByTimeAsync(30000);
+        await result;
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("treats a broken successful response as uncertain, rather than an HTTP rejection", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true, json: async () => { throw new SyntaxError("truncated JSON"); },
+      } as unknown as Response);
+      try { await createTask("報告書", "desktop", false, "retry-0000000000000001"); }
+      catch (error) {
+        expect(error).not.toBeInstanceOf(ApiError);
+        expect((error as Error).message).toContain("同じ内容で再送してください");
+        return;
+      }
+      throw new Error("expected an uncertain response failure");
+    });
+
     it("sends POST with instruction and returns TaskStatus", async () => {
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: true,
@@ -79,10 +120,21 @@ describe("API client", () => {
   });
 
   describe("controlTask", () => {
+    it("binds a stop to the task that was visible when it was sent", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true, json: async () => ({ status: "stopped" }),
+      } as Response);
+      await controlTask("stop", "vm A", "observed-task");
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/tasks/current/stop?vm_id=vm%20A&session_id=observed-task"),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
     it("binds consent to the current manual request and VM", async () => {
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ status: "resumed" }) } as Response);
-      await controlTask("resume", "desktop", "current-request");
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks/current/resume?vm_id=desktop"), expect.objectContaining({
+      await controlTask("resume", "desktop", "observed-task", "current-request");
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/tasks/current/resume?vm_id=desktop&session_id=observed-task"), expect.objectContaining({
         body: JSON.stringify({ manual_input_id: "current-request", allow_screen_share: true }),
       }));
     });
@@ -95,7 +147,7 @@ describe("API client", () => {
           json: async () => ({ status: action + "d" }),
         } as Response);
 
-        const result = await controlTask(action);
+        const result = await controlTask(action, "desktop", "observed-task");
         expect(result.status).toBe(action + "d");
         expect(fetch).toHaveBeenCalledWith(
           expect.stringContaining(`/tasks/current/${action}`),
@@ -263,16 +315,17 @@ describe("API client", () => {
   });
 
   describe("createVm/deleteVm", () => {
-    it("POSTs /vms and DELETEs /vms/{id}", async () => {
+    it("POSTs a keyed creation and DELETEs /vms/{id}", async () => {
+      const vm = { id: "vm-x", kind: "qemu", name: "x", status: "creating", health: null, vnc_port: 0, ws_port: 0, vnc_host: "h", managed: true };
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ id: "vm-x", name: "x", status: "creating", health: null, vnc_port: 5910, ws_port: 6090, vnc_host: "h", managed: true }),
+        json: async () => ({ id: "creation-" + "a".repeat(64), vm_id: vm.id, state: "succeeded", result: vm }),
       } as Response);
       const created = await createVm("x");
       expect(created.id).toBe("vm-x");
       expect(fetch).toHaveBeenCalledWith(
-        expect.stringContaining("/vms"),
-        expect.objectContaining({ method: "POST" })
+        expect.stringContaining("/vm-creations"),
+        expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }) })
       );
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({

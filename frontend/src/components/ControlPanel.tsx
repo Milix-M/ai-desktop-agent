@@ -6,6 +6,7 @@ interface Props {
   onControl: (action: "pause" | "resume" | "stop") => Promise<void>;
   state: string;
   manualInput?: ManualInputRequest | null;
+  disabled?: boolean;
 }
 
 const RUNNING_STATES = [
@@ -17,7 +18,7 @@ const RUNNING_STATES = [
   "recovering",
 ];
 
-export default function ControlPanel({ onControl, state, manualInput }: Props) {
+export default function ControlPanel({ onControl, state, manualInput, disabled = false }: Props) {
   const isRunning = RUNNING_STATES.includes(state);
   const awaitingInput = state === "awaiting_user";
 
@@ -29,20 +30,20 @@ export default function ControlPanel({ onControl, state, manualInput }: Props) {
       </div>}
       <div className="controls">
         {!awaitingInput && <button
-          disabled={state !== "executing"}
+          disabled={disabled || state !== "executing"}
           onClick={() => onControl("pause")}
         >
           一時停止
         </button>}
         <button
           className={awaitingInput ? "manual-resume" : undefined}
-          disabled={awaitingInput ? !manualInput?.id : state !== "paused"}
+          disabled={disabled || (awaitingInput ? !manualInput?.id : state !== "paused")}
           onClick={() => onControl("resume")}
         >
           {awaitingInput ? "画面を送信して再開" : "再開"}
         </button>
         <button
-          disabled={!isRunning && state !== "paused" && !awaitingInput}
+          disabled={disabled || (!isRunning && state !== "paused" && !awaitingInput)}
           onClick={() => onControl("stop")}
         >
           停止

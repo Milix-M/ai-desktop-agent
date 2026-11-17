@@ -10,6 +10,23 @@ const VMS: VmInfo[] = [
 ];
 
 describe("VmTabs", () => {
+  it("shows readiness and offers stop during an automatic restart", async () => {
+    const onStop = vi.fn();
+    render(<VmTabs vms={[{ ...VMS[1], status: "restarting" }]} selectedId="vm-ab12"
+      onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onStop={onStop} creating={false} />);
+    expect(screen.getByText("再試行中")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "workを起動" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "workを停止" }));
+    await userEvent.click(screen.getByRole("button", { name: "workの停止を実行" }));
+    expect(onStop).toHaveBeenCalledWith("vm-ab12");
+  });
+
+  it("does not mark a starting desktop as ready", () => {
+    render(<VmTabs vms={VMS} selectedId="vm-ab12" onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={false} />);
+    expect(screen.getByText("準備中")).toBeVisible();
+    const tab = screen.getByText("work").closest(".vm-tab");
+    expect(tab?.querySelector(".vm-dot")).toHaveClass("amber");
+  });
   it("renders nothing useful when empty except add buttons", () => {
     render(
       <VmTabs vms={[]} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} creating={false} />

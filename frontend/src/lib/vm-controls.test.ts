@@ -1,14 +1,14 @@
 import { expect, it, vi } from "vitest";
 import { controlTask } from "./api";
 
-it("sends the selected VM with control requests", async () => {
+it("sends the selected VM and observed task with control requests", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
     ok: true, json: async () => ({ status: "stopped" }),
   } as Response);
   try {
-    await controlTask("stop", "vm A");
+    await controlTask("stop", "vm A", "observed-task");
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A"), { method: "POST", credentials: "include" }
+      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A&session_id=observed-task"), { method: "POST", credentials: "include" }
     );
   } finally { fetchMock.mockRestore(); }
 });
