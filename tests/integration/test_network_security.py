@@ -50,6 +50,9 @@ async def test_each_desktop_is_isolated_and_backend_recreation_restores_access()
                 "ANDROID_PROVISION": "0",
                 "WEB_CONCURRENCY": "3",
                 "DESKTOP_IMAGE_REF": desktop_image,
+                "DESKTOP_MEMORY_MB": "3072",
+                "DESKTOP_CPUS": "1.5",
+                "DESKTOP_PIDS_LIMIT": "768",
                 "TASK_MAX_SECONDS": "0.05",
             },
             volumes={
@@ -106,6 +109,11 @@ async def test_each_desktop_is_isolated_and_backend_recreation_restores_access()
             assert all(len(n) == 1 for n in nets) and set(nets[0]).isdisjoint(nets[1])
             assert all(not g.attrs["HostConfig"]["PortBindings"] for g in guests)
             assert all("NET_RAW" in g.attrs["HostConfig"]["CapDrop"] for g in guests)
+            for guest in guests:
+                host = guest.attrs["HostConfig"]
+                assert host["Memory"] == host["MemorySwap"] == 3072 * 1024**2
+                assert host["NanoCpus"] == 1_500_000_000
+                assert host["PidsLimit"] == 768
             backend.reload()
             addresses = backend.attrs["NetworkSettings"]["Networks"]
             management = addresses[control.name]["IPAddress"]

@@ -38,6 +38,7 @@ from ai_desktop_agent.evaluation.cases import (
     read_artifact,
 )
 from ai_desktop_agent.privacy import install_log_redaction, redact, redact_data
+from ai_desktop_agent.server.desktop_resources import DesktopResources
 from ai_desktop_agent.server.persistence import atomic_json
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
@@ -45,8 +46,7 @@ from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 ENV = {"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority", "LANG": "C.UTF-8"}
-DESKTOP_MEMORY_BYTES = 2 * 1024**3
-DESKTOP_NANO_CPUS = 2_000_000_000
+DESKTOP_RESOURCES = DesktopResources()
 DESKTOP_SHM_BYTES = 1024**3
 
 
@@ -281,8 +281,7 @@ async def run_attempt(client, image, case, provider, limits, output, result):
             network=network.id,
             ports={"5900/tcp": ("127.0.0.1", None)},
             shm_size=DESKTOP_SHM_BYTES,
-            mem_limit=DESKTOP_MEMORY_BYTES,
-            nano_cpus=DESKTOP_NANO_CPUS,
+            **DESKTOP_RESOURCES.docker_options(),
             cap_drop=["NET_RAW"],
             environment={"LANG": "C.UTF-8"},
             labels=labels,
@@ -502,8 +501,10 @@ async def run_suite(args):
         "requested_attempts": len(selected) * args.repeats,
         "limits_per_attempt": limits.to_dict(),
         "desktop_resources": {
-            "memory_bytes": DESKTOP_MEMORY_BYTES,
-            "nano_cpus": DESKTOP_NANO_CPUS,
+            "memory_bytes": DESKTOP_RESOURCES.memory_bytes,
+            "memory_swap_bytes": DESKTOP_RESOURCES.memory_bytes,
+            "nano_cpus": DESKTOP_RESOURCES.nano_cpus,
+            "pids_limit": DESKTOP_RESOURCES.pids_limit,
             "shm_bytes": DESKTOP_SHM_BYTES,
         },
         "status": "running",

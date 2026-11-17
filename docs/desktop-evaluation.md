@@ -10,7 +10,7 @@
 
 ## 実行する
 
-Dockerと、READMEの開発環境が必要になる。各試行は専用ネットワーク付きの新しいコンテナで行い、CPU上限を2個分、メモリ上限を2 GiBとする。決定モデルはnoneに固定する。
+Dockerと、READMEの開発環境が必要になる。各試行は専用ネットワーク付きの新しいコンテナで行い、CPU上限を2個分、メモリ上限を2 GiB、プロセスとスレッドの合計を1024までとする。スワップは使わない。評価条件を固定するため、`DESKTOP_*`の上限設定は使わない。決定モデルはnoneに固定する。
 
 ```bash
 docker build -t ai-desktop-agent-desktop-eval desktop
