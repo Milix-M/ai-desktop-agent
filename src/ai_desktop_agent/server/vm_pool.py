@@ -25,6 +25,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ai_desktop_agent.server.desktop_resources import DesktopResources  # noqa: E402
 from ai_desktop_agent.server.docker_discovery import (  # noqa: E402
     container_labels,
     refresh_existing,
@@ -362,6 +363,7 @@ class VmPool:
         if kind not in (KIND_QEMU, KIND_CONTAINER, KIND_ANDROID):
             raise ValueError(f"kind は qemu/container/android のいずれか: {kind}")
 
+        resources = DesktopResources.from_env() if kind == KIND_CONTAINER else None
         docker = self._docker()
         if (
             kind in (KIND_QEMU, KIND_ANDROID)
@@ -507,6 +509,7 @@ class VmPool:
                     detach=True,
                     cap_drop=["NET_RAW"],
                     shm_size="1g",
+                    **resources.docker_options(),
                     volumes={home.name: {"bind": HOME, "mode": "rw"}},
                     environment={
                         "LANG": "C.UTF-8",

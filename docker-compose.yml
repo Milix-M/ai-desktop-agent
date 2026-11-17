@@ -13,6 +13,10 @@ services:
       - VNC_GEOMETRY=1280x800
       - VNC_DEPTH=24
     shm_size: 1gb
+    mem_limit: ${DESKTOP_MEMORY_MB:-2048}m
+    memswap_limit: ${DESKTOP_MEMORY_MB:-2048}m
+    cpus: ${DESKTOP_CPUS:-2}
+    pids_limit: ${DESKTOP_PIDS_LIMIT:-1024}
     volumes:
       - home_desktop:/home/agent
     restart: unless-stopped
@@ -77,6 +81,9 @@ services:
       - VNC_HOST=${VNC_HOST:-desktop}
       - VNC_PORT=5900
       - PORT=8081
+      - DESKTOP_MEMORY_MB=${DESKTOP_MEMORY_MB:-2048}
+      - DESKTOP_CPUS=${DESKTOP_CPUS:-2}
+      - DESKTOP_PIDS_LIMIT=${DESKTOP_PIDS_LIMIT:-1024}
       - USE_KVM=${USE_KVM:-auto}
       - ALLOW_TCG_VM=${ALLOW_TCG_VM:-false}
     volumes:

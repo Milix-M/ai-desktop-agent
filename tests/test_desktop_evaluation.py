@@ -174,6 +174,8 @@ async def test_agent_claim_does_not_count_as_correct_output(environment, tmp_pat
     config = client.containers.run.call_args.kwargs
     assert "volumes" not in config and "OPENAI_API_KEY" not in config["environment"]
     assert config["network"] == "owned-evaluation-network"
+    assert config["mem_limit"] == config["memswap_limit"] == 2 * 1024**3
+    assert config["pids_limit"] == 1024
 
 
 async def test_provider_cleanup_failure_does_not_skip_removing_the_desktop(
