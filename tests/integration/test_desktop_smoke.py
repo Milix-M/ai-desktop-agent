@@ -2,23 +2,31 @@
 
 import asyncio
 import contextlib
+import errno
 import os
 import shlex
+import socket
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import docker
 import pytest
+from httpx import ASGITransport
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.types import ActionDecision, DecompositionResult, VerificationResult
-from ai_desktop_agent.agent.state import Subtask
+from ai_desktop_agent.agent.state import AgentState, Subtask
+from ai_desktop_agent.server import app as server_app
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.vm.vnc_client import VNCClient
+from tests.http import AuthenticatedClient
 
 pytestmark = [
     pytest.mark.desktop_integration,
@@ -84,6 +92,290 @@ def test_firefox_can_render_a_page_without_snap(desktop):
     )
     assert result.returncode == 0, result.stderr
     assert desktop.exec_run(["test", "-s", "/tmp/firefox-smoke.png"]).exit_code == 0
+
+
+async def test_vnc_capture_accepts_an_ipv6_literal_without_prebracketing(desktop):
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    handlers = set()
+
+    async def bridge(reader, writer):
+        task = asyncio.current_task()
+        handlers.add(task)
+        upstream = None
+        pumps = []
+        try:
+            remote_reader, upstream = await asyncio.open_connection("127.0.0.1", port)
+
+            async def copy(source, destination):
+                while chunk := await source.read(65536):
+                    destination.write(chunk)
+                    await destination.drain()
+
+            pumps = [
+                asyncio.create_task(copy(reader, upstream)),
+                asyncio.create_task(copy(remote_reader, writer)),
+            ]
+            await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for pump in pumps:
+                pump.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            for connection in (writer, upstream):
+                if connection is not None:
+                    connection.close()
+                    with contextlib.suppress(ConnectionResetError):
+                        await connection.wait_closed()
+            handlers.discard(task)
+
+    try:
+        server = await asyncio.start_server(bridge, "::1", 0, family=socket.AF_INET6)
+    except OSError as error:
+        if error.errno in {errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL}:
+            pytest.skip("IPv6 loopback is not available")
+        raise
+    display = VNCClient()
+    try:
+        await asyncio.to_thread(display.connect, "::1", server.sockets[0].getsockname()[1])
+        screenshot = await asyncio.to_thread(display.capture_screen)
+        assert screenshot.width > 0 and screenshot.height > 0
+    finally:
+        await asyncio.to_thread(display.disconnect)
+        server.close()
+        await server.wait_closed()
+        if handlers:
+            await asyncio.wait_for(asyncio.gather(*handlers), 5)
+
+
+@pytest.mark.parametrize("phase", ["connect", "session"])
+async def test_cancelled_task_submission_closes_real_vnc(desktop, tmp_path, monkeypatch, phase):
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    entered, release = threading.Event(), threading.Event()
+    display = VNCClient()
+    provider = MockLLMProvider()
+    provider.aclose = AsyncMock()
+    connections = []
+
+    def connect(_):
+        display.connect("127.0.0.1", port)
+        connections.append(display._client)
+        if phase == "connect":
+            entered.set()
+            assert release.wait(5)
+        return display
+
+    def create(display):
+        session = TaskSession(llm=provider, display=display, decision=None)
+        if phase == "session":
+            entered.set()
+            assert release.wait(5)
+        return session
+
+    monkeypatch.setattr(server_app, "_store", TaskStore(tmp_path))
+    monkeypatch.setattr(server_app, "_sessions", {})
+    monkeypatch.setattr(server_app, "_active_session", None)
+    monkeypatch.setattr(server_app, "_vm_operations", server_app.AsyncKeyedLocks())
+    monkeypatch.setattr(server_app, "_android_provisioner", None)
+    monkeypatch.setattr(server_app, "_resolve_vm", lambda _: SimpleNamespace(id="desktop"))
+    monkeypatch.setattr(server_app, "_default_vm_id", lambda: "desktop")
+    monkeypatch.setattr(server_app, "_connect_vm_display", connect)
+    monkeypatch.setattr(server_app, "_create_session", create)
+    async with AuthenticatedClient(
+        transport=ASGITransport(app=server_app.app), base_url="http://test"
+    ) as api:
+        request = asyncio.create_task(api.post("/tasks", json={"instruction": "画面を確認する"}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            transport = connections[0].protocol.transport
+            assert not transport.disconnected
+            request.cancel()
+            await asyncio.sleep(0)
+            assert not request.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert connections[0].closed
+            assert not display.is_connected
+            async with asyncio.timeout(2):
+                while not transport.disconnected:
+                    await asyncio.sleep(0.01)
+            assert not server_app._sessions
+            assert server_app._active_session is None
+            if phase == "session":
+                provider.aclose.assert_awaited_once()
+            else:
+                provider.aclose.assert_not_called()
+        finally:
+            release.set()
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+            await asyncio.to_thread(display.disconnect)
+
+
+async def test_replayed_submission_appends_once_via_real_vnc(desktop, tmp_path, monkeypatch):
+    title = "Retry smoke " + uuid.uuid4().hex
+    proof = "/tmp/retry-proof-" + uuid.uuid4().hex
+    env = {"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority"}
+    desktop.exec_run(
+        [
+            "xfce4-terminal",
+            "--disable-server",
+            f"--title={title}",
+            "--command=bash --noprofile --norc",
+        ],
+        user="agent",
+        environment=env,
+        detach=True,
+    )
+    window = None
+    for _ in range(60):
+        found = desktop.exec_run(
+            ["xdotool", "search", "--onlyvisible", "--name", title], user="agent", environment=env
+        )
+        if found.exit_code == 0:
+            window = found.output.decode().splitlines()[0]
+            desktop.exec_run(["xdotool", "windowactivate", window], user="agent", environment=env)
+            break
+        await asyncio.sleep(0.2)
+    assert window is not None
+    await asyncio.sleep(0.3)
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    store = TaskStore(tmp_path)
+    made = []
+
+    def connect(_):
+        display = VNCClient()
+        display.connect("127.0.0.1", port)
+        return display
+
+    def create(display):
+        session = TaskSession(llm=MockLLMProvider(), display=display, store=store, decision=None)
+
+        async def finish():
+            await session._execute_recorded_action(
+                Action(ActionType.TYPE, {"text": f"printf 'once\\n' >> {shlex.quote(proof)}\n"}),
+                "1行追記する",
+            )
+            session.loop.context.state = AgentState.COMPLETED
+
+        session._execute_phase = finish
+        made.append(session)
+        return session
+
+    monkeypatch.setattr(server_app, "_store", store)
+    monkeypatch.setattr(server_app, "_sessions", {})
+    monkeypatch.setattr(server_app, "_active_session", None)
+    monkeypatch.setattr(server_app, "_vm_operations", server_app.AsyncKeyedLocks())
+    monkeypatch.setattr(server_app, "_android_provisioner", None)
+    monkeypatch.setattr(server_app, "_resolve_vm", lambda _: SimpleNamespace(id="desktop"))
+    monkeypatch.setattr(server_app, "_default_vm_id", lambda: "desktop")
+    monkeypatch.setattr(server_app, "_connect_vm_display", connect)
+    monkeypatch.setattr(server_app, "_create_session", create)
+    headers = {"Idempotency-Key": "real-vnc-retry-" + uuid.uuid4().hex}
+    body = {"instruction": "1行だけ追記する", "vm_id": "desktop"}
+    try:
+        async with AuthenticatedClient(
+            transport=ASGITransport(app=server_app.app), base_url="http://test"
+        ) as api:
+            first = await api.post("/tasks", json=body, headers=headers)
+            assert first.status_code == 200
+            await made[0]._task
+            replay = await api.post("/tasks", json=body, headers=headers)
+            assert replay.status_code == 200 and replay.json()["replayed"] is True
+            assert replay.json()["session_id"] == first.json()["session_id"]
+            assert len(made) == 1
+            for _ in range(30):
+                actual = desktop.exec_run(["cat", proof], user="agent")
+                if actual.exit_code == 0:
+                    break
+                await asyncio.sleep(0.1)
+            assert actual.exit_code == 0 and actual.output == b"once\n"
+            await api.delete("/tasks/" + first.json()["session_id"])
+            assert (await api.post("/tasks", json=body, headers=headers)).status_code == 410
+            assert desktop.exec_run(["cat", proof], user="agent").output == b"once\n"
+    finally:
+        for session in made:
+            session.stop()
+        await asyncio.gather(*(s._task for s in made if s._task), return_exceptions=True)
+        desktop.exec_run(["xdotool", "windowclose", window], user="agent", environment=env)
+
+
+async def test_stale_controls_do_not_touch_a_replacement_with_real_vnc(
+    desktop, tmp_path, monkeypatch
+):
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    store = TaskStore(tmp_path)
+    made = []
+
+    def connect(_):
+        display = VNCClient()
+        display.connect("127.0.0.1", port)
+        return display
+
+    def create(display):
+        session = TaskSession(llm=MockLLMProvider(), display=display, store=store, decision=None)
+        session.ready = asyncio.Event()
+
+        async def wait():
+            screenshot = await session._capture_screenshot()
+            assert screenshot.width > 0 and screenshot.height > 0
+            session.ready.set()
+            await asyncio.Event().wait()
+
+        session._execute_phase = wait
+        made.append(session)
+        return session
+
+    monkeypatch.setattr(server_app, "_store", store)
+    monkeypatch.setattr(server_app, "_sessions", {})
+    monkeypatch.setattr(server_app, "_active_session", None)
+    monkeypatch.setattr(server_app, "_vm_operations", server_app.AsyncKeyedLocks())
+    monkeypatch.setattr(server_app, "_android_provisioner", None)
+    monkeypatch.setattr(server_app, "_resolve_vm", lambda _: SimpleNamespace(id="desktop"))
+    monkeypatch.setattr(server_app, "_default_vm_id", lambda: "desktop")
+    monkeypatch.setattr(server_app, "_connect_vm_display", connect)
+    monkeypatch.setattr(server_app, "_create_session", create)
+    try:
+        async with AuthenticatedClient(
+            transport=ASGITransport(app=server_app.app), base_url="http://test"
+        ) as api:
+            for instruction in ["先行タスク", "後発タスク"]:
+                response = await api.post(
+                    "/tasks", json={"instruction": instruction, "vm_id": "desktop"}
+                )
+                assert response.status_code == 200
+                await asyncio.wait_for(made[-1].ready.wait(), 5)
+            previous, replacement = made
+            assert previous._task.done() and not previous.display.is_connected
+            target = {"vm_id": "desktop", "session_id": replacement.id}
+            for action, state in [("pause", AgentState.PAUSED), ("resume", AgentState.EXECUTING)]:
+                denied = await api.post(
+                    f"/tasks/current/{action}",
+                    params={"vm_id": "desktop", "session_id": previous.id},
+                )
+                assert denied.status_code == 409
+                assert (
+                    await api.post(f"/tasks/current/{action}", params=target)
+                ).status_code == 200
+                assert replacement.loop.state == state
+                assert store.load(replacement.id).state == state.value
+            denied = await api.post(
+                "/tasks/current/stop", params={"vm_id": "desktop", "session_id": previous.id}
+            )
+            assert denied.status_code == 409 and replacement.is_running
+            assert replacement.display.is_connected
+            assert (await api.post("/tasks/current/stop", params=target)).status_code == 200
+            await asyncio.wait_for(asyncio.gather(replacement._task, return_exceptions=True), 5)
+            assert not replacement.display.is_connected
+            assert store.load(replacement.id).state == "failed"
+    finally:
+        for session in made:
+            session.stop()
+        await asyncio.gather(*(s._task for s in made if s._task), return_exceptions=True)
 
 
 @pytest.mark.parametrize("content", ["desktop-smoke-ok", "日本語の文章を保存する 👩‍💻 café"])

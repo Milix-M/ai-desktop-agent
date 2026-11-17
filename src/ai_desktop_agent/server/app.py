@@ -8,12 +8,23 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from anyio import CancelScope
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,16 +44,31 @@ from ai_desktop_agent.server.browser_access import (
     ManagementNetworkMiddleware,
 )
 from ai_desktop_agent.server.persistence import StorageError
-from ai_desktop_agent.server.session import TaskSession
-from ai_desktop_agent.server.store import TaskStore
+from ai_desktop_agent.server.session import TaskSession, _drain_task
+from ai_desktop_agent.server.store import TaskRecord, TaskStore
+from ai_desktop_agent.server.submissions import (
+    SubmissionClaim,
+    SubmissionConflictError,
+    SubmissionGoneError,
+    SubmissionPendingError,
+    fingerprint,
+    key_digest,
+)
 from ai_desktop_agent.server.vm_control import (
     DockerUnavailableError,
     get_vm_controller,
 )
+from ai_desktop_agent.server.vm_locks import AsyncKeyedLocks
 from ai_desktop_agent.server.vm_pool import VmPool
-from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
+from ai_desktop_agent.server.websocket_io import close_websocket
+from ai_desktop_agent.vm.async_io import (
+    run_display_call,
+    run_vm_call,
+)
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.vnc_client import VNCClient
+
+_server_id = uuid.uuid4().hex
 
 logging.basicConfig(level=logging.INFO)
 install_log_redaction()
@@ -70,18 +96,20 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
-    global _active_session
+    global _active_session, _server_id
     import faulthandler
     import signal
 
+    _server_id = uuid.uuid4().hex
     ExecutionLimits.from_env()
     # 固着診断用：SIGUSR1 で全スレッドのスタックをdocker logsへ出す（プロセスは継続）。
     # seccompでptrace/py-spyが使えない環境向け。
     with contextlib.suppress(Exception):
         faulthandler.register(signal.SIGUSR1)
     get_access()
-    get_store().redact_existing()
-    marked = get_store().mark_interrupted()
+    store = await asyncio.to_thread(get_store)
+    await asyncio.to_thread(store.redact_existing)
+    marked = await asyncio.to_thread(store.mark_interrupted)
     await run_vm_call(get_pool().retire_legacy_relays)
     await run_vm_call(get_pool().isolate_environments)
     if marked:
@@ -213,7 +241,7 @@ async def vnc_stream(ws: WebSocket, vm_id: str):
     from ai_desktop_agent.server.vnc_proxy import proxy_vnc
 
     try:
-        vm = await run_vm_call(_resolve_vm, vm_id)
+        vm = await run_vm_call(_resolve_vm, vm_id, require_ready=False)
     except (HTTPException, DockerUnavailableError, StorageError):
         await ws.close(1008)
         return
@@ -225,7 +253,12 @@ _active_session: TaskSession | None = None
 
 # 全セッション（複数VMの並列実行用）： session_id -> TaskSession
 _sessions: dict[str, TaskSession] = {}
-_task_start_lock = asyncio.Lock()
+# Each in-flight history scan retains the sessions and deletions it observes.
+# The entries are scoped to that scan, so finished sessions are not cached forever.
+_snapshot_readers: dict[object, dict[str, TaskSession | None]] = {}
+_vm_operations = AsyncKeyedLocks()
+_task_submissions = AsyncKeyedLocks()
+_android_provisioner = None
 
 # テスト用のセッションファクトリ。テストから差し替え可能。
 _create_session = _default_create_session  # type: ignore[var-annotated]
@@ -260,6 +293,7 @@ class CreateTaskRequest(BaseModel):
 
 
 class TaskStatus(BaseModel):
+    server_id: str = Field(default_factory=lambda: _server_id)
     session_id: str | None
     state: str
     is_running: bool
@@ -270,12 +304,19 @@ class TaskStatus(BaseModel):
     current_subtask_index: int = 0
     vm_id: str | None = None
     revision: int = 0
+    session_order: int = 0
     manual_input: dict | None = None
+    replayed: bool = False
 
 
 class ResumeTaskRequest(BaseModel):
     manual_input_id: str | None = Field(default=None, max_length=64)
     allow_screen_share: bool = False
+
+
+ControlSessionId = Annotated[
+    str | None, Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+]
 
 
 class VmStatus(BaseModel):
@@ -333,6 +374,7 @@ class TaskSummary(BaseModel):
     decision_escalations: int = 0
     stop_reason: str | None = None
     error_message: str = ""
+    session_order: int = 0
 
 
 class TaskDetail(TaskSummary):
@@ -363,6 +405,7 @@ def _to_summary(d: dict) -> TaskSummary:
         decision_escalations=d.get("decision_escalations", 0),
         stop_reason=d.get("stop_reason"),
         error_message=d.get("error_message", ""),
+        session_order=d.get("session_order", 0),
     )
 
 
@@ -378,47 +421,147 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _serialize_task_submission(fn):
+@asynccontextmanager
+async def _suspend_android_provisioning(vm_id: str | None):
+    provisioner = _android_provisioner
+    if provisioner is None or vm_id is None:
+        yield
+    else:
+        async with provisioner.suspend(vm_id):
+            yield
+
+
+@asynccontextmanager
+async def _vm_operation(vm_id: str):
+    async with _vm_operations.hold(vm_id), _suspend_android_provisioning(vm_id):
+        yield
+
+
+def _serialize_vm_operation(fn):
     @wraps(fn)
     async def submit(*args, **kwargs):
-        # Serialize handover only; already-started tasks on other VMs keep running.
-        async with _task_start_lock:
+        vm_id = kwargs.get("vm_id", args[0] if args else None)
+        async with _vm_operation(vm_id):
             return await fn(*args, **kwargs)
 
     return submit
 
 
 @app.post("/tasks", response_model=TaskStatus)
-@_serialize_task_submission
-async def create_task(req: CreateTaskRequest) -> TaskStatus:
+async def create_task(
+    req: CreateTaskRequest,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
+    ] = None,
+) -> TaskStatus:
     """新しいタスクを作成し、バックグラウンドで実行開始する。
 
     vm_id 省略時は稼働中の既定VMを使う。複数VMで並列実行できる。
     """
-    global _active_session
+    if idempotency_key is None:
+        return await _create_new_task(req)
+    try:
+        async with (
+            _task_submissions.hold(key_digest(idempotency_key)),
+            _submission_claim(idempotency_key, req) as claim,
+        ):
+            if claim.record is not None:
+                live = _sessions.get(claim.task_id)
+                if live is None and _active_session and _active_session.id == claim.task_id:
+                    live = _active_session
+                status = _make_status(live) if live is not None else _stored_status(claim.record)
+                return status.model_copy(update={"replayed": True})
+            return await _create_new_task(req, claim)
+    except SubmissionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except SubmissionPendingError as error:
+        raise HTTPException(
+            status_code=409, detail=str(error), headers={"Retry-After": "1"}
+        ) from error
+    except SubmissionGoneError as error:
+        raise HTTPException(status_code=410, detail=str(error)) from error
 
+
+@asynccontextmanager
+async def _submission_claim(key: str, req: CreateTaskRequest):
+    claim = None
+
+    def acquire():
+        nonlocal claim
+        claim = get_store().claim_submission(key_digest(key), fingerprint(req.model_dump()))
+
+    try:
+        await run_display_call(acquire)
+        yield claim
+    finally:
+        if claim is not None:
+            try:
+                session = claim.session
+                if session is not None and session._task is not None:
+                    # An abandoned HTTP request does not cancel its background task.
+                    # Retain the claim until its initial durable write has finished.
+                    await _drain_task(
+                        asyncio.create_task(session._started.wait()), ignore_cancellation=True
+                    )
+            finally:
+                await run_display_call(claim.close)
+
+
+async def _create_new_task(
+    req: CreateTaskRequest, claim: SubmissionClaim | None = None
+) -> TaskStatus:
     await asyncio.to_thread(get_store().check_writable)
 
     try:
-        vm = await run_vm_call(_resolve_vm, req.vm_id)
+        vm_id = req.vm_id or await run_vm_call(_default_vm_id)
+        async with _vm_operation(vm_id):
+            # Revalidate after waiting; a stop or deletion may have finished meanwhile.
+            vm = await run_vm_call(_resolve_vm, vm_id)
+            return await _start_task_on_vm(req, vm, claim)
     except DockerUnavailableError as error:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+async def _start_task_on_vm(req, vm, claim: SubmissionClaim | None = None):
+    global _active_session
+
     previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
     _check_task_replacement(previous)
-    display = await run_display_call(_connect_vm_display, vm)
+    display = None
+    session = None
+
+    def connect():
+        nonlocal display
+        display = _connect_vm_display(vm)
+
+    def create():
+        nonlocal session
+        session = _create_session(display)
 
     try:
+        # Keep ownership even if cancellation discards the worker's return value.
+        # run_display_call drains the worker before this scope releases anything.
+        await run_display_call(connect)
         # The running task may start a manual handoff while VNC is connecting.
         _check_task_replacement(previous)
         for running in previous:
             running.stop()
         if previous:
-            await asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
-        session = await run_display_call(_create_session, display)
+            await _drain_task(
+                asyncio.gather(*(s._task for s in previous if s._task), return_exceptions=True)
+            )
+        await run_display_call(create)
+        if claim is not None:
+            session.bind_submission(claim, get_store())
+        await session.reserve_start_order()
     except BaseException:
-        await run_display_call(display.disconnect)
+        if session is not None:
+            await session.aclose()
+        elif display is not None:
+            await run_display_call(display.disconnect)
         raise
     session.vm_id = vm.id
     session.allow_vm_restart = req.allow_vm_restart
@@ -426,12 +569,16 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
     # 全 WebSocket 接続にセッション情報を付与して配送する
     _forward_registrations(session)
 
-    _active_session = session
+    if _active_session is None or session.session_order >= _active_session.session_order:
+        _active_session = session
     _sessions[session.id] = session
+    _remember_snapshot_change(session.id, session)
 
-    await session.start_async(req.instruction)
-    if session._task is not None:
-        session._task.add_done_callback(lambda _: _sessions.pop(session.id, None))
+    try:
+        await _drain_task(asyncio.create_task(session.start_async(req.instruction)))
+    finally:
+        if session._task is not None:
+            session._task.add_done_callback(lambda _: _sessions.pop(session.id, None))
     return _make_status(session)
 
 
@@ -442,22 +589,43 @@ def _check_task_replacement(sessions):
         )
 
 
-def _resolve_vm(vm_id: str | None):
-    """タスク投入先のVMを解決する。"""
-    from fastapi import HTTPException
-
-    pool = get_pool()
-    if vm_id:
-        vm = pool.get_vm(vm_id)
-        if vm is None:
-            raise HTTPException(status_code=404, detail=f"vm not found: {vm_id}")
-        if vm.status != "running":
-            raise HTTPException(status_code=409, detail=f"vm not running: {vm_id}")
-        pool.prepare_vm(vm.id)
-        return vm
-    vm = pool.default_vm()
+def _default_vm_id() -> str:
+    vm = get_pool().default_vm()
     if vm is None:
         raise HTTPException(status_code=409, detail="利用可能なVMがありません")
+    return vm.id
+
+
+def _resolve_vm(vm_id: str | None, *, require_ready: bool = True):
+    """タスク投入先のVMを解決する。"""
+
+    from ai_desktop_agent.server.vm_locks import environment_lock
+
+    pool = get_pool()
+    if not vm_id:
+        vm_id = _default_vm_id()
+    with environment_lock(vm_id):
+        return _resolve_named_vm(pool, vm_id, require_ready=require_ready)
+
+
+def _resolve_named_vm(pool, vm_id: str, *, require_ready: bool):
+    from fastapi import HTTPException
+
+    vm = pool.get_vm(vm_id)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"vm not found: {vm_id}")
+    if vm.status != "running":
+        raise HTTPException(status_code=409, detail=f"vm not running: {vm_id}")
+    if require_ready:
+        from ai_desktop_agent.server.readiness import is_ready
+
+        if not is_ready(vm.status, vm.health):
+            detail = (
+                "環境は起動準備中です"
+                if vm.health == "starting"
+                else "環境の接続状態を確認してください"
+            )
+            raise HTTPException(status_code=409, detail=detail)
     pool.prepare_vm(vm.id)
     return vm
 
@@ -511,7 +679,7 @@ async def create_vm(req: CreateVmRequest) -> VmInfoModel:
 
 
 @app.delete("/vms/{vm_id}")
-@_serialize_task_submission
+@_serialize_vm_operation
 async def delete_vm(vm_id: str) -> dict[str, str]:
     """VM/コンテナを削除する（上のタスクは停止する）。
 
@@ -535,7 +703,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
 
 
 @app.post("/vms/{vm_id}/stop", response_model=VmInfoModel)
-@_serialize_task_submission
+@_serialize_vm_operation
 async def stop_vm(vm_id: str) -> VmInfoModel:
     """VM/コンテナを停止する（固定・動的とも可）。上のタスクは停止する。"""
     from fastapi import HTTPException
@@ -552,7 +720,7 @@ async def stop_vm(vm_id: str) -> VmInfoModel:
 
 
 @app.post("/vms/{vm_id}/start", response_model=VmInfoModel)
-@_serialize_task_submission
+@_serialize_vm_operation
 async def start_vm(vm_id: str) -> VmInfoModel:
     """VM/コンテナを起動する（固定・動的とも可）。
 
@@ -578,10 +746,16 @@ async def _stop_sessions_for_vm(vm_id: str) -> None:
     global _active_session
 
     sessions = [s for s in _sessions.values() if getattr(s, "vm_id", None) == vm_id]
+    if (
+        _active_session is not None
+        and _active_session.vm_id == vm_id
+        and _active_session not in sessions
+    ):
+        sessions.append(_active_session)
     for sess in sessions:
         sess.stop()
-    await asyncio.gather(
-        *(s._task for s in sessions if s._task is not None), return_exceptions=True
+    await _drain_task(
+        asyncio.gather(*(s._task for s in sessions if s._task is not None), return_exceptions=True)
     )
     for sess in sessions:
         _sessions.pop(sess.id, None)
@@ -605,19 +779,7 @@ async def get_current_task(vm_id: str | None = None) -> TaskStatus:
         return _make_status(_active_session)
     latest = await asyncio.to_thread(get_store().latest) if vm_id is None else None
     if latest is not None:
-        d = latest.to_dict()
-        return TaskStatus(
-            session_id=d.get("id"),
-            state=d.get("state", "idle"),
-            is_running=False,
-            action_count=d.get("action_count", 0),
-            success_count=d.get("success_count", 0),
-            failure_count=d.get("failure_count", 0),
-            subtasks=d.get("subtasks", []),
-            current_subtask_index=d.get("current_subtask_index", 0),
-            vm_id=d.get("vm_id"),
-            revision=d.get("revision", 0),
-        )
+        return _stored_status(latest)
     return TaskStatus(
         session_id=None,
         state="idle",
@@ -632,8 +794,8 @@ async def get_current_task(vm_id: str | None = None) -> TaskStatus:
 @app.get("/tasks", response_model=list[TaskSummary])
 async def list_tasks(limit: int = Query(default=20, ge=1, le=1000)) -> list[TaskSummary]:
     """タスク履歴を新しい順に返す。"""
-    records = await asyncio.to_thread(get_store().list, limit=limit)
-    return [_to_summary(r.to_dict()) for r in records]
+    records = await asyncio.to_thread(get_store().summaries, limit=limit)
+    return [_to_summary(record) for record in records]
 
 
 @app.get("/tasks/{task_id}", response_model=TaskDetail)
@@ -641,7 +803,7 @@ async def get_task(task_id: str) -> TaskDetail:
     """タスク詳細（操作履歴つき）を返す。リロード後のログ復元用。"""
     from fastapi import HTTPException
 
-    rec = get_store().load(task_id)
+    rec = await asyncio.to_thread(get_store().load, task_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="task not found")
     d = rec.to_dict()
@@ -672,58 +834,91 @@ async def delete_task(task_id: str) -> dict[str, str]:
         session.stop()
         if session._task is not None:
             await asyncio.gather(session._task, return_exceptions=True)
+        if session._cleanup_task is not None:
+            await asyncio.shield(session._cleanup_task)
         _sessions.pop(task_id, None)
     if _active_session is session:
         _active_session = None
 
-    if not get_store().delete(task_id):
+    deleted = False
+
+    def remove():
+        nonlocal deleted
+        deleted = get_store().delete(task_id)
+
+    try:
+        await run_display_call(remove)
+    finally:
+        # run_display_call drains the worker even when the HTTP request is cancelled.
+        if deleted:
+            _remember_snapshot_change(task_id, None)
+    if not deleted:
         raise HTTPException(status_code=404, detail="task not found")
     return {"status": "deleted"}
 
 
-def _control_session(vm_id: str | None) -> TaskSession | None:
+def _control_session(vm_id: str | None, session_id: str | None = None) -> TaskSession | None:
     if vm_id is None:
-        return _active_session
-    return next(
-        (s for s in reversed(list(_sessions.values())) if s.vm_id == vm_id and s.is_running),
-        None,
-    )
+        session = _active_session
+    else:
+        session = next(
+            (s for s in reversed(list(_sessions.values())) if s.vm_id == vm_id and s.is_running),
+            None,
+        )
+    if session_id is not None and (session is None or session.id != session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="操作対象のタスクは終了したか、切り替わりました。状態を確認してください",
+        )
+    # No await between this comparison and the caller's synchronous control method:
+    # another submission cannot replace the session in the middle of the operation.
+    return session
 
 
 @app.post("/tasks/current/pause")
-async def pause_task(vm_id: str | None = None) -> dict[str, str]:
-    session = _control_session(vm_id)
+async def pause_task(
+    vm_id: str | None = None, session_id: ControlSessionId = None
+) -> dict[str, str]:
+    session = _control_session(vm_id, session_id)
     if session:
-        session.pause()
+        notification = session.pause()
+        if inspect.isawaitable(notification):
+            await asyncio.shield(notification)
         return {"status": "paused"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/resume")
 async def resume_task(
-    vm_id: str | None = None, req: ResumeTaskRequest | None = None
+    vm_id: str | None = None,
+    req: ResumeTaskRequest | None = None,
+    session_id: ControlSessionId = None,
 ) -> dict[str, str]:
-    session = _control_session(vm_id)
+    session = _control_session(vm_id, session_id)
     if session:
         if isinstance(getattr(session, "manual_input", None), dict):
             from fastapi import HTTPException
 
             try:
-                session.resume(
+                notification = session.resume(
                     manual_input_id=req.manual_input_id if req else None,
                     allow_screen_share=req.allow_screen_share if req else False,
                 )
             except ValueError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
         else:
-            session.resume()
+            notification = session.resume()
+        if inspect.isawaitable(notification):
+            await asyncio.shield(notification)
         return {"status": "resumed"}
     return {"status": "no_session"}
 
 
 @app.post("/tasks/current/stop")
-async def stop_task(vm_id: str | None = None) -> dict[str, str]:
-    session = _control_session(vm_id)
+async def stop_task(
+    vm_id: str | None = None, session_id: ControlSessionId = None
+) -> dict[str, str]:
+    session = _control_session(vm_id, session_id)
     if session:
         session.stop()
         return {"status": "stopped"}
@@ -752,7 +947,6 @@ async def vm_status() -> VmStatus:
 
 
 @app.post("/vm/restart", response_model=VmStatus)
-@_serialize_task_submission
 async def vm_restart() -> VmStatus:
     """VMコンテナを再起動する（ゲストOSを含む再起動）。
 
@@ -765,22 +959,11 @@ async def vm_restart() -> VmStatus:
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
     controller = _get_vm_controller()
-    target_sessions = [s for s in _sessions.values() if s.vm_id == "vm" and s.is_running]
-    if (
-        _active_session is not None
-        and _active_session.vm_id == "vm"
-        and _active_session.is_running
-        and _active_session not in target_sessions
-    ):
-        target_sessions.append(_active_session)
-    for session in target_sessions:
-        session.stop()
-    await asyncio.gather(
-        *(s._task for s in target_sessions if s._task is not None), return_exceptions=True
-    )
-
     try:
-        info = await run_vm_call(controller.restart)
+        vm_id = await run_vm_call(controller.target_vm_id)
+        async with _vm_operation(vm_id):
+            await _stop_sessions_for_vm(vm_id)
+            info = await run_vm_call(controller.restart, expected_vm_id=vm_id)
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except KvmUnavailableError as e:
@@ -808,24 +991,34 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     logger.info("WebSocket 接続")
     outbound: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
+    server_id = _server_id
     overloaded = False
 
     def enqueue(payload: dict) -> None:
         nonlocal overloaded
         if overloaded:
             return
+        if payload["type"] != "pong":
+            payload = {**payload, "server_id": server_id}
         try:
             outbound.put_nowait(redact_data(payload))
         except asyncio.QueueFull:
             overloaded = True
 
-    async def deliver() -> None:
+    async def deliver() -> int:
         while True:
             payload = await outbound.get()
             if overloaded or not await _send_json(ws, payload):
-                with contextlib.suppress(Exception):
-                    await ws.close(code=1013)
-                return
+                return 1013
+
+    async def receive() -> int:
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                return 1000
+            if message.get("text") != "ping":
+                return 1003
+            enqueue({"type": "pong"})
 
     # セッションのイベントを WebSocket に転送する。
     # 先頭引数にセッションを受け取り、送信先の選別用IDを付与する。
@@ -840,6 +1033,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "state": state.value,
                 "manual_input": getattr(session, "manual_input", None),
                 "revision": session.loop.transition_count,
+                "session_order": session.session_order,
                 "subtask_index": ctx.current_subtask_index,
                 "subtask_count": len(ctx.subtasks),
                 "action_count": len(ctx.action_history),
@@ -854,6 +1048,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "session_id": session.id,
                 "vm_id": getattr(session, "vm_id", None),
                 "action_type": action.action_type.value,
+                "session_order": session.session_order,
                 "description": action.description,
                 "success": success,
             },
@@ -866,6 +1061,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "session_id": session.id,
                 "vm_id": getattr(session, "vm_id", None),
                 "message": error,
+                "session_order": session.session_order,
             },
         )
 
@@ -877,6 +1073,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 "vm_id": getattr(session, "vm_id", None),
                 "success": success,
                 "revision": session.loop.transition_count,
+                "session_order": session.session_order,
             },
         )
 
@@ -890,63 +1087,117 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     if _active_session:
         _forward_registrations(_active_session)
 
-    delivery: asyncio.Task | None = None
+    pumps: list[asyncio.Task] = []
+    close_code = 1000
     try:
-        enqueue({"type": "snapshot", "tasks": [s.model_dump() for s in await _task_snapshot()]})
-        delivery = asyncio.create_task(deliver())
-        while True:
-            data = await ws.receive_text()
-            if data == "ping":
-                enqueue({"type": "pong"})
+        # Read the fence first: a task created during the scan must never be cleared
+        # just because its initial state was not yet present in that scan.
+        through_order = await asyncio.to_thread(get_store().current_session_order)
+        enqueue(
+            {
+                "type": "snapshot",
+                "through_session_order": through_order,
+                "tasks": [s.model_dump() for s in await _task_snapshot()],
+            }
+        )
+        pumps = [asyncio.create_task(deliver()), asyncio.create_task(receive())]
+        done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            close_code = max(close_code, await task)
     except WebSocketDisconnect:
         logger.info("WebSocket 切断")
     except Exception:
-        pass
+        close_code = 1011
     finally:
-        if delivery is not None:
-            delivery.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await delivery
-        # 切断時にグローバルレジストリから除去
-        with contextlib.suppress(ValueError):
-            _ws_state_cbs.remove(on_state)
-        with contextlib.suppress(ValueError):
-            _ws_action_cbs.remove(on_action)
-        with contextlib.suppress(ValueError):
-            _ws_error_cbs.remove(on_error)
-        with contextlib.suppress(ValueError):
-            _ws_complete_cbs.remove(on_complete)
+        # ASGI hosts may cancel repeatedly while a client disconnects.
+        with CancelScope(shield=True):
+            for task in pumps:
+                task.cancel()
+            # 切断時にグローバルレジストリから除去
+            with contextlib.suppress(ValueError):
+                _ws_state_cbs.remove(on_state)
+            with contextlib.suppress(ValueError):
+                _ws_action_cbs.remove(on_action)
+            with contextlib.suppress(ValueError):
+                _ws_error_cbs.remove(on_error)
+            with contextlib.suppress(ValueError):
+                _ws_complete_cbs.remove(on_complete)
+            await asyncio.gather(*pumps, return_exceptions=True)
+            await close_websocket(ws, code=close_code)
 
 
 # ── ヘルパー ──────────────────────────────────────────
 
 
+def _stored_status(record: TaskRecord) -> TaskStatus:
+    return TaskStatus(
+        session_id=record.id,
+        state=record.state,
+        is_running=False,
+        action_count=len(record.actions),
+        success_count=sum(a.success for a in record.actions),
+        failure_count=sum(not a.success for a in record.actions),
+        subtasks=record.subtasks,
+        current_subtask_index=record.current_subtask_index,
+        vm_id=record.vm_id,
+        revision=record.revision,
+        session_order=record.session_order,
+    )
+
+
+def _remember_snapshot_change(task_id: str, session: TaskSession | None) -> None:
+    for changes in _snapshot_readers.values():
+        changes[task_id] = session
+
+
 async def _task_snapshot() -> list[TaskStatus]:
-    """Return the latest task for every VM, including tasks finished while disconnected."""
-    records = await asyncio.to_thread(get_store().list, limit=None)
-    statuses: dict[str, TaskStatus] = {}
-    for record in records:
-        if record.vm_id is None or record.vm_id in statuses:
-            continue
-        statuses[record.vm_id] = TaskStatus(
-            session_id=record.id,
-            vm_id=record.vm_id,
-            state=record.state,
-            is_running=False,
-            action_count=len(record.actions),
-            success_count=sum(a.success for a in record.actions),
-            failure_count=sum(not a.success for a in record.actions),
-            subtasks=record.subtasks,
-            current_subtask_index=record.current_subtask_index,
-            revision=record.revision,
-        )
-    sessions = list(_sessions.values())
-    if _active_session is not None and _active_session not in sessions:
-        sessions.append(_active_session)
-    for session in sessions:
-        if session.vm_id is not None:
-            statuses[session.vm_id] = _make_status(session)
-    return list(statuses.values())
+    """Merge history with starts, completions and deletions occurring during its scan."""
+    token = object()
+    changes: dict[str, TaskSession | None] = {s.id: s for s in _sessions.values()}
+    if _active_session is not None:
+        changes.setdefault(_active_session.id, _active_session)
+    _snapshot_readers[token] = changes
+    try:
+        while True:
+            records = await asyncio.to_thread(get_store().latest_per_vm)
+            # Removing a selected record exposes the preceding task on that VM.
+            # Keep tracking changes during the reread, including another deletion.
+            if not any(
+                record["id"] in changes and changes[record["id"]] is None for record in records
+            ):
+                break
+        for session in _sessions.values():
+            changes.setdefault(session.id, session)
+        if _active_session is not None:
+            changes.setdefault(_active_session.id, _active_session)
+        deleted = {task_id for task_id, session in changes.items() if session is None}
+        statuses: dict[str, TaskStatus] = {}
+        for record in records:
+            if record["id"] in deleted:
+                continue
+            statuses[record["vm_id"]] = TaskStatus(
+                session_id=record["id"],
+                vm_id=record["vm_id"],
+                state=record["state"],
+                is_running=False,
+                action_count=record["action_count"],
+                success_count=record["success_count"],
+                failure_count=record["failure_count"],
+                subtasks=record["subtasks"],
+                current_subtask_index=record["current_subtask_index"],
+                revision=record["revision"],
+                session_order=record["session_order"],
+            )
+        for session in changes.values():
+            if session is None or session.vm_id is None:
+                continue
+            status = _make_status(session)
+            previous = statuses.get(session.vm_id)
+            if previous is None or status.session_order >= previous.session_order:
+                statuses[session.vm_id] = status
+        return list(statuses.values())
+    finally:
+        _snapshot_readers.pop(token, None)
 
 
 async def _send_json(ws: WebSocket, payload: dict, timeout: float = 5.0) -> bool:
@@ -1017,6 +1268,7 @@ def _make_status(session: TaskSession) -> TaskStatus:
         current_subtask_index=ctx.current_subtask_index,
         vm_id=getattr(session, "vm_id", None),
         revision=session.loop.transition_count,
+        session_order=getattr(session, "session_order", 0),
         manual_input=getattr(session, "manual_input", None),
     )
 
