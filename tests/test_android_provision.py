@@ -32,7 +32,7 @@ class _FakeVm:
 
 def _prov(tmp_path, **kw):
     kw.setdefault("state_file", tmp_path / "s.json")
-    kw.setdefault("nap", lambda s: None)
+    kw.setdefault("nap", lambda s, **kw: None)
     return AndroidProvisioner(pool=_FakePool(), **kw)
 
 
@@ -45,25 +45,27 @@ class TestProvisionVm:
         p = AndroidProvisioner(
             pool=_FakePool(),
             state_file=tmp_path / "s.json",
-            nap=lambda s: None,
+            nap=lambda s, **kw: None,
             apks_dir=tmp_path / "apks",
         )
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: "android:5555")
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: "android:5555")
         calls = []
-        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s: calls.append("sleep") or True)
-        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s: calls.append("timezone") or True)
-        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s: calls.append("wifi") or True)
-        monkeypatch.setattr(adb_mod, "setup_home", lambda s: calls.append("home") or True)
-        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s: True)
+        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s, **kw: calls.append("sleep") or True)
+        monkeypatch.setattr(
+            adb_mod, "setup_timezone", lambda s, **kw: calls.append("timezone") or True
+        )
+        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s, **kw: calls.append("wifi") or True)
+        monkeypatch.setattr(adb_mod, "setup_home", lambda s, **kw: calls.append("home") or True)
+        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s, **kw: True)
         installed = []
-        monkeypatch.setattr(adb_mod, "install_apk", lambda s, a: installed.append(a) or True)
+        monkeypatch.setattr(adb_mod, "install_apk", lambda s, a, **kw: installed.append(a) or True)
         assert p.provision_vm("android") is True
         assert calls == ["sleep", "timezone", "wifi", "home"]
         assert installed == [str(tmp_path / "apks" / "F-Droid.apk")]
 
     def test_unreachable_returns_false(self, tmp_path, monkeypatch):
         p = _prov(tmp_path)
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: None)
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: None)
         assert p.provision_vm("android") is False
 
     def test_failed_step_returns_false(self, tmp_path, monkeypatch):
@@ -71,13 +73,13 @@ class TestProvisionVm:
 
         p = _prov(tmp_path, apks_dir=tmp_path / "empty")
         (tmp_path / "empty").mkdir()
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: "android:5555")
-        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s: False)
-        monkeypatch.setattr(adb_mod, "has_network", lambda s: False)
-        monkeypatch.setattr(adb_mod, "setup_home", lambda s: True)
-        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s: True)
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: "android:5555")
+        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s, **kw: False)
+        monkeypatch.setattr(adb_mod, "has_network", lambda s, **kw: False)
+        monkeypatch.setattr(adb_mod, "setup_home", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s, **kw: True)
         assert p.provision_vm("android") is False
 
     def test_wifi_fallback_to_ethernet(self, tmp_path, monkeypatch):
@@ -86,13 +88,13 @@ class TestProvisionVm:
 
         p = _prov(tmp_path, apks_dir=tmp_path / "empty")
         (tmp_path / "empty").mkdir()
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: "android:5555")
-        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s: False)
-        monkeypatch.setattr(adb_mod, "has_network", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_home", lambda s: True)
-        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s: True)
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: "android:5555")
+        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s, **kw: False)
+        monkeypatch.setattr(adb_mod, "has_network", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_home", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s, **kw: True)
         assert p.provision_vm("android") is True
 
     def test_no_apks_skips_install(self, tmp_path, monkeypatch):
@@ -100,14 +102,14 @@ class TestProvisionVm:
 
         (tmp_path / "empty").mkdir()
         p = _prov(tmp_path, apks_dir=tmp_path / "empty")
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: "android:5555")
-        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s: True)
-        monkeypatch.setattr(adb_mod, "setup_home", lambda s: True)
-        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s: True)
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: "android:5555")
+        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "setup_home", lambda s, **kw: True)
+        monkeypatch.setattr(adb_mod, "dismiss_dialogs", lambda s, **kw: True)
         called = []
-        monkeypatch.setattr(adb_mod, "install_apk", lambda s, a: called.append(a) or True)
+        monkeypatch.setattr(adb_mod, "install_apk", lambda s, a, **kw: called.append(a) or True)
         assert p.provision_vm("android") is True
         assert called == []
 
@@ -117,7 +119,7 @@ class TestState:
         p = AndroidProvisioner(
             pool=_FakePool(),
             state_file=tmp_path / "s.json",
-            nap=lambda s: None,
+            nap=lambda s, **kw: None,
         )
         monkeypatch.setattr(p, "_data_id", lambda vm: "d1")
         assert p.needs("android") is True
@@ -131,13 +133,13 @@ class TestState:
         p = AndroidProvisioner(
             pool=pool,
             state_file=tmp_path / "s.json",
-            nap=lambda s: None,
+            nap=lambda s, **kw: None,
             is_running_check=lambda vm: vm == "and-x1",
         )
         monkeypatch.setattr(p, "_data_id", lambda vm: "same")
         p.mark_done("android")
         calls = []
-        monkeypatch.setattr(p, "provision_vm", lambda host: calls.append(host) or True)
+        monkeypatch.setattr(p, "provision_vm", lambda host, **kw: calls.append(host) or True)
         p.ensure()
         assert calls == []
 

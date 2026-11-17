@@ -103,7 +103,7 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
-    global _active_session, _server_id, _vm_creations
+    global _active_session, _android_provisioner, _server_id, _vm_creations
     import faulthandler
     import signal
 
@@ -138,7 +138,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 return True
         return False
 
-    provisioner = AndroidProvisioner(is_running_check=_android_busy)
+    provisioner = AndroidProvisioner(pool=get_pool(), is_running_check=_android_busy)
+    _android_provisioner = provisioner
     creations = get_vm_creations()
     try:
         await creations.start()
@@ -148,6 +149,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await provisioner.stop()
         finally:
+            _android_provisioner = None
             sessions = list(_sessions.values())
             for session in sessions:
                 session.stop()

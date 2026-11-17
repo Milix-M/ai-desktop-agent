@@ -1,7 +1,11 @@
 """Keep display, isolation and Android setup on the same primary container."""
 
+from pathlib import Path
+from unittest.mock import Mock
+
 import pytest
 
+from ai_desktop_agent.server.android_provision import AndroidProvisioner
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
 from ai_desktop_agent.server.vm_pool import VmPool
 from tests.test_vm_pool import _FakeContainer, _FakeDocker
@@ -55,6 +59,47 @@ def test_preparation_only_isolates_the_selected_primary_but_deletion_still_clean
     assert pool.remove_vm(service)
     assert primary.removed and shadow.removed
     assert not foreign.stopped and not foreign.removed
+
+
+@pytest.mark.parametrize("change", ["primary", "shadow", "order"])
+def test_android_completion_tracks_primary_replacement_and_ignores_shadow_changes(
+    primary_environment, tmp_path, monkeypatch, change
+):
+    pool, client, fixed = primary_environment
+    shadow = fixed("manual-shadow", "android")
+    primary = fixed("ai-desktop-agent-android-1", "android")
+    # Exercise the container-ID fallback without relying on an external fixed data image.
+    original_open = Path.open
+
+    def open_local(path, *args, **kwargs):
+        if str(path) == "/app/android-host/android-data.img":
+            raise FileNotFoundError(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_local)
+    provisioner = AndroidProvisioner(pool=pool, state_file=tmp_path / "setup.json")
+    provisioner.mark_done("android")
+    assert not provisioner.needs("android")
+    if change == "primary":
+        primary.id = "replacement-primary"
+    elif change == "shadow":
+        shadow.id = "replacement-shadow"
+    else:
+        client.containers.items.reverse()
+    assert provisioner.needs("android") is (change == "primary")
+
+
+def test_android_setup_connects_to_the_same_primary_as_the_viewer(
+    primary_environment, tmp_path, monkeypatch
+):
+    pool, _, fixed = primary_environment
+    fixed("manual-shadow", "android")
+    primary = fixed("ai-desktop-agent-android-1", "android")
+    prepare = Mock()
+    monkeypatch.setattr(pool, "prepare_vm", prepare)
+    provisioner = AndroidProvisioner(pool=pool, state_file=tmp_path / "setup.json")
+    assert provisioner._target("android").host == primary.name
+    prepare.assert_called_once_with("android")
 
 
 def test_fixed_manual_only_environment_keeps_its_existing_fallback(primary_environment):
