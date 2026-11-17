@@ -9,6 +9,20 @@ import type { PendingSubmission } from "@/lib/types";
 beforeEach(() => { sessionStorage.clear(); vi.stubGlobal("crypto", webcrypto); });
 afterEach(() => vi.unstubAllGlobals());
 
+it("preserves the instruction and retry identity after task admission returns 429", async () => {
+  const onSubmit = vi.fn().mockRejectedValueOnce(new ApiError(429, "60秒後にもう一度送信してください"))
+    .mockResolvedValue(undefined);
+  render(<InstructionInput onSubmit={onSubmit} disabled={false} vmId="desktop" />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "報告書を保存する" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  const retry = await screen.findByRole("button", { name: "再送" });
+  expect(screen.getByRole("textbox")).toHaveValue("報告書を保存する");
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  fireEvent.click(retry);
+  await vi.waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(""));
+  expect(onSubmit.mock.calls[1]).toEqual(onSubmit.mock.calls[0]);
+});
+
 describe("InstructionInput", () => {
   it("renders textarea and submit button", () => {
     render(<InstructionInput onSubmit={vi.fn()} disabled={false} />);

@@ -57,6 +57,7 @@ from ai_desktop_agent.server.submissions import (
     fingerprint,
     key_digest,
 )
+from ai_desktop_agent.server.task_admission import TaskAdmissionMiddleware
 from ai_desktop_agent.server.vm_control import (
     DockerUnavailableError,
     get_vm_controller,
@@ -223,6 +224,7 @@ async def http_error_handler(request, error: HTTPException):
 
 
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(TaskAdmissionMiddleware)
 app.add_middleware(AuthenticationMiddleware)
 
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
@@ -567,7 +569,7 @@ async def _submission_claim(key: str, req: CreateTaskRequest):
 async def _create_new_task(
     req: CreateTaskRequest, claim: SubmissionClaim | None = None
 ) -> TaskStatus:
-    await asyncio.to_thread(get_store().check_writable)
+    await run_display_call(get_store().check_writable)
 
     try:
         vm_id = req.vm_id or await run_vm_call(_default_vm_id)
