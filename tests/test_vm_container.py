@@ -369,7 +369,7 @@ class TestDockerCompose:
     def test_vm_volume_mounts(self):
         vm = self._vm_service()
         volumes = vm.get("volumes", [])
-        assert len(volumes) == 5, f"vm には5つの volume マウントが必要です（実際: {len(volumes)}）"
+        assert len(volumes) == 6
 
         # 文字列のリストか、長形式かを正規化
         vol_specs = {}
@@ -383,11 +383,10 @@ class TestDockerCompose:
                 ro = v.get("read_only", False)
             vol_specs[Path(src).name] = ro
 
-        # qcow2 は書き込み可能（rw）
+        # Templates stay immutable; only the private work directory is writable.
         assert "desktop.qcow2" in vol_specs, "desktop.qcow2 の volume マウントが必要です"
-        assert vol_specs["desktop.qcow2"] is False, (
-            "desktop.qcow2 は rw でマウントする必要があります"
-        )
+        assert vol_specs["desktop.qcow2"] is True
+        assert vol_specs["instances"] is False
 
         # kernel / initrd / cmdline は読み取り専用
         for fname in ("vmlinuz", "initrd.img", "cmdline.txt"):
@@ -407,7 +406,8 @@ class TestDockerCompose:
                 env_dict[k] = v
 
         assert "VM_IMAGE" in env_dict, "VM_IMAGE 環境変数が必要です"
-        assert env_dict["VM_IMAGE"] == "/vm/desktop.qcow2"
+        assert env_dict["VM_IMAGE"] == "/vm/instances/default.qcow2"
+        assert env_dict["VM_BASE_IMAGE"] == "/vm/base.qcow2"
         assert "CMDLINE_FILE" in env_dict, "CMDLINE_FILE 環境変数が必要です"
         assert env_dict["CMDLINE_FILE"] == "/vm/cmdline.txt"
 

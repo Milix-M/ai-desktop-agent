@@ -5,9 +5,9 @@
    未設定時の既定は `auto`。
 2. `auto` の場合は backend 自身から見える `/dev/kvm` を確認する
    （ホスト直実行の開発時用。コンテナ内からは通常見えない）。
-3. それでも不明な場合は Docker 上の `vm` サービス存在有無を見る。
-   `vm` は `kvm` プロファイルでのみ作成されるため、存在すれば
-   KVM利用可とみなす。Docker不通時は不可扱い。
+3. 同じ Compose プロジェクトの `vm` に `/dev/kvm` が割り当てられていれば
+   利用可とみなす。停止後の起動にも使うため稼働状態は問わない。
+   ホストのデバイスがなくなった場合はDockerの起動処理が失敗する。
 
 TCGフォールバックの明示許可 (`ALLOW_TCG_VM=true`) はここでは見ない。
 呼び出し側 (`vm_control` / `vm_pool`) が先に評価する。
@@ -44,12 +44,9 @@ def is_kvm_available(client: Any | None = None) -> bool:
     # auto: backend 自身のデバイスを見る（ホスト直実行時）
     if os.path.exists(KVM_DEVICE):
         return True
-    # コンテナ内からは見えないため、Docker上の vm サービス存在で判断する
+    # コンテナ内からは見えないため、同じプロジェクトの実際のデバイス割当を見る。
     try:
-        from ai_desktop_agent.server.vm_pool import (
-            BASE_VM_SERVICE,
-            COMPOSE_SERVICE_LABEL,
-        )
+        from ai_desktop_agent.server.vm_pool import BASE_VM_SERVICE, VmPool
 
         if client is None:
             try:
@@ -61,10 +58,14 @@ def is_kvm_available(client: Any | None = None) -> bool:
                 client.ping()
             except Exception:
                 return False
-        candidates = client.containers.list(
-            all=True, filters={"label": f"{COMPOSE_SERVICE_LABEL}={BASE_VM_SERVICE}"}
+        candidates = VmPool(client=client)._fixed_containers(client, BASE_VM_SERVICE)
+        return any(
+            any(
+                device.get("PathOnHost") == KVM_DEVICE
+                for device in (c.attrs.get("HostConfig") or {}).get("Devices", []) or []
+            )
+            for c in candidates
         )
-        return len(candidates) > 0
     except Exception:
         logger.debug("KVM利用可否の判定に失敗", exc_info=True)
         return False
