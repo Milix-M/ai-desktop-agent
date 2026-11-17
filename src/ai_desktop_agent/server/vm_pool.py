@@ -109,6 +109,12 @@ class VmInfo:
         return dataclasses.asdict(self)
 
 
+@dataclasses.dataclass(frozen=True)
+class VmInstance:
+    info: VmInfo
+    container_id: str
+
+
 class VmPool:
     """VMコンテナ群のライフサイクル管理。
 
@@ -135,6 +141,24 @@ class VmPool:
         """Identify the current primary container, including replacement under the same VM ID."""
         target = self._primary_container(vm_id, self._docker())
         return target.id if target is not None else None
+
+    @serialize_environment
+    def get_instance(self, vm_id: str) -> VmInstance | None:
+        """Bind the connection information and physical ID to one inspected container."""
+        target = self._primary_container(vm_id, self._docker())
+        if target is None:
+            return None
+        kind = {
+            BASE_VM_SERVICE: KIND_QEMU,
+            DESKTOP_SERVICE: KIND_CONTAINER,
+            ANDROID_SERVICE: KIND_ANDROID,
+        }.get(vm_id)
+        info = self._from_container(target, vm_id, managed=kind is None, kind=kind)
+        if info is None:
+            return None
+        if not isinstance(target.id, str) or not target.id:
+            raise DockerUnavailableError("環境の識別子を確認できません")
+        return VmInstance(info=info, container_id=target.id)
 
     def isolate_environments(self) -> None:
         # Snapshot discovery before detaching old shared networks used for legacy adoption.

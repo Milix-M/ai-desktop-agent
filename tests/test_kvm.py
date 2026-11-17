@@ -13,6 +13,9 @@ from ai_desktop_agent.server.kvm import (
 
 
 class _FakeContainer:
+    def reload(self):
+        pass
+
     def __init__(self, name="vm-1"):
         self.name = name
         self.status = "running"
@@ -26,7 +29,7 @@ class _FakeContainers:
     def __init__(self, items):
         self._items = items
 
-    def list(self, all=True, filters=None):
+    def list(self, all=True, filters=None, sparse=False):
         return list(self._items)
 
 

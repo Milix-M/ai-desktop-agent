@@ -59,6 +59,14 @@ def test_explicit_kvm_never_silently_starts_an_unusable_guest(tmp_path, arch, kv
     assert "USE_KVM=false" in result.stderr
 
 
+def test_kvm_selection_only_needs_the_disk_with_its_own_boot_files(tmp_path):
+    assert select(tmp_path).returncode == 0
+    for name in ("vmlinuz", "initrd.img", "cmdline.txt"):
+        (tmp_path / "vm" / name).unlink()
+    result = select(tmp_path, prepared=False)
+    assert result.returncode == 0 and result.stdout.strip() == "kvm"
+
+
 def test_startup_uses_compose_configuration_and_does_not_print_other_settings(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
