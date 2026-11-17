@@ -3,7 +3,16 @@ export interface SubtaskInfo {
   description: string;
 }
 
+export interface PendingSubmission {
+  requestId: string;
+  instruction: string;
+  vmId: string | null;
+  allowVmRestart: boolean;
+  gone?: boolean;
+}
+
 export interface TaskStatus {
+  server_id?: string;
   session_id: string | null;
   state: string;
   is_running: boolean;
@@ -14,7 +23,9 @@ export interface TaskStatus {
   current_subtask_index: number;
   vm_id?: string | null;
   revision?: number;
+  session_order?: number;
   manual_input?: ManualInputRequest | null;
+  replayed?: boolean;
 }
 
 export interface ManualInputRequest {
@@ -45,12 +56,14 @@ export interface WsStateMessage {
   action_count: number;
   subtasks?: SubtaskInfo[];
   revision?: number;
+  session_order?: number;
   manual_input?: ManualInputRequest | null;
 }
 
 export interface WsActionMessage {
   type: "action";
   session_id?: string | null;
+  session_order?: number;
   vm_id?: string | null;
   action_type: string;
   description: string;
@@ -60,6 +73,7 @@ export interface WsActionMessage {
 export interface WsErrorMessage {
   type: "error";
   session_id?: string | null;
+  session_order?: number;
   vm_id?: string | null;
   message: string;
 }
@@ -70,16 +84,18 @@ export interface WsCompleteMessage {
   vm_id?: string | null;
   success: boolean;
   revision?: number;
+  session_order?: number;
 }
 
-export type WsMessage =
-  | { type: "snapshot"; tasks: TaskStatus[] }
+export type WsMessage = (
+  | { type: "snapshot"; tasks: TaskStatus[]; through_session_order?: number }
   | WsStateMessage
   | WsActionMessage
   | WsErrorMessage
   | WsCompleteMessage
   | { type: "status"; state: string }
-  | { type: "pong" };
+  | { type: "pong" }
+) & { server_id?: string };
 
 export interface LogEntry {
   id: number;
@@ -104,6 +120,7 @@ export interface TaskHistoryItem {
   success_count: number;
   failure_count: number;
   updated_at: number;
+  session_order?: number;
   vm_id?: string | null;
   prompt_tokens?: number;
   completion_tokens?: number;

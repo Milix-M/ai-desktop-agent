@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import type { VmInfo } from "@/lib/types";
+import { canStopVm, isVmReady, vmStatusLabel } from "@/lib/vm-readiness";
 
 type Kind = "qemu" | "container" | "android";
 
@@ -49,15 +50,14 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
           className={`vm-tab${vm.id === selectedId ? " selected" : ""}`}
         >
           <button className="vm-tab-main" onClick={() => onSelect(vm.id)}>
-            <span className={`vm-dot ${vm.status === "running" ? "green" : "red"}`} />
+            <span className={`vm-dot ${isVmReady(vm) ? "green" : canStopVm(vm) ? "amber" : "red"}`} />
             <span className="vm-tab-name">{vm.name}</span>
             <span className="vm-tab-sub">
               {vm.kind === "container" ? "コンテナ・" : vm.kind === "android" ? "Android・" : ""}
-              {vm.status}
-              {vm.health ? ` (${vm.health})` : ""}
+              {vmStatusLabel(vm)}
             </span>
           </button>
-          {vm.status === "running" ? (
+          {canStopVm(vm) ? (
             confirmStopId === vm.id ? (
               <span className="vm-tab-confirm">
                 <button
@@ -94,6 +94,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
           ) : (
             <button
               className="vm-tab-start"
+              disabled={!["exited", "created"].includes(vm.status)}
               aria-label={`${vm.name}を起動`}
               onClick={() => {
                 setConfirmStopId(null);

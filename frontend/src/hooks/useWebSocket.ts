@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { WsMessage } from "@/lib/types";
-import { getWsUrl } from "@/lib/api";
+import { confirmAuthentication, getWsUrl } from "@/lib/api";
 
 export function useWebSocket(onMessage: (msg: WsMessage) => void) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -44,9 +44,7 @@ export function useWebSocket(onMessage: (msg: WsMessage) => void) {
         clearInterval(heartbeat);
         clearTimeout(pongTimer);
         // A rejected or expired session is checked by HTTP before reconnecting.
-        void import("@/lib/api").then(({ getAuthStatus }) => getAuthStatus()).then(({ authenticated }) => {
-          if (!disposed && !authenticated) window.dispatchEvent(new Event("auth-required"));
-        }).catch(() => {});
+        void confirmAuthentication(() => !disposed && wsRef.current === ws);
         retryTimer = setTimeout(connect, 3000);
       };
     }

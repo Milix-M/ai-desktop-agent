@@ -531,6 +531,10 @@ body {
   background: #f85149;
 }
 
+.vm-dot.amber {
+  background: #d29922;
+}
+
 .vm-tab-sub {
   color: var(--dim);
   font-size: 11px;
