@@ -4,6 +4,8 @@ services:
   # KVMあり環境では vm のみ起動し、こちらは起動しない（1つに絞って軽量化）。
   desktop:
     profiles: ["container"]
+    networks: [env_desktop]
+    cap_drop: [NET_RAW]
     build:
       context: ./desktop
       dockerfile: Dockerfile
@@ -23,6 +25,8 @@ services:
   # docker compose --profile kvm up を使うこと。
   vm:
     profiles: ["kvm"]
+    networks: [env_vm]
+    cap_drop: [NET_RAW]
     build:
       context: ./vm
       dockerfile: Dockerfile
@@ -75,6 +79,10 @@ services:
       start_period: 60s
 
   backend:
+    networks:
+      default:
+        gw_priority: 1
+    cap_drop: [NET_RAW]
     build:
       context: .
       dockerfile: Dockerfile
@@ -117,6 +125,8 @@ services:
   # 動的払い出し: POST /vms {"kind": "android"}（KVM必須）
   android:
     profiles: ["kvm"]
+    networks: [env_android]
+    cap_drop: [NET_RAW]
     build:
       context: ./android
       dockerfile: Dockerfile
@@ -143,3 +153,18 @@ services:
       interval: 10s
       retries: 10
       start_period: 180s
+
+networks:
+  default: {}
+  env_desktop:
+    labels:
+      ai-desktop-agent.vm-id: desktop
+      ai-desktop-agent.isolated: "true"
+  env_vm:
+    labels:
+      ai-desktop-agent.vm-id: vm
+      ai-desktop-agent.isolated: "true"
+  env_android:
+    labels:
+      ai-desktop-agent.vm-id: android
+      ai-desktop-agent.isolated: "true"

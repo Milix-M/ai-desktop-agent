@@ -97,6 +97,9 @@ def _hist_app(tmp_path):
     orig = server_app._create_session
 
     class _FakePool:
+        def prepare_vm(self, vm_id):
+            pass
+
         def get_vm(self, vm_id):
             return (
                 VmInfo(id="vm", name="vm", status="running", vnc_host="vm", managed=False)

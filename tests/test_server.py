@@ -21,6 +21,9 @@ def _reset_session(tmp_path):
     server_app._store = TaskStore(root=tmp_path / "data")
 
     class _FakePool:
+        def prepare_vm(self, vm_id):
+            pass
+
         def get_vm(self, vm_id):
             return (
                 VmInfo(id="vm", name="vm", status="running", vnc_host="vm", managed=False)

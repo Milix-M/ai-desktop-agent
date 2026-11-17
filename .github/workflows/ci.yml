@@ -103,6 +103,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen
       - run: docker build -t ai-desktop-agent-desktop-smoke desktop
+      - run: docker build -t ai-desktop-agent-backend-smoke .
       - run: uv run pytest -m desktop_integration tests/integration/
         env:
           RUN_DESKTOP_SMOKE: "1"

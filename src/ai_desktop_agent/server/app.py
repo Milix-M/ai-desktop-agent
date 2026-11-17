@@ -25,7 +25,11 @@ from ai_desktop_agent.server.auth import (
     AuthenticationMiddleware,
     get_access,
 )
-from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
+from ai_desktop_agent.server.browser_access import (
+    ALLOWED_ORIGINS,
+    BrowserOriginMiddleware,
+    ManagementNetworkMiddleware,
+)
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
@@ -74,6 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     marked = get_store().mark_interrupted()
     get_access()
     await run_vm_call(get_pool().retire_legacy_relays)
+    await run_vm_call(get_pool().isolate_environments)
     if marked:
         logger.info("起動時に中断タスク %d 件をマーク", marked)
     from ai_desktop_agent.server.android_provision import AndroidProvisioner
@@ -144,6 +149,7 @@ app.add_middleware(
 )
 
 app.add_middleware(BrowserOriginMiddleware)
+app.add_middleware(ManagementNetworkMiddleware)
 
 
 class LoginRequest(BaseModel):
@@ -367,7 +373,12 @@ async def create_task(req: CreateTaskRequest) -> TaskStatus:
 
     await asyncio.to_thread(get_store().check_writable)
 
-    vm = await run_vm_call(_resolve_vm, req.vm_id)
+    try:
+        vm = await run_vm_call(_resolve_vm, req.vm_id)
+    except DockerUnavailableError as error:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail=str(error)) from error
     display = await run_display_call(_connect_vm_display, vm)
 
     previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
@@ -407,10 +418,12 @@ def _resolve_vm(vm_id: str | None):
             raise HTTPException(status_code=404, detail=f"vm not found: {vm_id}")
         if vm.status != "running":
             raise HTTPException(status_code=409, detail=f"vm not running: {vm_id}")
+        pool.prepare_vm(vm.id)
         return vm
     vm = pool.default_vm()
     if vm is None:
         raise HTTPException(status_code=409, detail="利用可能なVMがありません")
+    pool.prepare_vm(vm.id)
     return vm
 
 
@@ -432,6 +445,7 @@ async def list_vms() -> list[VmInfoModel]:
     from fastapi import HTTPException
 
     try:
+        await run_vm_call(get_pool().isolate_environments)
         return [VmInfoModel(**v.to_dict()) for v in await run_vm_call(get_pool().list_vms)]
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e

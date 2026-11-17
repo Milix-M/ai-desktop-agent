@@ -118,6 +118,7 @@ class AndroidProvisioner:
             for vm in pool.list_vms():
                 if vm.kind != KIND_ANDROID or vm.status != "running":
                     continue
+                pool.prepare_vm(vm.id)
                 host = ANDROID_SERVICE if vm.id == ANDROID_SERVICE else (vm.vnc_host or vm.id)
                 out.append((vm.id, host))
             return out
