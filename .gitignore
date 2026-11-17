@@ -43,6 +43,8 @@ vm/cmdline.txt
 vm/sockets/
 vm/overlays/
 vm/instances/
+vm/.vm-build.*/
+vm/.vm-image-build.lock
 
 # OS
 .DS_Store

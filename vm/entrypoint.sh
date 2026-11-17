@@ -5,12 +5,12 @@ set -euo pipefail
 
 VM_IMAGE="${VM_IMAGE:-/vm/desktop.qcow2}"
 VM_BASE_IMAGE="${VM_BASE_IMAGE:-}"
-VM_KERNEL="${VM_KERNEL:-/vm/vmlinuz}"
-VM_INITRD="${VM_INITRD:-/vm/initrd.img}"
+VM_KERNEL="${VM_KERNEL:-}"
+VM_INITRD="${VM_INITRD:-}"
 VM_MEMORY="${VM_MEMORY:-4096}"
 VM_CPUS="${VM_CPUS:-4}"
 VM_VNC_PORT="${VM_VNC_PORT:-5900}"
-CMDLINE_FILE="${CMDLINE_FILE:-/vm/cmdline.txt}"
+CMDLINE_FILE="${CMDLINE_FILE:-}"
 QMP_SOCK="${QMP_SOCK:-/vm/sockets/qmp.sock}"
 QGA_SOCK="${QGA_SOCK:-/vm/sockets/qga.sock}"
 VNC_DISPLAY=$((VM_VNC_PORT - 5900))
@@ -57,22 +57,50 @@ else
     QEMU_ACCEL=(-cpu qemu64 -smp 1)
 fi
 
+VM_IMAGE=$(realpath -m -- "$VM_IMAGE")
+mkdir -p "$(dirname "$VM_IMAGE")"
+# Keep initialization and offline extraction exclusive through the QEMU process.
+exec 9>"${VM_IMAGE}.run.lock"
+if ! flock -n 9; then
+    log "ERROR: VM disk is already starting or running: $VM_IMAGE"
+    exit 1
+fi
+
 # Fixed VMs initialize a private disk once. Never overwrite saved work on restart.
 if [ -n "$VM_BASE_IMAGE" ]; then
-    if [ "$VM_IMAGE" = "$VM_BASE_IMAGE" ] || [ ! -s "$VM_BASE_IMAGE" ] || [ ! -f "$VM_BASE_IMAGE" ]; then
+    VM_BASE_IMAGE=$(realpath -m -- "$VM_BASE_IMAGE")
+    if [ "$VM_IMAGE" = "$VM_BASE_IMAGE" ] || [ "$VM_IMAGE" -ef "$VM_BASE_IMAGE" ]; then
         log "ERROR: VM_BASE_IMAGE must be a regular template file separate from VM_IMAGE"
         exit 1
     fi
     mkdir -p "$(dirname "$VM_IMAGE")"
     (
-        flock -x 9
+        flock -x 8
         if [ ! -e "$VM_IMAGE" ]; then
+            if [ ! -f "$VM_BASE_IMAGE" ] || [ ! -s "$VM_BASE_IMAGE" ]; then
+                log "ERROR: missing or invalid VM template: $VM_BASE_IMAGE"
+                exit 1
+            fi
             disk_tmp=$(mktemp "${VM_IMAGE}.XXXXXX")
             trap 'rm -f "$disk_tmp"' EXIT
             cp --sparse=always --reflink=auto -- "$VM_BASE_IMAGE" "$disk_tmp"
             mv -- "$disk_tmp" "$VM_IMAGE"
         fi
-    ) 9>"${VM_IMAGE}.init.lock"
+    ) 8>"${VM_IMAGE}.init.lock"
+fi
+
+if [ -z "$VM_KERNEL" ] && [ -z "$VM_INITRD" ]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    timeout --kill-after=5 300 bash "$script_dir/prepare-boot.sh" "$VM_IMAGE"
+    VM_KERNEL="${VM_IMAGE}.boot/vmlinuz"
+    VM_INITRD="${VM_IMAGE}.boot/initrd.img"
+    CMDLINE_FILE="${CMDLINE_FILE:-${VM_IMAGE}.boot/cmdline.txt}"
+elif [ -z "$VM_KERNEL" ] || [ -z "$VM_INITRD" ]; then
+    log "ERROR: custom boot requires both VM_KERNEL and VM_INITRD"
+    exit 1
+else
+    # Explicit kernel/initrd overrides remain available for custom guest images.
+    CMDLINE_FILE="${CMDLINE_FILE:-/vm/cmdline.txt}"
 fi
 for required_file in "$VM_IMAGE" "$VM_KERNEL" "$VM_INITRD" "$CMDLINE_FILE"; do
     if [ ! -f "$required_file" ] || [ ! -s "$required_file" ]; then

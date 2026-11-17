@@ -17,7 +17,7 @@ choose_profile() {
     echo container
     return
   fi
-  for file in vm/desktop.qcow2 vm/vmlinuz vm/initrd.img vm/cmdline.txt; do
+  for file in vm/desktop.qcow2; do
     if [[ ! -f "$file" || ! -s "$file" ]]; then
       if [[ "$mode" == true ]]; then
         echo "Missing VM file: $file. Prepare the guest with sudo ./vm/build-vm-image.sh or use USE_KVM=false." >&2

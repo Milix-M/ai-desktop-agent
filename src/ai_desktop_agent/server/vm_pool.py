@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import os
+import shutil
 import socket
 import time
 import uuid
@@ -37,6 +38,7 @@ from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E
 from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes  # noqa: E402
 
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
+LABEL_DISK_COPY = "ai-desktop-agent.disk-copy-for"
 LABEL_KIND = "ai-desktop-agent.kind"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
@@ -251,7 +253,7 @@ class VmPool:
         # 動的VM
         dynamic = self._dynamic_containers(docker)
         for c in dynamic:
-            if LABEL_WS_FOR in self._labels(c):
+            if LABEL_WS_FOR in self._labels(c) or LABEL_DISK_COPY in self._labels(c):
                 continue
             vm_id = self._labels(c).get(LABEL_VM_ID, "")
             if vm_id and vm_id != BASE_VM_SERVICE:
@@ -402,9 +404,8 @@ class VmPool:
 
                 host_repo = self._host_repo_dir()
                 volumes = {
-                    overlay_host: {"bind": f"/vm/overlays/{vm_id}.qcow2", "mode": "rw"},
+                    str(Path(overlay_host).parent): {"bind": "/vm/instance", "mode": "rw"},
                     f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
-                    **self._ro_vm_files(),
                 }
                 docker.containers.run(
                     image,
@@ -417,8 +418,7 @@ class VmPool:
                         "VM_MEMORY": memory,
                         "VM_CPUS": cpus,
                         "VM_VNC_PORT": "5900",
-                        "VM_IMAGE": f"/vm/overlays/{vm_id}.qcow2",
-                        "CMDLINE_FILE": "/vm/cmdline.txt",
+                        "VM_IMAGE": "/vm/instance/disk.qcow2",
                         "USE_KVM": use_kvm,
                         "ALLOW_TCG_VM": os.environ.get("ALLOW_TCG_VM", "false"),
                         "QMP_SOCK": f"/vm/sockets/{vm_id}-qmp.sock",
@@ -577,7 +577,11 @@ class VmPool:
         all_targets = self._dynamic_containers(docker, vm_id)
         if include_relay:
             return list(all_targets)
-        return [c for c in all_targets if LABEL_WS_FOR not in self._labels(c)]
+        return [
+            c
+            for c in all_targets
+            if LABEL_WS_FOR not in self._labels(c) and LABEL_DISK_COPY not in self._labels(c)
+        ]
 
     def remove_vm(self, vm_id: str) -> bool:
         """VM/コンテナを削除する（固定・動的とも可）。
@@ -629,7 +633,7 @@ class VmPool:
         WorkspaceVolumes(docker, self._project_name(docker)).remove(vm_id)
         # This path is mounted into the backend; host paths belong to the Docker daemon.
         try:
-            (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
+            self._remove_disk(vm_id)
         except OSError as e:
             raise DockerUnavailableError(f"VMディスクの削除に失敗しました: {vm_id}") from e
         self._drop_state(vm_id)
@@ -705,27 +709,46 @@ class VmPool:
         docker = self._docker()
         overlay_host_dir = f"{self._host_repo_dir()}/vm/overlays"
         Path(self._overlays_dir).mkdir(parents=True, exist_ok=True)
-        overlay_host = str(Path(overlay_host_dir).resolve() / (vm_id + ".qcow2"))
+        instance_dir = Path(self._overlays_dir) / vm_id
+        instance_dir.mkdir(mode=0o700)
+        overlay_host = str(Path(overlay_host_dir).resolve() / vm_id / "disk.qcow2")
         image = self._vm_image_ref(docker)
         logger.info("VMディスク複製: %s", overlay_host)
-        docker.containers.run(
-            image,
-            # 注意: vmイメージのENTRYPOINTはQEMU起動のため上書きする
-            entrypoint=["cp"],
-            network_mode="none",
-            command=(
-                f"--sparse=always --reflink=auto /vm/desktop.qcow2 /vm/overlays/{vm_id}.qcow2"
-            ),
-            volumes={
-                overlay_host_dir: {"bind": "/vm/overlays", "mode": "rw"},
-                # 複製元（読取専用）
-                f"{self._host_repo_dir()}/vm/desktop.qcow2": {
-                    "bind": BASE_IMAGE_IN_VM,
-                    "mode": "ro",
+        try:
+            docker.containers.run(
+                image,
+                entrypoint=["bash", "-ceu"],
+                network_mode="none",
+                command=[
+                    "if [ ! -r /prepare-boot.sh ] || [ ! -s /prepare-boot.sh ]; then exit 78; fi; "
+                    "exec timeout --kill-after=5 300 cp --sparse=always --reflink=auto "
+                    "/vm/desktop.qcow2 /vm/instance/disk.qcow2"
+                ],
+                volumes={
+                    str(Path(overlay_host).parent): {"bind": "/vm/instance", "mode": "rw"},
+                    f"{self._host_repo_dir()}/vm/desktop.qcow2": {
+                        "bind": BASE_IMAGE_IN_VM,
+                        "mode": "ro",
+                    },
                 },
-            },
-            remove=True,
-        )
+                labels={
+                    LABEL_VM_ID: vm_id,
+                    LABEL_PROJECT: self._project_name(docker),
+                    LABEL_DISK_COPY: vm_id,
+                },
+                cap_drop=["ALL"],
+                remove=True,
+            )
+        except Exception as error:
+            from docker.errors import ContainerError
+
+            if isinstance(error, ContainerError) and error.exit_status == 78:
+                raise DockerUnavailableError(
+                    "VM実行イメージの更新が必要です。VMイメージを再ビルドしてください"
+                ) from error
+            raise DockerUnavailableError(
+                "VMディスクを作成できません。テンプレートと保存先の状態を確認してください"
+            ) from error
         return overlay_host
 
     def _target_kind(self, vm_id: str, docker: Any) -> str:
@@ -838,14 +861,14 @@ class VmPool:
             logger.debug("VMイメージ検出に失敗", exc_info=True)
         return "ai-desktop-agent-vm:latest"
 
-    def _ro_vm_files(self) -> dict:
-        """カーネル等の読取専用マウント。"""
-        host_dir = f"{self._host_repo_dir()}/vm"
-        return {
-            f"{host_dir}/vmlinuz": {"bind": "/vm/vmlinuz", "mode": "ro"},
-            f"{host_dir}/initrd.img": {"bind": "/vm/initrd.img", "mode": "ro"},
-            f"{host_dir}/cmdline.txt": {"bind": "/vm/cmdline.txt", "mode": "ro"},
-        }
+    def _remove_disk(self, vm_id: str) -> None:
+        """Remove this VM's files through the backend mount, including legacy disks."""
+        if not vm_id or Path(vm_id).name != vm_id or vm_id in {".", ".."}:
+            raise ValueError("環境IDが不正です")
+        directory = Path(self._overlays_dir) / vm_id
+        if directory.exists() or directory.is_symlink():
+            shutil.rmtree(directory)
+        (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
 
     def _host_repo_dir(self) -> str:
         """ホスト側のリポジトリパスを特定する。
@@ -956,7 +979,7 @@ class VmPool:
                     EnvironmentNetworks(docker, self._project_name(docker)).remove(vm_id)
                     if allocation.get("home_volume"):
                         WorkspaceVolumes(docker, self._project_name(docker)).remove(vm_id)
-                    (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
+                    self._remove_disk(vm_id)
                     self._drop_state(vm_id)
             except Exception:
                 logger.exception("作成失敗後のリソースを回収できませんでした: %s", vm_id)
