@@ -92,7 +92,7 @@ src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
 | GET | /tasks | 履歴一覧。新しい順に返す |
 | GET | /tasks/{id} | タスク詳細。操作履歴と推論を含む |
 | DELETE | /tasks/{id} | 履歴削除。実行中なら止めてから消す |
-| GET | /tasks/current | 最新タスク状態。リロード後の復元用でなければidle |
+| GET | /tasks/current | 最新タスク状態。vm_idで環境を選べる |
 | POST | /tasks/current/{pause,resume,stop} | タスク制御 |
 | GET | /vms | VM一覧 |
 | POST | /vms | VM作成。ディスク複製と起動を行う |
@@ -100,12 +100,12 @@ src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
 | POST | /vms/{id}/stop | VMとコンテナの停止。固定と動的に使え、上のタスク停止と中継連動を含む |
 | POST | /vms/{id}/start | VMとコンテナの起動。固定と動的に使え、中継連動を含む。QEMU系はKVM必須 |
 | GET | /vm/status | 既定VMの状態。DockerとQMPで確認する |
-| POST | /vm/restart | 既定VMの作り直し。実行中タスク停止を含む |
+| POST | /vm/restart | 既定VMの再起動。そのVMの実行中タスクを停止する |
 | WS | /ws | 状態と操作ログの配信 |
 
 ### セッション管理
 
-1タスクは1つのTaskSessionに対応する。server/session.pyで定義し、POST /tasksごとに生成する。登録先はserver/app.pyの_sessionsでsession.idを鍵とする。_active_sessionは後方互換のための最新1件とする。セッションはvm_idを持ち、指定VMのVNCClientにset_displayで切り替える。vm_id省略時は稼働中の既定VMを使う。VmPool.default_vmで選ぶ。稼働中のdesktopがあれば順序によらず優先する。WebSocket配送は全体登録のファンアウトで行う。stateとactionとerrorとcompleteにsession_idとvm_idを付ける。初回のno_sessionとpongは除く。フロントは選択中のVMで選別する。
+1タスクは1つのTaskSessionに対応し、_sessionsで管理する。_active_sessionは後方互換のための最新1件とする。vm_id省略時は稼働中のdesktopを優先する。WebSocketは接続時に全環境のsnapshotを送り、その後state・action・error・completeを送る。イベントにはsession_idとvm_id、状態更新にはrevisionも付ける。フロントは古いrevisionを適用しない。接続ごとの送信キューを使い、遅い閲覧者からタスクの実行を切り離す。
 
 ### 永続化
 
@@ -146,6 +146,7 @@ stateDiagram-v2
     EXECUTING --> COMPLETED : 即時完了 (稀)
     WAITING --> VERIFYING : 待機完了
     WAITING --> RECOVERING : タイムアウト
+    WAITING --> FAILED : 取消
     VERIFYING --> EXECUTING : 継続
     VERIFYING --> COMPLETED : 全サブタスク完了
     VERIFYING --> RECOVERING : 検証失敗
@@ -155,6 +156,7 @@ stateDiagram-v2
     RECOVERING --> FAILED : 回復不能
     PAUSED --> EXECUTING : 再開
     PAUSED --> IDLE : 中断
+    PAUSED --> FAILED : 停止
     COMPLETED --> IDLE : reset
     FAILED --> IDLE : reset
 
@@ -175,7 +177,7 @@ stateDiagram-v2
     end note
 ```
 
-状態はIDLEとUNDERSTANDINGとPLANNINGとEXECUTINGとWAITINGとVERIFYINGとRECOVERINGとPAUSEDとCOMPLETEDとFAILEDとする。PAUSED以外の停止系は終端扱いとする。interruptedは状態機械の状態ではない。再起動後に付け替える永続化上の目印とする。pauseはEXECUTINGからのみ行える。fail_nowは上限と例外と取消時に打ち切るための遷移とする。loop.pyのunderstanding_failedとwait_timeoutとrecover_replanとabortは定義のみで、現行フローから呼ばない。UNDERSTANDINGの失敗は汎用例外処理でFAILED化する。
+interruptedはバックエンド再起動後の永続化上の目印で、状態機械の状態ではない。pauseはEXECUTINGから行う。上限超過・例外・取消ではFAILEDに移る。一時停止中の停止もFAILEDとして保存し、完了を通知する。
 
 ### 実行フロー
 
@@ -203,7 +205,7 @@ sequenceDiagram
         LLM-->>BE: Action＋期待効果＋確信度
         alt vm_restart要求
             BE->>BE: allow_vm_restart判定（未許可は却下して回復へ）
-            BE->>VM: VM作り直し＋60秒待機（許可時のみ）
+            BE->>VM: VM再起動＋60秒待機（許可時のみ）
         else 操作なし完了宣言
             BE->>LLM: 却下して再問い合わせ（最大2回）
         else 低確信度・連打
@@ -231,11 +233,11 @@ sequenceDiagram
 
 VERIFYINGでは_verify_phaseが機械的失敗をRECOVERINGへ回す。エラー情報は次判断へ引き継ぐ。クリック系は画面変化の有無をハッシュ比較する。無変化は空振りとしてRECOVERINGへ回す。subtask_completeは期待結果の達成を画像付きでLLM検証する。_verify_subtask_phaseで行う。未達は上限まで回復し、超過でfail_nowとする。上限はmax_retriesで定める。
 
-RECOVERINGではrecover_from_errorで回復計画を作る。recoverableが真なら再試行し、偽なら失敗とする。計画のstrategyは現状では再試行可否のみに使う。例外と取消時は必ずFAILEDに移して保存する。記録なしに終わらせない。一時停止中は遷移前に_wait_if_pausedで再開を待つ。DELETE /tasksとPOST /vm/restartの停止対象は_active_sessionのみとし、_sessions内の非実行セッションは対象外とする。
+RECOVERINGでは最新のエラーから回復計画を作る。回復操作を実行して記録し、理由を次の判断へ渡す。再計画では完了済みのサブタスクを残して残作業を分解する。再試行はmax_retries、再計画はタスク内3回、全操作は200回までとする。回復中のVM再起動にも許可確認を適用する。
 
-### VM作り直し
+### VM再起動
 
-アクションはvm_restartのreason指定でactions/primitives.pyに定義する。タスク投入時のallow_vm_restartが真の場合のみ実行する。UIのチェックボックスで指定する。未許可なら却下して回復フローへ回し、別手段を促す。実行後は環境初期化として回復フローに戻し、新画面で再判断する。再起動後はRESTART_SETTLE_SECONDSの60秒待ってから続ける。
+vm_restartはallow_vm_restartが真の場合だけ実行する。未許可なら却下して回復フローへ戻る。ディスクの初期化は行わず、再起動後はRESTART_SETTLE_SECONDSの60秒待ってから画面を確認する。
 
 ## 意思決定層
 
@@ -322,7 +324,7 @@ sequenceDiagram
     FE->>POOL: POST /tasks (vm_idつき)
     POOL->>VM: VNC接続・エージェント実行 (vm:5900 / vm-id:5900)
     VM-->>POOL: 画面・操作
-    opt 作り直し（任意）
+    opt 再起動（任意）
         FE->>POOL: POST /vm/restart または agent vm_restart (許可制)
         POOL->>DOCKER: コンテナ再起動 (実行中タスク停止つき)
         POOL->>POOL: 60秒待機して続行 (RESTART_SETTLE_SECONDS)
@@ -363,7 +365,7 @@ QEMU slirpは10.0.2.0/24、入口は.2、DNSは.3とする。過去のつまず�
 
 ### 保存方式
 
-base qcow2のvm/desktop.qcow2は共有の読取専用扱いとする。動的VMはフルコピーを払い出す。backing参照は錠競合するため使わない。1台あたり数GBを使う。不要VMは消して回収する。
+動的VMはvm/desktop.qcow2のフルコピーを使う。固定VMは同じファイルを読み書きするため、稼働中の複製に整合性の課題が残る。読み取り専用のテンプレートと作業用ディスクの分離は[確認事項](production-readiness.md)で追跡する。動的ディスクはbackendの/vm/overlaysに共有マウントし、コンテナの削除成功後に削除する。
 
 ### 監視と管理
 
@@ -371,13 +373,13 @@ base qcow2のvm/desktop.qcow2は共有の読取専用扱いとする。動的VM�
 
 ## フロントエンド
 
-Next.jsのApp Routerを使う。主要パネルは次の通りとする。InstructionInputの指示とVM作り直し許可、StatusPanelの状態とサブタスク進捗、ConnectionPanelのbackendとVNCとVMの接続状態で旧下部状態表示を右パネルに組み込んだもの、ControlPanelのタスク操作、VMControlsのVM作り直し、TaskHistoryの履歴と削除で表示は日付と題名に加え決定利用件数、LogPanel、VmTabsの環境切替と追加と削除で追加はVMとコンテナとAndroidの3種、削除は2段階確認、VncViewerのnoVNC埋め込みで切断時は自動再接続のみとし操作ボタンは持たない。Android-x86もVNCのためそのまま見られるとする。
+Next.jsのApp Routerを使う。InstructionInputで指示と再起動許可を受け、StatusPanelとLogPanelで進捗を示す。VmTabsで環境を選ぶ。VncViewerは選択した稼働中の環境だけに接続し、切断時にRFBを作り直す。入力の送信失敗時は指示を残し、日本語変換中のEnterでは送信しない。
 
-その他仕様としてデバッグ系はCollapsibleSectionで折り畳む。側面幅は引張りで変えられ、useSidebarWidthで280から720pxとし、localStorage保存とする。WebSocketの/wsは自動再接続し、stateとactionとerrorとcompleteを送る。stateとactionとerrorとcompleteにsession_idとvm_idを含み、表示は選択中のVMで選別する。初回のno_sessionとpongは除く。リロード対応はGET /tasks/currentとGET /tasks/IDで記録と進捗を戻す。記録と状態と進捗はVM単位で保ち、VM間で共有しない。
+デバッグ系はCollapsibleSectionで折り畳む。側面幅は280から720pxで変更し、localStorageに保存する。状態・ログ・進捗はVM単位で保つ。WebSocketはpingで疎通を確認し、再接続時にsnapshotで状態を同期する。履歴の操作記録はGET /tasks/{id}で取得する。
 
 ## 安全性
 
-安全方針の基準はdocs/safety.mdとする。本節は実装面の要点のみ記す。隔離はVMとコンテナで行い、ホスト非共有でNAT外向きのみとする。操作は隔離環境の外に出さない。段階上限は1タスク200動作で打ち切る。同じVMへの後発タスクは先行タスクを止める。同一VMへの同時実行は避ける設計とし、別VMなら並列できる。エージェント判断のVM作り直しは事前許可制とし、allow_vm_restartが真の場合のみ行う。未許可の要求は却下して別手段へ誘導する。全動作と判断理由とトークン使用量を保存し、履歴から監査できる。未実装はアクションレート制限と危険操作のホワイトリストとする。画面対策とUI停止操作はsafety.mdに記す。
+安全性と未実装の対策は[safety.md](safety.md)にまとめる。バックエンドはDockerソケットを使うため、バックエンド侵害時までホストの隔離を保証する構成ではない。認証を備えた外部公開は未対応とする。
 
 ## 制限と今後
 

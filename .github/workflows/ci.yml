@@ -92,10 +92,25 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  desktop:
+    name: Desktop (real Firefox and VNC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: docker build -t ai-desktop-agent-desktop-smoke desktop
+      - run: uv run pytest -m desktop_integration tests/integration/
+        env:
+          RUN_DESKTOP_SMOKE: "1"
+
   # 全ジョブが通ったことの確認（branch protection用）
   all-checks:
     name: All checks passed
-    needs: [lint, format, test, frontend]
+    needs: [lint, format, test, frontend, desktop]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -104,7 +119,8 @@ jobs:
           if [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.frontend.result }}" != "success" ]]; then
+             [[ "${{ needs.frontend.result }}" != "success" ]] || \
+             [[ "${{ needs.desktop.result }}" != "success" ]]; then
             echo "Some checks failed"
             exit 1
           fi

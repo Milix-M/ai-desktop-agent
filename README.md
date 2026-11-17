@@ -1,160 +1,91 @@
 # AI Desktop Agent
 
-自然言語の指示で仮想マシンのGUIをAIが操作する。ブラウザから指示を出し、操作の様子をリアルタイムで見ることができる。
+自然言語の指示で、VMやコンテナ内のデスクトップをAIが操作する。ブラウザで画面を見ながら、指示・一時停止・停止・履歴の確認ができる。
 
-## 構成
+## 起動する
 
-```mermaid
-flowchart LR
-    user["ユーザー<br/>(ブラウザ)"]
-    subgraph host["Docker ホスト"]
-        direction LR
-        fe["frontend<br/>Next.js :3000"]
-        be["backend<br/>FastAPI :8081"]
-        wsd["websockify-desktop<br/>VNC→WS :6081<br/>(container限定)"]
-        desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (KVMなし時)"]
-        ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
-        vm["vm<br/>QEMU/KVM :5900 (KVMあり時)<br/>KDE / 4vCPU・4GB"]
-        and["android<br/>Android-x86 :5590<br/>(kvm限定・手動起動、VNC操作)"]
-        vm2["vm-id / desk-id / and-id<br/>動的払い出し :5910+/:6090+"]
-        data["data/<br/>tasks/*.json<br/>vms.json"]
-        docker["Docker<br/>デーモン"]
-    end
-    user -->|指示・視聴<br/>HTTP :3000| fe
-    fe -->|REST / WS<br/>:8081| be
-    user -->|画面配信 WS<br/>:6081（KVMなし時）| wsd
-    user -->|画面配信 WS<br/>:6080（KVMあり時）| ws
-    wsd -->|VNC中継<br/>desktop:5900| desk
-    ws -->|VNC中継<br/>vm:5900| vm
-    be -->|VNC操作（KVMなし時）<br/>desktop:5900| desk
-    be -->|VNC操作（KVMあり時）<br/>vm:5900| vm
-    be -->|VNC操作<br/>android:5900| and
-    be -->|履歴保存<br/>data/tasks/*.json| data
-    be -->|VM管理<br/>Docker socket| docker
-    docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>QEMU系はKVM必須| vm2
-```
+Docker EngineとDocker Compose、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
 
-指示を受けると、エージェントは画面を取得してマルチモーダルLLMで判断し、マウスとキーボードを動かす。画面はnoVNCビューアで確認できる。
-
-構成はDocker Composeで完結する。初期起動の作業環境は1つに絞る。KVMがある場合はQEMU VMのvmだけ、ない場合は軽量デスクトップのdesktopだけを起動する。図の基準はdocs/architecture.md内のMermaidとする。画像ファイルは管理しない。
-
-| 役割 | 中身 | 公開ポート |
-|---|---|---|
-| frontend | Next.js。チャットUIとnoVNCビューア | 3000 |
-| backend | FastAPI。指示受付とエージェント実行 | 8081 |
-| desktop | XfceとTigerVNC。KVMなし時の作業環境。QEMUは不要 | 5901 |
-| websockify-desktop | desktop用のVNCからWebSocketへの中継 | 6081 |
-| vm | QEMUとKVM。KVMあり時の作業環境。KDE | 5900 |
-| websockify | vm用のVNCからWebSocketへの中継 | 6080 |
-| android | Android-x86とQEMU。手動起動。VNC操作は通常VMと同じ | 5590 |
-| websockify-android | android用のVNCからWebSocketへの中継。手動起動 | 6070 |
-
-ブラウザはlocalhost:3000を開く。frontendからbackendへの通信は:8081、backendから作業環境への通信はDocker内部ネットワークを使う。画面配信はKVMありで:6080、なしで:6081を使う。
-
-## 起動手順
+KVMがあるホストでは、先に `sudo ./vm/build-vm-image.sh` でゲストを用意する。`vm/desktop.qcow2`、`vm/vmlinuz`、`vm/initrd.img`、`vm/cmdline.txt` が必要になる。このスクリプトはホストにパッケージを導入し、ゲストイメージを作成する。
 
 ```bash
-cp .env.example .env   # APIキーを設定する。KVMの指定は不要で自動判定する
+cp .env.example .env
+# .envにLLM_PROVIDERと対応するAPIキーを設定する
 ./scripts/up.sh
 ```
 
-操作UIはhttp://localhost:3000、backendはhttp://localhost:8081で動く。生存確認は/healthを開く。3000番が競合する場合はdocker-compose.override.ymlでずらす。
+[http://localhost:3000](http://localhost:3000) を開く。KVMがある場合はQEMU VM、ない場合はXfceのコンテナが起動する。Androidは初期起動に含まない。
 
-| 条件 | 起動するもの | backendの接続先 |
-|---|---|---|
-| KVMあり | vmとwebsockifyとbackendとfrontend | vm:5900。画面配信は:6080 |
-| KVMなし | desktopとwebsockify-desktopとbackendとfrontend | desktop:5900。画面配信は:6081 |
+| 接続先 | ポート |
+| --- | --- |
+| 操作画面 | 3000 |
+| API・WebSocket | 8081 |
+| 画面配信 | コンテナは6081、QEMUは6080 |
+| VNC | コンテナは5901、QEMUは5900 |
 
-androidは初期起動に含まない。使う場合は手動で起動する。
+公開ポートはホストのループバックに限定している。別ホストや別ポートからの接続は、Originの許可設定も必要になる。
 
-```bash
-docker compose --profile kvm up -d android websockify-android
-```
+## 指示を出す
 
-起動対象外のサービスは停止状態で残る。削除はしない。backendの接続先はup.shがVNC_HOSTで切り替える。composeの既定値はdesktopとする。
+環境のタブを選び、指示を入力して［実行］を選ぶ。Enterで送信、Shift+Enterで改行する。日本語変換中のEnterでは送信しない。
 
-## 作業環境の要件
+同じ環境への後発タスクは先行タスクを停止する。別の環境では並列実行できる。1タスクは回復操作を含めて200アクションまでで、エラー回復にも再試行上限がある。
 
-KVMの切替はUSE_KVMが未設定ならautoとして/dev/kvmの有無で決める。up.shはKVMありで--profile kvm付きのvmのみ、なしで--profile container付きのdesktopのみを起動する。
+［VM再起動を許可する］を選ぶと、AIの判断で環境を再起動できる。再起動はディスクを初期化しない。VNCと状態通知は切断後に再接続し、各環境の状態を同期する。
 
-VMの作り直しと停止と起動は、操作UIのサイドバーにあるVM管理から行う。作り直しはゲストOSごと起動し直す。実行中タスクは止まる。VMタブの停止と起動ボタンは固定と動的のどちらにも使える。停止時は上のタスクを止め、中継も連動する。backendは/var/run/docker.sock経由でDockerを操作する。APIを直接呼ぶ場合はPOST /vm/restart、GET /vm/status、POST /vms/{id}/stop、POST /vms/{id}/startを使う。
+タブの停止・起動は固定環境と追加した環境の両方に使える。動的環境を削除すると、その環境のディスクも削除する。履歴の削除は環境のディスクを消さない。
 
-## LLM
+## LLMを選ぶ
 
-特定の提供元に依存しない。LLMプロバイダ抽象化層を設け、複数のAPIに対応する。LLM_PROVIDERとLLM_MODELと各種APIキーで切り替える。
+`.env` の `LLM_PROVIDER`、`LLM_MODEL`、対応するキーで切り替える。モデルは画像入力に対応するものを選ぶ。
 
-| 提供元 | モデル例 |
-|---|---|
-| Anthropic | Claude |
-| OpenAI | GPT-4o、GPT-4.1 |
-| Google | Gemini |
-| Ollama | Llama、Qwenなど |
-| OpenAI互換 | 任意 |
-| OpenCode Zen | DeepSeekやGPTやClaudeやGeminiなど |
-| OpenCode Go | 月額制のopenモデル群 |
+| LLM_PROVIDER | キー |
+| --- | --- |
+| `openai` | `OPENAI_API_KEY` |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `opencode` | `OPENCODE_API_KEY` |
+| `opencode-go` | `OPENCODE_GO_API_KEY` |
+| `ollama` | 不要 |
 
-判断の仕組みはdocs/architecture.mdを参照する。
+Ollamaの既定接続先は `http://localhost:11434/v1` で、バックエンドコンテナ内のlocalhostを指す。ホスト上のOllamaへつなぐ設定は別途必要になる。
 
-## プロジェクト構成
+## 履歴を保存する
 
-```text
-ai-desktop-agent/
-├── docker-compose.yml       # container限定のdesktop系とkvm限定のvm系。初期起動は作業環境1つのみ
-├── Dockerfile               # backendコンテナ定義
-├── scripts/up.sh            # KVM自動判定で起動する。KVMありはvmのみ、なしはdesktopのみ
-├── desktop/                 # KVMなし時の作業環境。XfceとTigerVNCとFirefoxとLibreOffice
-├── docs/architecture.md     # エージェント詳細設計。API一覧を含む
-├── docs/safety.md           # 安全方針
-├── src/ai_desktop_agent/
-│   ├── server/app.py        # FastAPIアプリとRESTとWS
-│   ├── server/session.py    # タスク実行セッション
-│   ├── server/store.py      # タスク履歴の保存。data/tasks配下
-│   ├── server/kvm.py        # KVM利用可否判定とVM起動制限
-│   ├── server/vm_control.py # VMコンテナ管理
-│   ├── server/vm_pool.py    # 動的VMとdesktop検出。既定はdesktop優先
-│   ├── agent/loop.py        # 状態機械の遷移管理
-│   ├── agent/state.py       # GoalとSubtaskと履歴の定義
-│   ├── agent/llm/           # プロバイダ生成とOpenAI互換実装とテスト用モック
-│   ├── agent/decision/      # 決定モデル。既定無効でDECISION_PROVIDER切替
-│   ├── vm/vnc_client.py     # VNC接続と制御
-│   ├── vm/screenshot.py     # 画面取得値オブジェクト
-│   ├── vm/overlay.py        # 座標グリッド重畳と領域ズーム
-│   └── actions/             # アクション定義と実行エンジン
-├── vm/                      # QEMUとKVMコンテナ。ゲストOSイメージ構築を含む
-├── frontend/                # Next.jsアプリ。指示入力とログと状態とVM管理とnoVNC視聴
-├── websockify/              # VNCからWebSocketへの中継コンテキスト
-└── data/tasks/              # タスク履歴の保存先。git管理外
-```
+タスクと操作記録は `data/tasks/`、追加環境の情報は `data/vms.json` に保存する。バックエンド再起動時に残っていた実行中タスクは中断扱いになる。保存先のバックアップには入力内容が含まれるため、取り扱いに注意する。
 
-## 開発
+VNC経由の文字入力はASCIIに限る。日本語の指示を理解しても、アプリ内に日本語の本文を入力する経路は未対応となる。
+
+## 開発時に確認する
 
 ```bash
-uv run pytest -q          # backendテスト
-uv run ruff check src tests
-cd frontend && npm test   # frontendテスト
+uv sync --frozen
+uv run pytest -q
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+cd frontend
+npm ci
+npm test
+npm run lint
+npm run typecheck
+npm run build
 ```
 
-frontendはNext.jsのApp Routerを使う。チャットUIとnoVNC埋め込みビューアとWebSocket接続とVM管理パネルを持つ。backendはFastAPIとWebSocketを使う。指示受付とエージェント制御とタスク履歴の保存を行う。履歴はdata/tasks/にJSON保存し、GET /tasksで取得する。再起動時は中断扱いにする。
+実デスクトップの確認はリポジトリのルートで実行する。APIキーは使わず、Firefoxの描画とVNC入力後のファイル内容を検査する。LLMの判断精度を測るテストではない。
 
-エージェントは単純な繰り返しでは安定しない。このため多段階パイプラインを使う。詳細はdocs/architecture.mdを参照する。
+```bash
+docker build -t ai-desktop-agent-desktop-smoke desktop
+RUN_DESKTOP_SMOKE=1 uv run pytest -m desktop_integration tests/integration/
+```
 
-## 安全性
+CIでも実デスクトップを検査する。通常の単体テストではこの検査をスキップする。
 
-安全方針はdocs/safety.mdに定める。隔離実行と回数上限、事前許可、操作記録を基本とする。
+## 詳細
 
-## 資料
+- [構成とAPI](docs/architecture.md)
+- [安全性と利用範囲](docs/safety.md)
+- [本番利用に向けた確認事項](docs/production-readiness.md)
+- [Androidの準備](android/README.md)
+- [決定モデルの評価](docs/research/clef.md)
 
-- 詳細設計はdocs/architecture.mdを参照する。API一覧を含む
-- 安全方針はdocs/safety.mdを参照する
-- 決定モデルの検討はdocs/research/clef.mdを参照する
-- Android実行環境の手順はandroid/README.mdを参照する
-
-## ロードマップ
-
-- 定型タスクのテンプレート機能
-- 同時監視グリッド。現状はタブ切替と単一ビューアのみ
-- 決定モデルの有効化と評価。実装済みで既定無効のため、評価後に回復戦略と達成検証を有効化する
-
-## ライセンス
-
-MIT
+ライセンスはMIT。
