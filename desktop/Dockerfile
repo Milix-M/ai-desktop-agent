@@ -8,7 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Ubuntu's firefox package is a Snap launcher, which cannot run in this container.
 # https://support.mozilla.org/en-US/kb/install-firefox-linux
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
         -o /etc/apt/keyrings/packages.mozilla.org.asc \

@@ -2,7 +2,9 @@
 # qcow2 は事前ビルドし、各ディスクから対応するカーネルとinitrdを取得する。
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     qemu-system-x86 \
     qemu-utils \
     e2fsprogs \

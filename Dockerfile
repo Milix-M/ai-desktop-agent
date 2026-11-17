@@ -3,7 +3,9 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Android操作用（adb）
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     android-tools-adb \
     && rm -rf /var/lib/apt/lists/*
 
