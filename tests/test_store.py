@@ -168,7 +168,7 @@ class TestHistoryEndpoints:
             resp = await client.get("/tasks/does-not-exist")
             assert resp.status_code == 404
 
-    def test_snapshot_action_serialization(self):
+    async def test_snapshot_action_serialization(self):
         session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())
         session.loop.start(Goal(description="g"))
         session.loop.understanding_done()

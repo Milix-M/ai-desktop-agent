@@ -6,7 +6,7 @@
 
 Docker EngineとDocker Compose、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
 
-KVMがあるホストでは、先に `sudo ./vm/build-vm-image.sh` でゲストを用意する。`vm/desktop.qcow2`、`vm/vmlinuz`、`vm/initrd.img`、`vm/cmdline.txt` が必要になる。このスクリプトはホストにパッケージを導入し、ゲストイメージを作成する。
+QEMU VMを使う場合は、x86_64ホストの `/dev/kvm` とゲストファイルが必要になる。先に `sudo ./vm/build-vm-image.sh` を実行する。このスクリプトはホストにパッケージを導入し、`vm/desktop.qcow2`、`vm/vmlinuz`、`vm/initrd.img`、`vm/cmdline.txt` を作成する。
 
 ```bash
 cp .env.example .env
@@ -14,7 +14,7 @@ cp .env.example .env
 ./scripts/up.sh
 ```
 
-[http://localhost:3000](http://localhost:3000) を開く。KVMがある場合はQEMU VM、ない場合はXfceのコンテナが起動する。Androidは初期起動に含まない。
+[http://localhost:3000](http://localhost:3000) を開く。KVMとゲストファイルが揃う場合はQEMU VM、それ以外はXfceのコンテナが起動する。`.env` の `USE_KVM=false` でコンテナを選べる。`true` で条件が不足する場合は起動前に止まる。Androidは初期起動に含まない。
 
 | 接続先 | ポート |
 | --- | --- |
@@ -52,7 +52,9 @@ Ollamaの既定接続先は `http://localhost:11434/v1` で、バックエンド
 
 ## 履歴を保存する
 
-タスクと操作記録は `data/tasks/`、追加環境の情報は `data/vms.json` に保存する。バックエンド再起動時に残っていた実行中タスクは中断扱いになる。保存先のバックアップには入力内容が含まれるため、取り扱いに注意する。
+タスクと操作記録は `data/tasks/`、追加環境の情報は `data/vms.json` に保存する。バックエンド再起動時に残っていた実行中タスクは中断扱いになる。保存先に書き込めなければ起動・タスク投入を止め、実行中の保存失敗でも操作を打ち切る。空き容量とアクセス権を確認する。
+
+固定QEMU VMの作業は `vm/instances/default.qcow2`、動的VMは `vm/overlays/` に保存する。`vm/desktop.qcow2` は読み取り専用のテンプレートとなる。履歴とディスクのバックアップには入力内容が含まれるため、取り扱いに注意する。
 
 VNC経由の文字入力はASCIIに限る。日本語の指示を理解しても、アプリ内に日本語の本文を入力する経路は未対応となる。
 

@@ -35,6 +35,7 @@ from ai_desktop_agent.agent.llm.types import (
 )
 from ai_desktop_agent.agent.loop import AgentLoop
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
+from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.base import DisplayBackend
@@ -303,30 +304,29 @@ class TaskSession:
 
         except asyncio.CancelledError:
             # stop() による中断：状態を FAILED に倒して保存（沈黙終了を防ぐ）
-            import contextlib
-
             logger.warning("タスクがキャンセルされました")
-            with contextlib.suppress(ValueError):
-                self.loop.fail_now()
-            await self._emit_state_change()
-            self._persist(success=False)
-            await self._emit_complete(False)
+            await self._finalize_failure()
             raise
         except Exception as e:
             logger.exception("タスク実行中にエラー: %s", e)
             await self._emit_error(str(e))
             # 実行中状態のまま残さないよう FAILED に倒す
-            import contextlib
-
-            with contextlib.suppress(ValueError):
-                self.loop.fail_now()
-            await self._emit_state_change()
-            self._persist(success=False)
-            await self._emit_complete(False)
+            await self._finalize_failure()
             return False
 
         finally:
             await self.aclose()
+
+    async def _finalize_failure(self) -> None:
+        with contextlib.suppress(ValueError):
+            self.loop.fail_now()
+        try:
+            self._persist(success=False)
+        except StorageError:
+            logger.exception("失敗状態の保存もできませんでした")
+        # A failed disk must not prevent the UI from receiving the terminal state.
+        await self._notify(self._on_state_change, self.loop.state, self.loop.context)
+        await self._emit_complete(False)
 
     async def aclose(self) -> None:
         """Release the display and provider connections on every exit path."""
@@ -407,13 +407,15 @@ class TaskSession:
         )
 
     def _persist(self, success: bool | None = None) -> None:
-        """store があれば現在の状態を保存する（失敗しても継続）。"""
+        """Persist before proceeding to another operation; a failed audit write stops the task."""
         if self._store is None:
             return
         try:
             self._store.save(self.snapshot(success=success))
-        except Exception:
-            logger.exception("タスク記録の保存に失敗")
+        except Exception as error:
+            raise StorageError(
+                "タスク履歴を保存できません。保存先の空き容量とアクセス権を確認してください"
+            ) from error
 
     # ── EXECUTING フェーズ ─────────────────────
 
@@ -1414,7 +1416,11 @@ class TaskSession:
 
     def _notify_control_change(self) -> None:
         # 制御は同期APIを保ち、待機中の実行ループに依存せず通知する。
-        self._persist()
+        try:
+            self._persist()
+        except StorageError:
+            self.stop()
+            raise
         task = asyncio.create_task(self._emit_state_change())
         self._control_notifications.add(task)
         task.add_done_callback(self._control_notification_done)

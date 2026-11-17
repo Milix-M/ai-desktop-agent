@@ -63,7 +63,7 @@ flowchart LR
 | android | Android-x86とQEMU | 5590 | Android端末でkvm限定の手動起動。VNC操作は通常VMと同じ |
 | websockify-android | VNCからWSへの中継 | 6070 | android向け画面配信でkvm限定の手動起動 |
 
-動的環境は5910番台のVNCと6090番台のWSを使い、台数分コンテナが増える。vmとwebsockifyとandroidとwebsockify-androidはkvmプロファイル配下にある。このためKVMあり時の./scripts/up.shかdocker compose --profile kvm upでのみ起動する。desktopとwebsockify-desktopはcontainerプロファイル配下にある。このためKVMなし時の./scripts/up.shかdocker compose --profile container upでのみ起動する。初期起動の作業環境は1つに絞る。up.shはKVMありでvm系のみ、なしでdesktop系のみを起動する。androidは初期起動に含まない。詳細はVM操作の節を参照する。
+動的環境は5910番台のVNCと6090番台のWSを使い、台数分コンテナが増える。QEMU系はkvmプロファイル、desktop系はcontainerプロファイルに属する。up.shはx86_64、/dev/kvm、ゲストファイルが揃う場合にvm系、それ以外はdesktop系を起動する。初期起動の作業環境は1つで、androidは含まない。USE_KVM=falseはdesktopを選び、trueで条件が不足すれば起動前に止まる。
 
 | 送信元 | 送信先 | 経路 |
 |---|---|---|
@@ -77,7 +77,7 @@ flowchart LR
 | websockify-android | AndroidのVNC | 同上 |
 | backend | Docker | /var/run/docker.sock。VM作成と再起動用 |
 
-代表的な環境変数はLLM_PROVIDERとLLM_MODELと各種APIキー、VNC_HOSTとVNC_PORT、USE_KVMの既定値はautoで未設定時は/dev/kvmの有無で自動切替、ALLOW_TCG_VMの既定値はfalse、VM_MEMORYの既定値は4096とVM_CPUSの既定値は4、DATA_DIRの既定値は./dataとする。VNC_HOSTのdesktop既定はcomposeのみとし、backend単体既定はlocalhostとする。VM_MEMORYとVM_CPUSの固定値はcomposeで定め、動的払い出しのみ起動時引数で変えられる。
+LLM_PROVIDER、LLM_MODEL、各種APIキーでLLMを設定する。USE_KVMの既定値はauto、ALLOW_TCG_VMはfalse、VM_MEMORYは4096、VM_CPUSは4、DATA_DIRは./dataとなる。up.shはComposeが解決したUSE_KVMを読み、接続先と判定結果をバックエンドにも渡す。VNC_HOSTの既定はComposeではdesktop、バックエンド単体ではlocalhostとなる。VM_MEMORYとVM_CPUSの固定値はComposeで定め、動的払い出しでは環境変数を使う。
 
 ## バックエンド
 
@@ -109,11 +109,13 @@ src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
 
 ### 永続化
 
-data/tasks/タスクID.jsonに1タスク1ファイルで保存する。状態遷移とアクション実行のたびに更新する。server/store.pyが担う。TaskRecordは指示と状態と成否、操作履歴と判断理由と確信度、サブタスクと進捗index、vm_id、Goal、トークン使用量を持つ。トークン使用量はpromptとcompletionと呼出回数に加え、decision_callsとdecision_escalationsを持つ。起動時は実行中だった記録をinterruptedに変える。mark_interruptedで行う。保存先が書けない環境では一時ディレクトリに退避して動作を続ける。
+data/tasks/タスクID.jsonに1タスク1ファイルで保存し、状態遷移とアクション実行のたびに更新する。TaskRecordは指示、状態、成否、操作履歴、判断理由、確信度、サブタスク、進捗index、vm_id、Goal、トークンと呼出回数を持つ。決定モデルのdecision_callsとdecision_escalationsも記録する。起動時は全件を確認し、実行中だった記録をinterruptedに変える。
+
+server/persistence.pyが一時ファイルのfsync、os.replace、親ディレクトリのfsyncで保存する。新規ファイルは0600とする。保存先に書き込めなければ起動・タスク投入を止め、実行中の保存失敗でも以後の操作を打ち切る。保存できない場合も画面には失敗を通知する。
 
 ### KVM判定
 
-server/kvm.pyが判定基準を持つ。判定順序はUSE_KVM明示値、backendの/dev/kvm、Docker上のvmサービス存在の順とする。KVMなし環境のVM作成と再起動はKvmUnavailableErrorで拒否する。APIは409を返し、ALLOW_TCG_VM=trueでのみ明示許可する。
+server/kvm.pyはUSE_KVM明示値、バックエンドの/dev/kvm、Dockerの順に判定する。Dockerでは同じComposeプロジェクトのvmに/dev/kvmが割り当てられていることを確認する。停止後の起動にも使うため稼働状態は問わず、ホストのデバイス消失はDockerの起動エラーとなる。KVMなしでのQEMU系の作成・起動・再起動はAPI 409で拒否し、ALLOW_TCG_VM=trueでのみTCGを許可する。
 
 ### VM制御
 
@@ -121,7 +123,11 @@ server/vm_control.pyのVmControllerが既定VMの状態取得と再起動を担�
 
 ### VMプール
 
-server/vm_pool.pyのVmPoolが環境の一覧と作成と再起動と削除、compose管理のdesktop検出を担う。desktop検出はidがdesktop、managedがFalse、既定ポートが5901と6081とする。default_vmは稼働中のdesktopを順序によらず優先する。なければ稼働中の先頭を返す。POST /vmsはkindで種別を選ぶ。qemuが既定でcontainerとandroidも選べる。qemu作成時はbase qcow2のフルコピーを払い出す。backing参照はロック競合のため使わない。VNCとWSポートは5910番台と6090番台から割り当て、割当結果をdata/vms.jsonに保存する。動的AndroidのADB用にホスト側5570番台も払い出す。container作成時は軽量デスクトップと中継の2コンテナを払い出す。KVM不要でどこでも作れる。動的VMのidはvm-16進数、動的コンテナはdesk-16進数、動的Androidはand-16進数とする。上限は8台でMAX_VMSとし、両種別の合計とする。動的QEMU VMは/dev/kvmを常時要求する。一覧の種別はkindでqemuとcontainerとandroidを返す。固定のvmとdesktopとandroidもDELETE /vmsで削除できる。本体と中継を止めて消す。ホストパス解決はbackend自身の/app/dataマウント元から逆算する。_host_repo_dirで行う。
+server/vm_pool.pyのVmPoolが環境の一覧・作成・起動・停止・再起動・削除を担う。固定desktopはid=desktop、managed=False、既定ポート5901と6081で検出する。default_vmは稼働中のdesktopを優先し、なければ稼働中の先頭を返す。
+
+POST /vmsのkindはqemuが既定で、containerとandroidも選べる。各環境は本体と中継の2コンテナからなる。QEMU系は通常KVMを必要とし、TCGの明示許可時は/dev/kvmを要求しない。containerはKVM不要となる。動的IDの接頭辞はvm、desk、andで、その後に16進数を付ける。動的環境は全種別の合計で8台までとする。
+
+VNCとWSは5910番台と6090番台、AndroidのADBは5570番台から割り当て、data/vms.jsonに保存する。kindは一覧にも返す。固定vm・desktop・androidもDELETE /vmsで本体と中継を削除できる。ホストパスはバックエンド自身の/app/dataマウント元から逆算する。
 
 ## 状態機械と実行フロー
 
@@ -158,6 +164,7 @@ stateDiagram-v2
     PAUSED --> IDLE : 中断
     PAUSED --> FAILED : 停止
     COMPLETED --> IDLE : reset
+    COMPLETED --> FAILED : 完了記録の保存失敗
     FAILED --> IDLE : reset
 
     note right of VERIFYING
@@ -293,13 +300,13 @@ VNC実装はvm/vnc_client.pyに置き、vncdotoolを包む。既知の注意点�
 
 desktopはdesktop配下に置き、KVMなし時の作業環境とする。XfceとTigerVNCの軽量コンテナとし、QEMUは不要とする。containerプロファイル配下に置く。このためKVMなし時の./scripts/up.shかdocker compose --profile container upでのみ起動する。VNCはdesktop:5900でホスト公開5901、画面配信はwebsockify-desktopの:6081とする。解像度は1280x800でVNC_GEOMETRYとし、認証なしで隔離網前提とする。FirefoxとLibreOfficeのWriterとCalc、xdotool、wmctrlを同梱する。
 
-vmはvm配下に置き、KVMあり時の作業環境とする。QEMUとKVMの重い隔離デスクトップでKDEとする。kvmプロファイルでのみ起動する。./scripts/up.shが/dev/kvmの有無で自動判定する。初期起動ではvmのみを起動し、desktopとandroidは起動しない。1つに絞って軽くするためである。backendの接続先はup.shが環境に合わせて切り替える。KVMありはvm、なしはdesktopとし、compose既定はdesktopとする。VmPool.default_vmはdesktop稼働時にはdesktopを優先する。
+vmはvm配下に置き、QEMUとKVMでKDEを動かす。kvmプロファイルに属し、起動条件と選択は構成の節に従う。up.shがバックエンドの接続先も切り替える。VmPool.default_vmはdesktop稼働時にはdesktopを優先する。
 
 androidはAndroid-x86をQEMUで動かし、動的払い出しとandroidサービスで提供する。QEMUとKVM上でAndroid-x86のISOをLive起動する。VNC操作は通常VMと同一のため、VNCClientをそのまま使う。タップはクリック、スワイプはドラッグに対応付ける。KVM必須でkvmプロファイル配下とする。ISOはandroid/android-x86_64.isoに配置する。容量のためgit管理外とし、手順はandroid/README.mdに置く。休止しない設定は初回配備で入れる。AndroidProvisionerとandroid_adbで行う。内容は休止最大と起床状態維持ONと画面保護無効とする。ADBのshell命令のみとし、画面施錠の無効化命令は含まない。VNCタップ列は使わない。seed同梱なしで空dataから設定し、定期的なキー送信はしない。到達不能時は警告記録に留め、次回に再試行する。QEMUのADB転送のhostfwdは既定ONとする。詳細はandroid/README.mdに置く。
 
 ### KVM自動切替と起動制限
 
-USE_KVM未設定時はautoとして/dev/kvmの有無で自動切替する。.env指定は不要とする。明示値のtrueは必須、falseはTCG扱いとする。KVMがない環境のVM作成と再起動は制限する。TCGは実用速度が出ないためである。制限は3層で行う。backendのKvmUnavailableErrorでAPI 409、vm/entrypoint.shの起動拒否でALLOW_TCG_VM=trueでのみ明示許可、composeでvmとwebsockifyをkvmプロファイル配下に配置とする。エージェント判断のvm_restartが制限環境で要求された場合は失敗として_pending_errorに渡し、別手段での継続を促す。
+USE_KVMは未設定時にautoとする。起動前にゲスト4ファイルを確認し、Composeのマウントも存在しないファイルを自動作成しない。QEMUのentrypointも必要なファイルを確認する。TCGはALLOW_TCG_VM=trueでのみ許可する。エージェントのvm_restartが制限環境で要求された場合は失敗として_pending_errorに渡し、別手段での継続を促す。
 
 動的VMとコンテナの全体手順は次の通りとする。VmPoolのserver/vm_pool.pyがDocker経由で本体コンテナとwebsockifyコンテナを対で払い出す。QEMU VMはKVM必須、コンテナは不要とする。
 
@@ -365,7 +372,9 @@ QEMU slirpは10.0.2.0/24、入口は.2、DNSは.3とする。過去のつまず�
 
 ### 保存方式
 
-動的VMはvm/desktop.qcow2のフルコピーを使う。固定VMは同じファイルを読み書きするため、稼働中の複製に整合性の課題が残る。読み取り専用のテンプレートと作業用ディスクの分離は[確認事項](production-readiness.md)で追跡する。動的ディスクはbackendの/vm/overlaysに共有マウントし、コンテナの削除成功後に削除する。
+vm/desktop.qcow2は読み取り専用テンプレートとする。固定VMは初回だけvm/instances/default.qcow2へ複製し、再起動で上書きしない。動的VMはvm/overlaysへ独立したコピーを作る。動的ディスクはバックエンドの/vm/overlaysにも共有マウントし、コンテナの削除成功後に削除する。固定VMの削除では専用ディスクを残す。
+
+data/vms.jsonはファイルロックで同時更新を保護し、原子的に保存する。破損した情報は上書きせずエラーを返す。作成前に割当情報を保存し、作成失敗時はその環境のコンテナとディスクの回収を試みる。
 
 ### 監視と管理
 
