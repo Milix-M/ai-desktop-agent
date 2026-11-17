@@ -6,6 +6,7 @@ vncdotool の ThreadedVNCClientProxy をラップして同期的に操作する�
 """
 
 import io
+import ipaddress
 import logging
 import threading
 import time
@@ -217,7 +218,15 @@ class VNCClient(DisplayBackend):
         self._cursor_x = self._cursor_y = 0
 
         # vncdotool: double-colon for explicit port (single colon = display number)
-        server = f"{host}::{port}"
+        server_host = host
+        if not host.startswith("["):
+            try:
+                ipaddress.IPv6Address(host)
+            except ipaddress.AddressValueError:
+                pass
+            else:
+                server_host = f"[{host}]"
+        server = f"{server_host}::{port}"
         logger.info("VNC接続中: %s", server)
 
         self._client = api.connect(

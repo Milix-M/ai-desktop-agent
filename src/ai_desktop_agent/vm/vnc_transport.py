@@ -1,5 +1,6 @@
 """Isolate blocking VNC calls and close their transport on timeout or cancellation."""
 
+import re
 import socket
 import threading
 import time
@@ -11,6 +12,25 @@ from twisted.internet.endpoints import HostnameEndpoint, UNIXClientEndpoint
 from vncdotool.api import ThreadedVNCClientProxy
 
 from ai_desktop_agent.vm.clipboard import ClipboardClient, ClipboardFactory
+
+
+class ContainerHostnameEndpoint(HostnameEndpoint):
+    """Allow Docker's ASCII DNS names while retaining Twisted's connection lifecycle."""
+
+    @staticmethod
+    def _hostAsBytesAndText(host: str | bytes) -> tuple[bool, bytes, str]:  # noqa: N802
+        # Twisted's IDNA parsing rejects underscores before its resolver sees them.
+        # Keep the exception narrow; Unicode and other inputs retain the upstream rules.
+        if isinstance(host, bytes):
+            try:
+                text = host.decode("ascii")
+            except UnicodeDecodeError:
+                return HostnameEndpoint._hostAsBytesAndText(host)
+        else:
+            text = host
+        if "_" in text and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", text):
+            return False, text.encode("ascii"), text
+        return HostnameEndpoint._hostAsBytesAndText(host)
 
 
 class ManagedVNCProtocol(ClipboardClient):
@@ -67,7 +87,7 @@ class ManagedVNCProxy(ThreadedVNCClientProxy):
                 return
             try:
                 if family in {socket.AF_UNSPEC, socket.AF_INET, socket.AF_INET6}:
-                    endpoint = HostnameEndpoint(reactor, host, port, timeout=self.timeout)
+                    endpoint = ContainerHostnameEndpoint(reactor, host, port, timeout=self.timeout)
                 elif family == getattr(socket, "AF_UNIX", None):
                     endpoint = UNIXClientEndpoint(reactor, host, timeout=self.timeout)
                 else:
@@ -112,7 +132,8 @@ class ManagedVNCProxy(ThreadedVNCClientProxy):
     def _close_transport(self, pending):
         with self._state_lock:
             connection, protocol = self._connection, self.protocol
-            if connection is not None and not connection.called:
+            # A fired DNS Deferred may still be paused on TCP connection attempts.
+            if connection is not None:
                 connection.cancel()
             if protocol is not None:
                 protocol.transport.abortConnection()
