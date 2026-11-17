@@ -38,8 +38,11 @@ from ai_desktop_agent.server.persistence import (  # noqa: E402
     atomic_json,
     metadata_lock,
 )
+from ai_desktop_agent.server.readiness import is_ready  # noqa: E402
 from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E402
 from ai_desktop_agent.server.vm_locks import (  # noqa: E402
+    environment_lock,
+    serialize_creation,
     serialize_environment,
 )
 from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes  # noqa: E402
@@ -305,7 +308,7 @@ class VmPool:
 
         compose管理の `desktop` が稼働していれば優先する。
         """
-        running = [vm for vm in self.list_vms() if vm.status == "running"]
+        running = [vm for vm in self.list_vms() if is_ready(vm.status, vm.health)]
         for vm in running:
             if vm.id == DESKTOP_SERVICE:
                 return vm
@@ -313,6 +316,7 @@ class VmPool:
 
     # ── 作成・削除 ──────────────────────────────────
 
+    @serialize_creation
     def create_vm(self, name: str | None = None, kind: str = KIND_QEMU) -> VmInfo:
         """新しい専用環境を作成する。公開ポートと中継は作らない。
 
@@ -365,7 +369,7 @@ class VmPool:
             allocation["home_volume"] = WorkspaceVolumes(
                 docker, self._project_name(docker)
             ).name_for(vm_id)
-        with self._creation(docker, vm_id, allocation):
+        with environment_lock(vm_id), self._creation(docker, vm_id, allocation):
             network = EnvironmentNetworks(docker, self._project_name(docker)).ensure(vm_id).name
             adb_port = 0
             if kind == KIND_ANDROID:
