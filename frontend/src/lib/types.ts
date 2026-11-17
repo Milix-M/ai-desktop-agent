@@ -103,6 +103,8 @@ export interface TaskHistoryItem {
   llm_calls?: number;
   decision_calls?: number;
   decision_escalations?: number;
+  stop_reason?: string | null;
+  error_message?: string;
 }
 
 export interface TaskAction {
@@ -118,6 +120,14 @@ export interface TaskAction {
 }
 
 export interface TaskDetail extends TaskHistoryItem {
+  execution_usage?: {
+    requests?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    estimated_cost_usd?: string | null;
+    usage_complete?: boolean;
+    elapsed_seconds?: number;
+  };
   actions: TaskAction[];
   subtasks: { id: string; description: string; expected_outcome: string }[];
   current_subtask_index: number;

@@ -112,6 +112,12 @@ GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とす�
 
 1タスクは1つのTaskSessionに対応し、_sessionsで管理する。_active_sessionは後方互換のための最新1件とする。vm_id省略時は稼働中のdesktopを優先する。WebSocketは接続時に全環境のsnapshotを送り、その後state・action・error・completeを送る。イベントにはsession_idとvm_id、状態更新にはrevisionも付ける。フロントは古いrevisionを適用しない。接続ごとの送信キューを使い、遅い閲覧者からタスクの実行を切り離す。
 
+### 実行制限
+
+agent/budget.pyが実行制限を管理する。起動時に環境変数を検証し、TaskSession.runでタスクごとのContextVarを設定する。モデルへのHTTP送信前と使用量の受信時、画面操作前に上限を確認する。再試行と決定モデルも同じ予算を使う。OpenAI SDKの自動再試行は無効にし、送信ごとに回数を数える。
+
+期限切れではディスプレイに停止を要求してからタスクを取り消し、実行中のスレッドを待って接続を解放する。上限の例外はLLMへの退避やエラー回復に変換しない。execution_limits・execution_usage・stop_reason・error_messageをTaskRecordに保存し、履歴の取得後も停止理由と使用量を表示する。推定費用は設定単価で算出し、請求額とは区別する。
+
 ### 永続化
 
 data/tasks/タスクID.jsonに1タスク1ファイルで保存し、状態遷移とアクション実行のたびに更新する。TaskRecordは指示、状態、成否、操作履歴、判断理由、確信度、サブタスク、進捗index、vm_id、Goal、トークンと呼出回数を持つ。決定モデルのdecision_callsとdecision_escalationsも記録する。起動時は全件を確認し、実行中だった記録をinterruptedに変える。

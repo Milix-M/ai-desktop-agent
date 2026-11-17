@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
+from ai_desktop_agent.agent.budget import ExecutionLimits
 from ai_desktop_agent.server.auth import (
     COOKIE_NAME,
     SESSION_SECONDS,
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import faulthandler
     import signal
 
+    ExecutionLimits.from_env()
     # 固着診断用：SIGUSR1 で全スレッドのスタックをdocker logsへ出す（プロセスは継続）。
     # seccompでptrace/py-spyが使えない環境向け。
     with contextlib.suppress(Exception):
@@ -311,6 +313,8 @@ class TaskSummary(BaseModel):
     llm_calls: int = 0
     decision_calls: int = 0
     decision_escalations: int = 0
+    stop_reason: str | None = None
+    error_message: str = ""
 
 
 class TaskDetail(TaskSummary):
@@ -319,6 +323,8 @@ class TaskDetail(TaskSummary):
     current_subtask_index: int = 0
     goal: dict = {}
     created_at: float = 0.0
+    execution_limits: dict = {}
+    execution_usage: dict = {}
 
 
 def _to_summary(d: dict) -> TaskSummary:
@@ -337,6 +343,8 @@ def _to_summary(d: dict) -> TaskSummary:
         llm_calls=d.get("llm_calls", 0),
         decision_calls=d.get("decision_calls", 0),
         decision_escalations=d.get("decision_escalations", 0),
+        stop_reason=d.get("stop_reason"),
+        error_message=d.get("error_message", ""),
     )
 
 
@@ -618,6 +626,8 @@ async def get_task(task_id: str) -> TaskDetail:
         current_subtask_index=d.get("current_subtask_index", 0),
         goal=d.get("goal", {}),
         created_at=d.get("created_at", 0.0),
+        execution_limits=d.get("execution_limits", {}),
+        execution_usage=d.get("execution_usage", {}),
     )
 
 

@@ -20,6 +20,7 @@ from dataclasses import replace
 
 from ai_desktop_agent.actions.executor import ActionExecutor
 from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.agent.budget import ExecutionLimits, TaskBudget, TaskLimitError
 from ai_desktop_agent.agent.decision.provider import (
     DecisionProvider,
     create_decision_provider_from_env,
@@ -128,7 +129,9 @@ class TaskSession:
         store: TaskStore | None = None,
         vm_id: str | None = None,
         decision: DecisionProvider | None | str = "auto",
+        limits: ExecutionLimits | None = None,
     ) -> None:
+        self._budget = TaskBudget(limits or ExecutionLimits.from_env())
         self.id = uuid.uuid4().hex[:12]
         self.loop = AgentLoop()
         self.llm = llm or create_llm_provider()
@@ -257,51 +260,13 @@ class TaskSession:
         self._instruction = instruction
         self.loop.start(goal)
         try:
-            await self._emit_state_change()
-            # Phase 1: UNDERSTANDING
-            understanding = await self.llm.understand_instruction(goal, platform=self._platform())
-            goal.intent = understanding.intent
-            goal.target_application = understanding.target_application
-            goal.constraints = understanding.constraints
-            self.loop.understanding_done()
-            await self._emit_state_change()
-
-            # Phase 2: PLANNING
-            decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
-            if not decomposition.subtasks:
-                self.loop.planning_failed()
-                await self._emit_error("タスクの分解に失敗しました")
-                await self._emit_state_change()
-                await self._emit_complete(False)
-                return False
-
-            self.loop.plan_ready(decomposition.subtasks)
-            await self._emit_state_change()
-
-            # Phase 3-5: EXECUTING → WAITING → VERIFYING (ループ)
-            # PAUSED 中もループに留まる（一時停止後に復帰できるように）
-            while self.loop.is_running or self.loop.state == AgentState.PAUSED:
-                if self.loop.state == AgentState.EXECUTING:
-                    await self._execute_phase()
-
-                elif self.loop.state == AgentState.VERIFYING:
-                    await self._verify_phase()
-
-                elif self.loop.state == AgentState.RECOVERING:
-                    await self._recover_phase()
-
-                elif self.loop.state == AgentState.PAUSED:
-                    await asyncio.sleep(0.5)
-                    continue
-
-                else:
-                    break
-
-            success = self.loop.state == AgentState.COMPLETED
-            self._persist(success=success)
-            await self._emit_complete(success)
-            return success
-
+            async with self._budget.activate(self._request_display_stop):
+                return await self._run_task(goal)
+        except TaskLimitError as error:
+            logger.warning("タスクの実行制限: %s", error)
+            await self._emit_error(str(error))
+            await self._finalize_failure()
+            return False
         except asyncio.CancelledError:
             # stop() による中断：状態を FAILED に倒して保存（沈黙終了を防ぐ）
             logger.warning("タスクがキャンセルされました")
@@ -316,6 +281,42 @@ class TaskSession:
 
         finally:
             await self.aclose()
+
+    async def _run_task(self, goal: Goal) -> bool:
+        await self._emit_state_change()
+        understanding = await self.llm.understand_instruction(goal, platform=self._platform())
+        goal.intent = understanding.intent
+        goal.target_application = understanding.target_application
+        goal.constraints = understanding.constraints
+        self.loop.understanding_done()
+        await self._emit_state_change()
+
+        decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
+        if not decomposition.subtasks:
+            self.loop.planning_failed()
+            await self._emit_error("タスクの分解に失敗しました")
+            await self._emit_state_change()
+            await self._emit_complete(False)
+            return False
+
+        self.loop.plan_ready(decomposition.subtasks)
+        await self._emit_state_change()
+        while self.loop.is_running or self.loop.state == AgentState.PAUSED:
+            if self.loop.state == AgentState.EXECUTING:
+                await self._execute_phase()
+            elif self.loop.state == AgentState.VERIFYING:
+                await self._verify_phase()
+            elif self.loop.state == AgentState.RECOVERING:
+                await self._recover_phase()
+            elif self.loop.state == AgentState.PAUSED:
+                await asyncio.sleep(0.5)
+            else:
+                break
+
+        success = self.loop.state == AgentState.COMPLETED
+        self._persist(success=success)
+        await self._emit_complete(success)
+        return success
 
     async def _finalize_failure(self) -> None:
         with contextlib.suppress(ValueError):
@@ -368,6 +369,10 @@ class TaskSession:
             llm_calls=int(getattr(self.llm, "call_count", 0) or 0),
             decision_calls=int(getattr(self, "decision_calls", 0) or 0),
             decision_escalations=int(getattr(self, "decision_escalations", 0) or 0),
+            execution_limits=self._budget.limits.to_dict(),
+            execution_usage=self._budget.snapshot(),
+            stop_reason=self._budget.stop_reason,
+            error_message=self._budget.error_message,
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
@@ -565,15 +570,8 @@ class TaskSession:
             )
         except Exception:
             self._last_before_raw = None
-        started = time.monotonic()
-        success = await self.executor.execute(action)
-        self.loop.record_action(
-            action,
-            success,
-            error=self.executor.last_error,
-            reasoning=decision.reasoning,
-            confidence=decision.confidence,
-            duration_ms=(time.monotonic() - started) * 1000,
+        success = await self._execute_recorded_action(
+            action, decision.reasoning, decision.confidence
         )
 
         # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
@@ -603,6 +601,34 @@ class TaskSession:
         while self.loop.state == AgentState.PAUSED:
             await asyncio.sleep(0.5)
 
+    async def _execute_recorded_action(
+        self, action: Action, reasoning: str, confidence: float = 1.0
+    ) -> bool:
+        self._budget.check()
+        started = time.monotonic()
+        try:
+            success = await self.executor.execute(action)
+        except asyncio.CancelledError:
+            # Cancellation drains any display worker first; preserve a possibly partial action.
+            self.loop.record_action(
+                action,
+                False,
+                error="操作中に中断しました。一部が実行されている可能性があります",
+                reasoning=reasoning,
+                confidence=confidence,
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+            raise
+        self.loop.record_action(
+            action,
+            success,
+            error=self.executor.last_error,
+            reasoning=reasoning,
+            confidence=confidence,
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
+        return success
+
     async def _execute_vm_restart(self, decision: ActionDecision) -> None:
         """VM_RESTART を処理する：許可制で再起動、後は回復フローへ。
 
@@ -612,6 +638,7 @@ class TaskSession:
         from ai_desktop_agent.server.vm_pool import VmPool
 
         await self._wait_if_paused()
+        self._budget.check()
         action = decision.action
         reason = (action.params or {}).get("reason", "")
 
@@ -633,12 +660,22 @@ class TaskSession:
             await self._emit_state_change()
             return
 
+        started = time.monotonic()
         try:
             pool = VmPool()
             info = await run_vm_call(pool.restart_vm, self.vm_id or "vm")
             logger.info("VM再起動を実行: %s (%s)", info.id, reason)
             await asyncio.sleep(RESTART_SETTLE_SECONDS)
             ok, error = True, ""
+        except asyncio.CancelledError:
+            self.loop.record_action(
+                action,
+                False,
+                error="再起動の処理中に中断しました。環境の状態を確認してください",
+                reasoning=decision.reasoning,
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+            raise
         except Exception as e:
             logger.exception("VM再起動に失敗")
             ok, error = False, f"VM再起動に失敗しました: {e}"
@@ -1030,6 +1067,8 @@ class TaskSession:
                             judged.prob,
                             judged.grade,
                         )
+                except TaskLimitError:
+                    raise
                 except Exception:
                     self.decision_escalations += 1
                     logger.exception("決定モデル判定に失敗、LLMに退避します")
@@ -1041,6 +1080,8 @@ class TaskSession:
                     expected_outcome=subtask.expected_outcome,
                     platform=self._platform(),
                 )
+        except TaskLimitError:
+            raise
         except Exception:
             logger.exception("サブタスク検証中にエラー")
             self.loop.verify_failed()
@@ -1173,6 +1214,8 @@ class TaskSession:
                         "回復方針の確信度が不足 (prob=%.2f) のためLLMに退避します",
                         judged.prob,
                     )
+            except TaskLimitError:
+                raise
             except Exception:
                 self.decision_escalations += 1
                 logger.exception("回復方針の決定モデル判定に失敗、LLMに退避します")
@@ -1253,15 +1296,7 @@ class TaskSession:
                 return False
             if action.action_type in (ActionType.REGION_SELECT, ActionType.SUBTASK_COMPLETE):
                 break
-            started = time.monotonic()
-            success = await self.executor.execute(action)
-            self.loop.record_action(
-                action,
-                success,
-                error=self.executor.last_error,
-                duration_ms=(time.monotonic() - started) * 1000,
-                reasoning=plan.reasoning,
-            )
+            success = await self._execute_recorded_action(action, plan.reasoning)
             await self._emit_action(action, success)
             if not success:
                 self._pending_error = ErrorContext(action, self.executor.last_error, retries + 1)
@@ -1324,6 +1359,7 @@ class TaskSession:
         ESC / Menu の1秒超ホールドが必要（公式doc準拠）のため、
         Android端末（vm_id が ``android`` / ``and-*``）では専用シーケンスを使う。
         """
+        self._budget.check()
         if not self.display.is_connected:
             raise RuntimeError("ディスプレイが接続されていません")
         screenshot = await run_display_call(self.display.capture_screen)
@@ -1432,10 +1468,16 @@ class TaskSession:
 
     def stop(self) -> None:
         if self._task and not self._task.done():
+            self._request_display_stop()
+            self._task.cancel()
+
+    def _request_display_stop(self) -> None:
+        try:
             request_stop = getattr(self.display, "request_stop", None)
             if callable(request_stop):
                 request_stop()
-            self._task.cancel()
+        except Exception:
+            logger.exception("画面操作の停止要求に失敗")
 
     @property
     def is_running(self) -> bool:

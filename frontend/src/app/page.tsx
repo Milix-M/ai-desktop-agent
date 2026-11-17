@@ -144,11 +144,21 @@ function DesktopWorkspace({ sessionActions, draft }: {
             id: logIdCounter++,
             time: epochStr(detail.updated_at),
             message:
-              `使用量: LLM${detail.llm_calls ?? 0}回` +
-              `（入力${detail.prompt_tokens ?? 0}/出力${detail.completion_tokens ?? 0}トークン）` +
-              `・決定${detail.decision_calls ?? 0}件・退避${detail.decision_escalations ?? 0}件`,
+              `使用量: モデル${detail.execution_usage?.requests ?? detail.llm_calls ?? 0}回` +
+              `（入力${detail.execution_usage?.input_tokens ?? detail.prompt_tokens ?? 0}` +
+              `/出力${detail.execution_usage?.output_tokens ?? detail.completion_tokens ?? 0}トークン）` +
+              `・決定${detail.decision_calls ?? 0}件・退避${detail.decision_escalations ?? 0}件` +
+              (detail.execution_usage?.usage_complete === false ? "・使用量未確認" : "") +
+              (detail.execution_usage?.estimated_cost_usd != null
+                ? `・推定$${detail.execution_usage.estimated_cost_usd}` : ""),
             level: "state",
           },
+          ...(detail.error_message ? [{
+            id: logIdCounter++,
+            time: epochStr(detail.updated_at),
+            message: detail.error_message,
+            level: "error" as const,
+          }] : []),
           ...detail.actions.flatMap((a) => {
             const main = {
               id: logIdCounter++,

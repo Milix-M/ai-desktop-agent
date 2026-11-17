@@ -47,6 +47,7 @@ async def test_each_desktop_is_isolated_and_backend_recreation_restores_access()
                 "LLM_PROVIDER": "mock",
                 "ANDROID_PROVISION": "0",
                 "DESKTOP_IMAGE_REF": desktop_image,
+                "TASK_MAX_SECONDS": "0.05",
             },
             volumes={
                 data.name: {"bind": "/app/data", "mode": "rw"},
@@ -146,6 +147,21 @@ except OSError:pass
                     proxy=None,
                 ) as ws:
                     assert (await asyncio.wait_for(ws.recv(), 5)).startswith(b"RFB ")
+            # A real VNC-backed task must stop at its deadline and keep the reason on restart.
+            response = await api.post(
+                "/tasks", json={"instruction": "画面を確認する", "vm_id": created[0]["id"]}
+            )
+            response.raise_for_status()
+            task_id = response.json()["session_id"]
+            for _ in range(150):
+                result = await api.get("/tasks/" + task_id)
+                if result.status_code == 200 and result.json()["state"] == "failed":
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("Real VNC task did not stop at its deadline")
+            assert result.json()["stop_reason"] == "duration_limit"
+            assert result.json()["error_message"]
             # A stopped environment must remain discoverable and must not prevent startup.
             response = await api.post("/vms/" + created[1]["id"] + "/stop")
             response.raise_for_status()
@@ -157,6 +173,8 @@ except OSError:pass
         backend = start_backend()
         url = await ready(backend)
         async with httpx.AsyncClient(base_url=url, headers=headers, timeout=30) as api:
+            task = (await api.get("/tasks/" + task_id)).json()
+            assert task["state"] == "failed" and task["stop_reason"] == "duration_limit"
             rows = (await api.get("/vms")).json()
             assert {v["id"] for v in rows} == {c["id"] for c in created}
             assert next(v for v in rows if v["id"] == created[1]["id"])["status"] == "exited"
