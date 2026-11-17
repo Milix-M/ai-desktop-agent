@@ -84,7 +84,13 @@ src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
 
 server/auth.pyが接続キーとブラウザセッションを管理する。AGENT_ACCESS_TOKENがなければdata/auth/access-keyを0600で生成する。POST /auth/loginでキーを照合し、12時間有効のHttpOnly・SameSite=Strict Cookieを発行する。HTTPSではSecureも付ける。ブラウザの保存領域やURLにはキーを残さない。
 
-GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とする。APIクライアントはAuthorization: Bearerを使える。POST /auth/logoutと期限切れでセッションを失効させ、開いているWebSocketも閉じる。セッションはメモリ内で管理し、バックエンド再起動後は再ログインする。利用者ごとの権限分離は未対応となる。
+GET /auth/statusとGET /health、POST /auth/login、POST /auth/logout以外は認証を必須とする。APIクライアントはAuthorization: Bearerを使える。POST /auth/logoutは要求に付いたCookieのセッションを取り消す。Cookieがない場合やセッションが失効済みの場合もCookieを消して200を返す。セッションの失効時には開いているWebSocketも閉じる。セッションはメモリ内で管理し、バックエンド再起動後は再ログインする。利用者ごとの権限分離は未対応となる。
+
+フロントはログイン・ログアウトを直列に送り、401では現在のCookieを確認する。同時確認はまとめ、5秒で打ち切る。認証変更を挟んだ確認は読み取り直し、古い401や初回確認・旧接続の結果でログイン状態を上書きしない。元の操作の再送は利用者が行う。
+
+ログインとHTTP・WebSocketのBearer認証はキー照合の失敗数を共有する。直近60秒に10回失敗すると、照合前にHTTP 429とRetry-Afterを返し、WebSocketも接続前に拒否する。待ち時間は失敗時刻から計算し、拒否された試行では延長しない。Cookieで認証済みの操作とログアウトは継続できる。失敗時刻だけを最大10件メモリに保持し、キー照合の成功またはバックエンド再起動で消す。複数バックエンド間の共有は未対応となる。
+
+認証変更を識別する乱数をlocalStorageで共有し、別タブの変更も照合する。保存領域が使えない場合は同じタブ内の順序で照合する。
 
 画面配信は/vnc/{id}から所属プロジェクトの環境へ接続する。接続先はVM情報から決め、任意のホストやポートを受け付けない。バイナリ転送にはサイズと送信待ち時間の上限を設け、切断時にTCP接続も閉じる。
 
@@ -100,7 +106,9 @@ GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とす�
 | GET | /tasks/current | 最新タスク状態。vm_idで環境を選べる |
 | POST | /tasks/current/{pause,resume,stop} | タスク制御 |
 | GET | /vms | VM一覧 |
-| POST | /vms | VM作成。ディスク複製と起動を行う |
+| POST | /vms | VM作成。Idempotency-Keyを付けると元の受付結果を待つ。キーなしは要求ごとに新規作成する |
+| POST | /vm-creations | 環境作成の受付。Idempotency-Key必須。受付IDを返す |
+| GET | /vm-creations/{id} | 作成の受付状態と結果を取得する |
 | DELETE | /vms/{id} | VM削除。上のタスク停止とコンテナ削除を行い、動的はディスクも消す |
 | POST | /vms/{id}/stop | VMとコンテナの停止。固定と動的に使え、上のタスク停止と中継連動を含む |
 | POST | /vms/{id}/start | VMとコンテナの起動。固定と動的に使え、中継連動を含む。QEMU系はKVM必須 |
@@ -108,11 +116,51 @@ GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とす�
 | POST | /vm/restart | 既定VMの再起動。そのVMの実行中タスクを停止する |
 | WS | /ws | 状態と操作ログの配信 |
 
+HTTP本文は256 KiB以内とし、読み取り開始から5秒以内に受信する。保護対象APIは認証を先に確認する。エンドポイントを呼ぶ前に本文を受信し、Content-Lengthがなくても実測する。サイズ超過は413、受信時間切れは408、長さの不正は400を返し、HTTP/1では接続を閉じる。受信中の切断でもエンドポイントを呼ばない。この5秒にはエンドポイントの実行時間を含めない。WebSocketには既存の転送制限を使う。
+
+標準起動では認証と実行状態を同じプロセスで扱うため、プロセスを1つに固定する。WEB_CONCURRENCYでは増やさない。WebSocketの受信は1メッセージ1 MiB、受信待ち行列は4件までとする。
+
 ### セッション管理
 
-1タスクは1つのTaskSessionに対応し、_sessionsで管理する。_active_sessionは後方互換のための最新1件とする。vm_id省略時は稼働中のdesktopを優先する。WebSocketは接続時に全環境のsnapshotを送り、その後state・action・error・completeを送る。イベントにはsession_idとvm_id、状態更新にはrevisionも付ける。フロントは古いrevisionを適用しない。接続ごとの送信キューを使い、遅い閲覧者からタスクの実行を切り離す。
+readiness.pyはrunningかつヘルスチェックがhealthyまたは未設定の環境を投入先とする。起動準備中・異常・不明の環境を既定の選択から外し、明示した環境への投入は409で拒否する。画面配信はrunningであれば接続でき、準備中も起動の様子を確認できる。
+
+1タスクは1つのTaskSessionに対応し、_sessionsで管理する。_active_sessionは後方互換のための最新1件とする。vm_id省略時は稼働中のdesktopを優先する。WebSocketは接続時に全環境のsnapshotを送り、state・action・error・completeも配信する。イベントにはsession_idとvm_id、開始順のsession_order、状態更新にはrevisionも付ける。フロントは別タスクの古い通知を開始順で除外し、同じタスク内ではrevisionを比較する。接続ごとの送信キューを使い、遅い閲覧者からタスクの実行を切り離す。
+
+状態配信は送受信のどちらかが終わると残る処理を取り消し、通知先の登録を外してから接続を閉じる。送信失敗・滞留は1013、ping以外の入力は1003で切断する。切断要求の待ち時間は5秒までとし、ASGIの取消中も解放処理を保護する。
+
+画面の初期復元と履歴取得は、後から選んだ環境や履歴を上書きしない。環境一覧の定期更新でも、削除済み環境の履歴の閲覧を保つ。環境IDのない旧履歴は、最初の環境一覧が後から届いても表示を保つ。
+
+snapshotは履歴を読んでいる間のセッション開始と履歴削除を追跡する。終了して実行一覧から外れたセッションも結果に含める。同じ環境の候補は開始順で選び、読み取り中に削除した履歴は結果から除く。選んだ履歴が削除された場合は読み直し、残る最新の履歴を返す。取得が終わったら追跡情報を解放し、取消・失敗でも残さない。
+
+フロントは再接続時にsnapshotが確認した開始順の範囲で削除済みタスクを残る履歴へ切り替える。削除前の開始順も保持し、削除済みタスクの遅い通知で表示や操作を戻さない。
+
+バックエンドは起動ごとにserver_idを生成し、TaskStatusとsnapshot・状態・操作・エラー・完了の通知へ付ける。フロントは起動が変わると開始順と状態番号の比較をやり直し、状態を同期して環境一覧・履歴を再取得する。同じ起動への再接続では比較情報を保つ。旧起動の応答と通知は除外する。HTTP要求の待機中に起動の切り替えを確認した場合、その応答で起動識別子を切り替えない。選択中の履歴は再取得し、入力中の指示は消さない。
+
+pause・resume・stopは任意のsession_idクエリで対象を照合する。不一致や対象の消失は409とし、操作しない。Web UIは選択した環境とライブタスクのIDを指定する。タスクIDを確認できない間は操作を無効にする。409後は最新状態を取得する。取得が遅れても、後から選んだ環境や新しいタスクの状態を上書きしない。再開時のmanual_input_idとallow_screen_shareも照合する。session_id省略時は従来どおり最新の対象を操作する。
+
+VNC接続・セッション生成中の中断では、生成処理の終了を待って取得済みの接続を解放する。セッション生成後はモデル接続も閉じ、解放が終わるまで次の投入を待たせる。
 
 request_user_inputはTaskSessionで処理し、awaiting_userの間は画面取得とモデル呼び出しを止める。状態通知とsnapshotにmanual_inputのid・reasonを付ける。POST /tasks/current/resumeはmanual_input_idとallow_screen_share=trueが一致する場合だけ再開する。入力値は受け取らない。同じ環境へのタスク投入も待機中は拒否する。
+
+### タスク投入の再送
+
+POST /tasksは任意のIdempotency-Keyを受け付ける。キーはASCIIの英数字・ハイフン・アンダースコアを16〜128文字で指定する。同じキーと内容の再送では受付済みタスクの状態をreplayed=trueで返す。同じキーで指示・vm_id・allow_vm_restartのいずれかが異なる場合と受付処理中は409、受付後に履歴が削除されていれば410を返す。キーを省略した投入は毎回新しいタスクを作る。
+
+server/submissions.pyとTaskStoreはキーと要求内容のハッシュで照合し、data/submissionsに受付記録を保存する。原文の指示やキーは受付記録に含めない。同じキーの初回保存はファイルロックで保護し、HTTP要求が中断されても保存完了までロックを保持する。タスク記録と受付記録を保存してからモデルを呼び出す。履歴を削除しても受付記録を残し、バックエンド再起動後の再送にも使う。受付記録や対応する履歴の破損は503として止める。
+
+バックエンドは1プロセスでの運用を対象とし、複数プロセスでのVM操作の排他は未対応とする。
+
+環境の作成は台数制限を含めて直列化し、停止・起動・再起動・削除・専用ネットワークへの接続は環境ごとに排他する。ディスクの複製中も状態の取得と別環境の操作を進められる。要求の中断時も処理の終了まで排他を保つ。
+
+作成要求は専用ワーカーで処理し、実行中と待ちを合わせて8件まで受け付ける。超過は429とRetry-Afterを返す。要求を中断しても処理の終了まで受付枠を保ち、成功・失敗・中断の後に枠を戻す。
+
+### 環境作成の再送
+
+ブラウザはPOST /vm-creationsで受付IDを取得し、GET /vm-creations/{id}でqueued・running・succeeded・failedを確認する。受付キーのハッシュ・名前・種類をdata/vm-creationsに保存する。同じキーで同じ内容を再送すると元の受付を返し、内容の変更は409を返す。完了後や環境削除後も同じキーで再作成しない。新しく作る場合は別のキーを使う。succeededは払い出しの完了で、利用可否はGET /vmsのstatus・healthで確認する。
+
+作成処理の前にrunningを保存する。起動時はqueuedを再開し、runningは対象IDの環境を照合する。環境が存在すれば作成済みとし、なければその作成に属する資源を削除して中断を記録する。正常終了時は未開始を失敗とし、開始済みの処理と記録の完了を待つ。記録の破損や保存失敗は503を返す。
+
+ブラウザは受付キーをタブ内のsessionStorageに保持し、再読み込み後も結果を確認する。応答不明ではキーを残し、結果確定後に消す。ブラウザ保存が使えない場合はページ内だけで保持する。照会は1回10秒、全体10分までとし、画面を閉じても受付済みの作成は取り消さない。
 
 ### 実行制限
 
@@ -126,17 +174,37 @@ data/tasks/タスクID.jsonに1タスク1ファイルで保存し、状態遷移
 
 server/persistence.pyが一時ファイルのfsync、os.replace、親ディレクトリのfsyncで保存する。新規ファイルは0600とする。保存先に書き込めなければ起動・タスク投入を止め、実行中の保存失敗でも以後の操作を打ち切る。保存できない場合も画面には失敗を通知する。
 
+履歴の入出力は別スレッドで行い、同じセッションの保存を直列化する。タスク投入には初回保存後に応答する。停止時も進行中の保存を待ってから接続を解放する。
+
+開始順はロックを取得して採番し、最初の状態通知より前にdata/task-order.jsonへ保存する。履歴にもsession_orderを保存し、時計が巻き戻っても開始順で最新のタスクを選ぶ。開始順のない旧履歴は0として扱い、旧履歴同士は更新時刻で並べる。開始順ファイルがなければ履歴の最大値から再開し、破損時は上書きせず新しいタスクを止める。
+
+履歴一覧と環境ごとの最新状態は、全件の操作履歴を保持せずに集計する。ただし一覧の取得では全ファイルを読む。履歴の型と数値、IDとファイル名の一致を検証し、不正な履歴は読み飛ばして書き換えない。
+
 ### KVM判定
 
 server/kvm.pyはUSE_KVM明示値、バックエンドの/dev/kvm、Dockerの順に判定する。Dockerでは同じComposeプロジェクトのvmに/dev/kvmが割り当てられていることを確認する。停止後の起動にも使うため稼働状態は問わず、ホストのデバイス消失はDockerの起動エラーとなる。KVMなしでのQEMU系の作成・起動・再起動はAPI 409で拒否し、ALLOW_TCG_VM=trueでのみTCGを許可する。
 
 ### VM制御
 
-server/vm_control.pyのVmControllerが既定VMの状態取得と再起動を担う。状態にQMPのquery-status結果をqmp_statusとして添える。Docker不通時はDockerUnavailableErrorとして503を返す。
+server/vm_control.pyのVmControllerが既定VMの状態取得と再起動を担う。状態にQMPのquery-status結果をqmp_statusとして添える。明示名を指定しない場合、所属プロジェクトのCompose命名に一致するVMを一覧と共通の基準で優先する。
+
+VM_CONTAINER_NAMEで別環境を指定したときも、実際の再起動対象のタスクとAndroid初期設定を止める。再起動前に対象の環境IDが変わったときは503で拒否する。
+
+Dockerの照会失敗は503を返し、キャッシュの稼働状態で代用しない。対象の消失はnot_foundとする。再起動の応答が失われた場合は503を返す。既に実行済みの場合があるため自動で再実行せず、再操作前に状態を確認する。
+
+QMPは要求IDに合う返答を使い、通知と不明なIDの返答を読み飛ばす。接続処理と各操作の待ち時間を制限し、1応答は4 MiBまでとする。通信失敗・JSON不正・応答サイズ超過時は接続を閉じ、再接続してから使う。
 
 ### VMプール
 
 server/vm_pool.pyのVmPoolが環境の一覧・作成・起動・停止・再起動・削除を担う。固定desktopはid=desktop、managed=Falseで検出する。default_vmは稼働中のdesktopを優先し、なければ稼働中の先頭を返す。
+
+固定環境の一覧・識別・専用ネットワークの準備には同じ基準で選んだ本体を使う。停止・削除では同じプロジェクトの同じサービスの本体と対応する中継をまとめて扱う。動的環境で同じ環境IDの本体が複数ある場合は503で拒否する。
+
+コンテナの自動検索は一覧のラベルとネットワークで所属を絞ってから詳細を取得する。旧環境は詳細取得後も所属を確認する。一覧から詳細取得までに消えた対象は除外し、環境一覧ではその他の詳細取得失敗を503で返す。ホーム用の補助コンテナの親が稼働中か、ボリュームが使用中かは一覧情報で確認する。
+
+Android初期設定は準備前後でコンテナIDを照合し、接続先と保存領域の識別子を同じ本体に結び付ける。ADB子プロセスの起動前と実行中に対象を確認し、変更や照会失敗では完了を記録しない。実行中の照会は別ワーカーで行い、応答待ちでも子プロセスの中断を妨げない。進行中の照会が終わるまで次の操作へ引き渡さない。
+
+APIのタスク開始と起動・停止・削除・デバッグ用再起動は環境IDごとに直列化する。接続・初回保存・中断後の後始末が終わるまで同じ環境の次の操作を待たせ、別環境の操作は進める。既定環境は待機後に利用可否を再確認する。開始順は登録前に確保し、遅れて登録された古いタスクで最新タスクを置き換えない。
 
 POST /vmsのkindはqemuが既定で、containerとandroidも選べる。各環境は専用コンテナで動く。QEMU系は通常KVMを必要とし、TCGの明示許可時は/dev/kvmを要求しない。containerはKVM不要となる。動的IDの接頭辞はvm、desk、andで、その後に16進数を付ける。動的環境は全種別の合計で8台までとする。
 
@@ -374,7 +442,7 @@ vm/entrypoint.shに置く。
 
 ```text
 qemu-system-x86_64 -enable-kvm -cpu host -smp $VM_CPUS -m $VM_MEMORY
-  -kernel /vm/vmlinuz -initrd /vm/initrd.img -append "$CMDLINE"
+  -kernel $VM_KERNEL -initrd $VM_INITRD -append "$CMDLINE"
   -drive file=$VM_IMAGE,if=virtio,format=qcow2
   -vnc 0.0.0.0:$VNC_DISPLAY -device virtio-net,netdev=net0 -netdev user,id=net0
   -serial stdio -display none
@@ -384,9 +452,17 @@ qemu-system-x86_64 -enable-kvm -cpu host -smp $VM_CPUS -m $VM_MEMORY
 
 KVMとhost CPU、4vCPUと4GBを既定とする。固定値はcomposeで定める。マシン型は変えない。NIC名のens3がnetplanに固定のためである。USE_KVM=auto時は/dev/kvmの有無でKVMとTCGを自動選択する。TCG側は既定で起動拒否し、ALLOW_TCG_VM=trueでのみ許可する。許可時のTCGは-cpu qemu64と-smp 1に切り替わる。保存はvirtio、通信はslirpのuser-mode NAT、VNC直結、シリアルは起動記録用とする。QMPとguest-agent用ソケットは/vm/sockets/配下とし、QMP_SOCKとQGA_SOCK環境変数でVMごとに変えられる。
 
+標準起動ではprepare-boot.shが各qcow2を一時的なrawファイルへ変換し、元ディスクをマウントせずに起動ファイルを取得する。コピーのext4を検査し、/lib/modulesに対応するカーネルとinitrdのうち、両方が揃う最新バージョンを選ぶ。ディスク内の/etc/ai-desktop-agent/cmdlineを使い、旧画像でこのファイルがない場合はroot=/dev/vdaの既定値を使う。
+
+準備は300秒で中断を要求し、終了しなければ5秒後に強制終了する。失敗時はQEMUを起動せず、元ディスクを保持する。実行ロックは準備からQEMUの終了まで保持する。VM_KERNELとVM_INITRDの両方を明示した場合は指定したファイルを使い、CMDLINE_FILEも上書きに使える。
+
 ### ゲスト画像構築
 
 vm/build-vm-image.shで行う。debootstrapでUbuntu 24.04とKDE PlasmaとSDDMを構築し、qcow2化する。再構築時の必須項目は次の通りとする。利用者agentのNOPASSWD sudo、SDDM自動ログインでセッション自動検出、画面施錠無効と電源管理の休止と画面OFF無効、ログイン時DPMS無効化のdisable-dpms.desktopでXのDPMS 600秒消灯が残るため、netplanでens3をDHCP化でNetworkManager単独ではunmanagedになるため、/etc/resolv.confをQEMU内蔵DNSの10.0.2.3直書きと/etc/hostsに自ホスト名、ディスク下限15GBでKDEとsnap導入で3から4GBでは枯渇するため、qemu-guest-agentとxdotoolとwmctrlを同梱とする。注意点としてUbuntu 24.04のfirefoxパッケージはsnap移行置物である。エージェントがsudo snap install firefoxで導入する運用とし、通信が必要である。
+
+構築ごとに専用の作業領域を作り、同じ出力先での同時構築を拒否する。4ファイルが完成してから出力を更新し、更新エラーやINT・TERMによる中断では旧ファイルへの復元を試みる。マウント解除や復元に失敗した場合は作業領域を残し、保存先を表示して異常終了する。
+
+テンプレートの更新は既存ディスクに反映しない。構築出力全体の電源断からの復旧は未対応とする。
 
 ### ゲスト内通信
 
@@ -398,19 +474,29 @@ QEMU slirpは10.0.2.0/24、入口は.2、DNSは.3とする。過去のつまず�
 
 scripts/up.shはビルド後、workspace_migrationの別コンテナで更新ロックを取得する。通常のバックエンドと選択した固定環境を止め、固定desktopのホームを退避する。HomeBackupsは0600のtarとSHA-256付き情報を保存し、通常ファイル・ディレクトリ・リンクを検査する。旧ホームはネットワークのない専用コンテナでボリュームへ展開し、ルートの所有者とモードも復元して読み戻す。照合後にComposeで再作成し、完了までロックを保持する。失敗時は残っている元のコンテナの再開を試み、バックアップを残す。旧版の専用bridgeは既知の接続先を停止してからCompose用ラベルも補う。
 
-vm/desktop.qcow2は読み取り専用テンプレートとする。固定VMは初回だけvm/instances/default.qcow2へ複製し、再起動で上書きしない。動的VMはvm/overlaysへ独立したコピーを作る。動的ディスクはバックエンドの/vm/overlaysにも共有マウントし、コンテナの削除成功後に削除する。固定VMの削除では専用ディスクを残す。
+vm/desktop.qcow2は読み取り専用テンプレートとする。固定VMは初回だけvm/instances/default.qcow2へ複製し、再起動で上書きしない。新しい動的VMはvm/overlays/環境ID/disk.qcow2へ独立したコピーを作り、その環境のフォルダだけをマウントする。起動ファイルはディスク名に.bootを付けたフォルダへ取得する。動的ディスクはバックエンドの/vm/overlaysにも共有マウントし、コンテナの削除成功後にフォルダごと削除する。旧形式のvm/overlays/環境ID.qcow2の削除も扱う。固定VMの削除では専用ディスクを残す。
 
 data/vms.jsonはファイルロックで同時更新を保護し、原子的に保存する。破損した情報は上書きせずエラーを返す。作成前に割当情報を保存し、作成失敗時はその環境のコンテナとディスクの回収を試みる。
 
 ### 監視と管理
 
-ヘルス確認はVNCポート疎通でComposeが行う。QMPのvm/qmp.pyはquery-statusなどを行い、/vm/statusのqmp_statusに反映する。guest agentのvm/qga.pyはguest-ping、get-osinfo、guest-execを提供し、診断と検証に使う。画面配信はserver/vnc_proxy.pyが担い、ブラウザはVncViewer.tsxのnoVNCで表示する。VmControllerは既定VMの状態と再起動、VmPoolは各環境の管理を担う。
+追加QEMUの複製用コンテナはprepare-boot.shの存在を先に検査し、未対応なら作成を止める。複製は300秒で中断を要求し、終了しなければ5秒後に強制終了する。所属と用途のラベルを付け、待ち時間切れなどの失敗でも回収対象にする。複製用コンテナは環境一覧とタスクの接続先から除く。
+
+ヘルス確認はVNCポート疎通でComposeが行う。QMPのvm/qmp.pyはquery-statusなどを行い、/vm/statusのqmp_statusに反映する。guest agentのvm/qga.pyはguest-ping、guest-get-osinfo、guest-execを提供し、診断と検証に使う。画面配信はserver/vnc_proxy.pyが担い、ブラウザはVncViewer.tsxのnoVNCで表示する。VmControllerは既定VMの状態と再起動、VmPoolは各環境の管理を担う。
+
+QGAは接続時に同期し、要求IDに合う返答を使う。runの待ち時間には開始要求の送信と結果取得を含める。期限切れでもゲスト内の処理は継続する場合がある。例外にPIDが残っていれば、再接続して状態を確認する。
+
+応答は4 MiBまでとする。取得できた標準出力と標準エラーは各16 KiBを上限とし、超過やゲスト側の省略はQgaOutputLimitErrorで通知する。例外には保持できた出力と終了コードを残す。
+
+ContainerHostnameEndpointはTwistedのホスト名変換を拡張し、Docker形式のASCII接続名に含まれるアンダースコアを許可する。通常の名前・IPアドレス・Unicode名の変換、名前解決、IPv4/IPv6の接続試行はTwistedを使う。VNCClientはIPv6アドレスをvncdotoolへ角括弧付きで渡す。中断時は名前解決後の接続待ちも取り消し、中断後に名前解決が完了しても接続を始めない。
 
 ## フロントエンド
 
-Next.jsのApp Routerを使う。InstructionInputで指示と再起動許可を受け、StatusPanelとLogPanelで進捗を示す。VmTabsで環境を選ぶ。VncViewerは選択した稼働中の環境だけに接続し、切断時にRFBを作り直す。入力の送信失敗時は指示を残し、日本語変換中のEnterでは送信しない。
+Next.jsのApp Routerを使う。InstructionInputで指示と再起動許可を受け、StatusPanelとLogPanelで進捗を示す。VmTabsで環境を選ぶ。VncViewerは選択した稼働中の環境だけに接続し、切断時にRFBを作り直す。入力の送信失敗時は指示を残し、日本語変換中のEnterでは送信しない。タスク投入の応答待ちは30秒までとし、期限切れでもタスクは継続する場合がある。
 
 デバッグ系はCollapsibleSectionで折り畳む。側面幅は280から720pxで変更し、localStorageに保存する。状態・ログ・進捗はVM単位で保つ。WebSocketはpingで疎通を確認し、再接続時にsnapshotで状態を同期する。履歴の操作記録はGET /tasks/{id}で取得する。
+
+VMControlsは状態を1回10秒まで取得し、応答後に次の確認を予約する。再起動の応答後に始めた確認だけで完了を判断する。準備完了・異常・停止で確認を終え、再起動の応答がなくても10分で確認を打ち切る。期限後や画面を閉じた後に届く再起動の応答は表示へ反映しない。
 
 ## 安全性
 
