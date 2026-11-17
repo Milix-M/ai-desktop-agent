@@ -119,6 +119,14 @@ jobs:
         env:
           RUN_DESKTOP_SMOKE: "1"
           DOCKER_CONFIG: ${{ runner.temp }}/agent-compose
+          DESKTOP_EVAL_RESULTS_DIR: ${{ runner.temp }}/agent-evaluations
+      - name: Upload desktop evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-evaluation
+          path: ${{ runner.temp }}/agent-evaluations/
+          retention-days: 7
 
   # 全ジョブが通ったことの確認（branch protection用）
   all-checks:
