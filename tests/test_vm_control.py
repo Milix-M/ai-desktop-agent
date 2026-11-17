@@ -35,9 +35,13 @@ class _FakeContainers:
         self._containers = {c.name: c for c in containers}
 
     def get(self, name):
+        from docker.errors import NotFound
+
+        if name not in self._containers:
+            raise NotFound("no such container")
         return self._containers[name]
 
-    def list(self, all=True, filters=None):
+    def list(self, all=True, filters=None, sparse=False):
         return list(self._containers.values())
 
 
@@ -79,6 +83,18 @@ class TestVmControllerStatus:
 
 
 class TestVmControllerRestart:
+    def test_changed_environment_is_rejected_before_restart(self, monkeypatch):
+        monkeypatch.setenv("USE_KVM", "true")
+        container = _FakeContainer()
+        controller = VmController(
+            container_name=container.name, client=_FakeDockerClient([container])
+        )
+        expected = controller.target_vm_id()
+        container.attrs["Config"]["Labels"]["com.docker.compose.service"] = "desktop"
+        with pytest.raises(DockerUnavailableError, match="対象が変わりました"):
+            controller.restart(expected_vm_id=expected)
+        assert not container.restarted
+
     def test_restart_calls_docker(self, monkeypatch):
         monkeypatch.setenv("USE_KVM", "true")
         c = _FakeContainer()
@@ -129,6 +145,9 @@ class TestVmEndpoints:
         orig = server_app._get_vm_controller
 
         class _Dead:
+            def target_vm_id(self):
+                raise DockerUnavailableError("no socket")
+
             def status(self):
                 raise DockerUnavailableError("no socket")
 
