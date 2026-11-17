@@ -1,9 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
+import { webcrypto } from "node:crypto";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import InstructionInput from "@/components/InstructionInput";
 import { ApiError } from "@/lib/api";
 import type { PendingSubmission } from "@/lib/types";
+
+beforeEach(() => { sessionStorage.clear(); vi.stubGlobal("crypto", webcrypto); });
+afterEach(() => vi.unstubAllGlobals());
 
 describe("InstructionInput", () => {
   it("renders textarea and submit button", () => {
@@ -49,7 +53,7 @@ describe("InstructionInput", () => {
     await userEvent.type(textarea, "テスト指示");
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
 
-    expect(onSubmit).toHaveBeenCalledWith("テスト指示", false, expect.stringMatching(/^[a-f0-9]{32}$/));
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("テスト指示", false, expect.stringMatching(/^[a-f0-9]{32}$/)));
   });
 
   it("does NOT call onSubmit on Shift+Enter", async () => {
@@ -91,7 +95,7 @@ it("keeps the instruction after failure and blocks duplicate submissions", async
   fireEvent.change(input, { target: { value: "文書を保存する" } });
   fireEvent.click(screen.getByRole("button", { name: "実行" }));
   fireEvent.keyDown(input, { key: "Enter" });
-  expect(onSubmit).toHaveBeenCalledOnce();
+  await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
   expect(input).toBeDisabled();
   reject(new Error("接続できません"));
   await vi.waitFor(() => expect(input).toBeEnabled());
@@ -176,10 +180,33 @@ it("an old mounted request cannot erase a draft after reauthentication", async (
   const first = render(<InstructionInput onSubmit={onSubmit} disabled={false} submission={submission} onDraftChange={draftChanged} />);
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "元の報告書" } });
   fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
   first.unmount();
   draftChanged.mockClear();
   resolve();
   await Promise.resolve();
   expect(draftChanged).not.toHaveBeenCalled();
   expect(submission.current?.instruction).toBe("元の報告書");
+});
+
+it("a fresh page reuses the persisted identity and requires an explicit new execution after 410", async () => {
+  const onSubmit = vi.fn().mockRejectedValueOnce(new Error("response lost"))
+    .mockRejectedValueOnce(new ApiError(410, "受付済み・履歴削除済み"))
+    .mockResolvedValue(undefined);
+  const first = render(<InstructionInput onSubmit={onSubmit} disabled={false} vmId="desktop" />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "報告書を保存する" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await screen.findByRole("button", { name: "再送" });
+  first.unmount();
+  render(<InstructionInput onSubmit={onSubmit} disabled={false} vmId="desktop" />);
+  expect(screen.getByRole("textbox")).toHaveValue("");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "報告書を保存する" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  const fresh = await screen.findByRole("button", { name: "新しいタスクとして実行" });
+  expect(onSubmit.mock.calls[1][2]).toBe(onSubmit.mock.calls[0][2]);
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(onSubmit).toHaveBeenCalledTimes(2);
+  fireEvent.click(fresh);
+  await vi.waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(""));
+  expect(onSubmit.mock.calls[2][2]).not.toBe(onSubmit.mock.calls[0][2]);
 });

@@ -61,7 +61,7 @@ class ActionDecision:
     is_region_zoom: bool = False  # 領域ズーム後の決定か
 
     def __post_init__(self) -> None:
-        if not 0.0 <= self.confidence <= 1.0:
+        if type(self.confidence) not in (int, float) or not 0.0 <= self.confidence <= 1.0:
             raise ValueError(
                 f"confidence は 0.0〜1.0 の範囲である必要があります: {self.confidence}"
             )

@@ -16,6 +16,10 @@ VERIFY_LOW_DEFAULT = 0.6
 RECOVER_MIN_DEFAULT = 0.6
 
 
+def is_probability(value: object) -> bool:
+    return type(value) in (int, float) and 0.0 <= value <= 1.0
+
+
 def load_thresholds() -> tuple[float, float, float]:
     """環境変数から閾値を読む（DECISION_VERIFY_HIGH/LOW, DECISION_RECOVER_MIN）。"""
 
@@ -39,7 +43,8 @@ def route_verify(prob_true: float, grade: VerifyGrade, *, high: float, low: floa
     - not_achieved: 達成確率が低いか度合いが未達 → 回復へ
     - escalate: 中間 → LLMに再確認
     """
-    prob_true = max(0.0, min(1.0, prob_true))
+    if not all(is_probability(value) for value in (prob_true, high, low)) or low >= high:
+        return "escalate"
     if grade == "none" or prob_true < low:
         return "not_achieved"
     if prob_true >= high and grade == "full":
@@ -49,7 +54,7 @@ def route_verify(prob_true: float, grade: VerifyGrade, *, high: float, low: floa
 
 def route_recovery(top_prob: float, *, minimum: float) -> bool:
     """回復方針の最有力確率が採用可能かを返す。FalseならLLMへ回す。"""
-    return top_prob >= minimum
+    return is_probability(top_prob) and is_probability(minimum) and top_prob >= minimum
 
 
 def strategy_to_recoverable(strategy: str) -> bool:
