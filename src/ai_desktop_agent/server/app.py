@@ -45,7 +45,7 @@ from ai_desktop_agent.server.browser_access import (
     BrowserOriginMiddleware,
     ManagementNetworkMiddleware,
 )
-from ai_desktop_agent.server.persistence import StorageError
+from ai_desktop_agent.server.persistence import DeletionError, StorageError
 from ai_desktop_agent.server.request_limits import RequestBodyLimitMiddleware
 from ai_desktop_agent.server.session import TaskSession, _drain_task
 from ai_desktop_agent.server.store import TaskRecord, TaskStore
@@ -969,7 +969,12 @@ async def delete_task(task_id: str) -> dict[str, str]:
 
     def remove():
         nonlocal deleted
-        deleted = get_store().delete(task_id)
+        try:
+            deleted = get_store().delete(task_id)
+        except DeletionError as error:
+            # A failed directory sync cannot restore an entry already unlinked.
+            deleted = error.removed
+            raise
 
     try:
         await run_display_call(remove)
