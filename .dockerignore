@@ -14,6 +14,8 @@ vm/*.img
 vm/overlays
 vm/instances
 vm/sockets
+vm/.vm-build.*
+vm/.vm-image-build.lock
 android/*.iso
 android/*.img
 android/apks/*.apk

@@ -60,21 +60,29 @@ class _FakeContainers:
         self.items: list[_FakeContainer] = []
         self.runs: list[dict] = []
 
-    def list(self, all=True, filters=None):
+    def list(self, all=True, filters=None, sparse=False):
         items = [c for c in self.items if not c.removed]
+        container_id = (filters or {}).get("id")
+        if container_id:
+            if self.client.backend.id.startswith(container_id):
+                items.append(self.client.backend)
+            items = [c for c in items if c.id.startswith(container_id)]
         volume = (filters or {}).get("volume")
         if volume:
             items = [
                 c for c in items if any(m.get("Name") == volume for m in c.attrs.get("Mounts", []))
             ]
         label = (filters or {}).get("label", "")
-        if label and "=" in label:
-            k, v = label.split("=", 1)
-            return [
-                c for c in items if ((c.attrs.get("Config") or {}).get("Labels") or {}).get(k) == v
+        if isinstance(label, str):
+            label = [label] if label else []
+        for expression in label:
+            key, separator, value = expression.partition("=")
+            items = [
+                c
+                for c in items
+                if key in c.attrs["Config"]["Labels"]
+                and (not separator or c.attrs["Config"]["Labels"][key] == value)
             ]
-        if label:
-            return [c for c in items if label in c.attrs["Config"]["Labels"]]
         return list(items)
 
     def get(self, name):
@@ -255,10 +263,19 @@ class TestCreateRemove:
         # Independent disk copy and one private desktop; no public relay.
         assert len(client.containers.runs) == 2
         overlay_run = client.containers.runs[0]
-        assert overlay_run.get("entrypoint") == ["cp"]
+        assert overlay_run.get("entrypoint") == ["bash", "-ceu"]
         vm_run = client.containers.runs[1]
         assert not vm_run.get("ports")
         assert vm_run["labels"]["ai-desktop-agent.vm-id"].startswith("vm-")
+        writable = [
+            path for path, config in vm_run["volumes"].items() if config["bind"] == "/vm/instance"
+        ]
+        assert len(writable) == 1 and writable[0].endswith("/" + info.id)
+        assert vm_run["environment"]["VM_IMAGE"] == "/vm/instance/disk.qcow2"
+        assert not any(
+            config["bind"] in {"/vm/vmlinuz", "/vm/initrd.img", "/vm/cmdline.txt"}
+            for config in vm_run["volumes"].values()
+        )
         # 一覧に出る
         assert pool.get_vm(info.id).id == info.id
 
@@ -275,9 +292,15 @@ class TestCreateRemove:
         overlay = tmp_path / "vm" / "overlays" / f"{info.id}.qcow2"
         overlay.parent.mkdir(parents=True, exist_ok=True)
         overlay.write_text("fake")
+        instance = overlay.parent / info.id
+        instance.mkdir(exist_ok=True)
+        (instance / "disk.qcow2").write_bytes(b"saved work")
+        (instance / "disk.qcow2.boot").mkdir()
+        (instance / "disk.qcow2.boot/vmlinuz").write_bytes(b"kernel")
         assert pool.remove_vm(info.id) is True
         assert pool.get_vm(info.id) is None
         assert not overlay.exists()
+        assert not instance.exists()
 
     def test_remove_missing_returns_false(self, pool):
         pool, _ = pool
