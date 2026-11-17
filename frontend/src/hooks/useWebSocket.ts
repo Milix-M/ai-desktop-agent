@@ -1,56 +1,63 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import type { WsMessage } from "@/lib/types";
 import { getWsUrl } from "@/lib/api";
 
 export function useWebSocket(onMessage: (msg: WsMessage) => void) {
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onMessageRef = useRef(onMessage);
-
-  // Keep callback ref current without re-triggering effect
   onMessageRef.current = onMessage;
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const ws = new WebSocket(getWsUrl());
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = undefined;
-      }
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data: WsMessage = JSON.parse(event.data);
-        onMessageRef.current(data);
-      } catch {
-        // ignore parse errors
-      }
-    };
-
-    ws.onclose = () => {
-      reconnectTimerRef.current = setTimeout(connect, 3000);
-    };
-
-    ws.onerror = () => {
-      // onclose will handle reconnect
-    };
-  }, []);
-
   useEffect(() => {
+    let disposed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let pongTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function connect() {
+      if (disposed) return;
+      const ws = new WebSocket(getWsUrl());
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (disposed || wsRef.current !== ws) return;
+        heartbeat = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          ws.send("ping");
+          pongTimer = setTimeout(() => ws.close(), 10000);
+        }, 20000);
+      };
+      ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws) return;
+        let data: WsMessage;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (data.type === "pong") clearTimeout(pongTimer);
+        onMessageRef.current(data);
+      };
+      ws.onclose = () => {
+        if (disposed || wsRef.current !== ws) return;
+        clearInterval(heartbeat);
+        clearTimeout(pongTimer);
+        retryTimer = setTimeout(connect, 3000);
+      };
+    }
+
     connect();
     return () => {
-      if (reconnectTimerRef.current)
-        clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      disposed = true;
+      clearTimeout(retryTimer);
+      clearInterval(heartbeat);
+      clearTimeout(pongTimer);
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
     };
-  }, [connect]);
+  }, []);
 
   return wsRef;
 }

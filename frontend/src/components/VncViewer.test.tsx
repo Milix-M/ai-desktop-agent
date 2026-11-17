@@ -1,92 +1,91 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { StrictMode } from "react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import VncViewer from "@/components/VncViewer";
 
-const listeners: Record<string, ((e?: unknown) => void)[]> = {};
-const instances: unknown[] = [];
+const instances: MockRFB[] = [];
 
-class MockRFB {
-  fbWidth = 1280;
-  fbHeight = 800;
+// Only the public noVNC API: construction connects, disconnect() is terminal.
+class MockRFB extends EventTarget {
   viewOnly = false;
   scaleViewport = false;
   resizeSession = true;
-  connected = false;
-  constructor(
-    public target: unknown,
-    public url: string,
-    public opts: unknown
-  ) {
+  disconnect = vi.fn();
+  constructor(public target: HTMLElement, public url: string) {
+    super();
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 800;
+    target.replaceChildren(canvas);
     instances.push(this);
-  }
-  addEventListener(type: string, cb: (e?: unknown) => void) {
-    listeners[type] = [...(listeners[type] ?? []), cb];
-  }
-  connect() {
-    this.connected = true;
-  }
-  disconnect() {
-    this.connected = false;
   }
 }
 
 vi.mock("@novnc/novnc", () => ({ default: MockRFB }));
 
-function fire(type: string, event?: unknown) {
-  for (const cb of listeners[type] ?? []) cb(event);
-}
-
 describe("VncViewer", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    for (const k of Object.keys(listeners)) delete listeners[k];
-    instances.length = 0;
-  });
+  beforeEach(() => { instances.length = 0; });
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-  it("creates a connection on mount with given url", async () => {
+  it("connects in view-only mode with the supplied url", async () => {
     render(<VncViewer wsUrl="ws://example:6090" />);
-    await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(0);
-    });
-    const first = instances[0] as MockRFB;
-    expect(first.url).toBe("ws://example:6090");
-  });
-
-  it("notifies connect with resolution", async () => {
-    const onChange = vi.fn();
-    render(<VncViewer onConnectionChange={onChange} />);
-
-    await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(0);
-    });
-    await act(async () => {
-      fire("connect");
-    });
-    expect(onChange).toHaveBeenCalledWith(true, "1280x800");
-  });
-
-  it("notifies disconnect", async () => {
-    const onChange = vi.fn();
-    render(<VncViewer onConnectionChange={onChange} />);
-
-    await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(0);
-    });
-    await act(async () => {
-      fire("connect");
-    });
-    await act(async () => {
-      fire("disconnect", { detail: { clean: false } });
-    });
-    expect(onChange).toHaveBeenCalledWith(false);
-  });
-
-  it("renders no overlay controls", async () => {
-    const { container } = render(<VncViewer />);
-    await waitFor(() => {
-      expect(instances.length).toBeGreaterThan(0);
-    });
-    expect(container.querySelector(".vnc-screen")).toBeInTheDocument();
+    await waitFor(() => expect(instances).toHaveLength(1));
+    expect(instances[0].url).toBe("ws://example:6090");
+    expect(instances[0].viewOnly).toBe(true);
+    expect(instances[0].scaleViewport).toBe(true);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("reports the canvas resolution on connection", async () => {
+    const onChange = vi.fn();
+    render(<VncViewer onConnectionChange={onChange} />);
+    await waitFor(() => expect(instances).toHaveLength(1));
+    act(() => instances[0].dispatchEvent(new Event("connect")));
+    expect(onChange).toHaveBeenLastCalledWith(true, "1280x800");
+  });
+
+  it.each([false, true])("creates a new RFB after disconnect (clean=%s)", async (clean) => {
+    const onChange = vi.fn();
+    render(<VncViewer onConnectionChange={onChange} />);
+    await waitFor(() => expect(instances).toHaveLength(1));
+    vi.useFakeTimers();
+    act(() => instances[0].dispatchEvent(new CustomEvent("disconnect", { detail: { clean } })));
+    expect(onChange).toHaveBeenLastCalledWith(false);
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    expect(instances).toHaveLength(2);
+    expect(instances[1].url).toBe(instances[0].url);
+  });
+
+  it("cancels reconnects when unmounted", async () => {
+    const { unmount } = render(<VncViewer />);
+    await waitFor(() => expect(instances).toHaveLength(1));
+    vi.useFakeTimers();
+    act(() => instances[0].dispatchEvent(new Event("disconnect")));
+    unmount();
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(instances).toHaveLength(1);
+  });
+
+  it("does not reconnect an old VM after switching tabs", async () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<VncViewer wsUrl="ws://first" onConnectionChange={onChange} />);
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const old = instances[0];
+    rerender(<VncViewer wsUrl="ws://second" onConnectionChange={onChange} />);
+    await waitFor(() => expect(instances).toHaveLength(2));
+    expect(old.disconnect).toHaveBeenCalledOnce();
+    onChange.mockClear();
+    vi.useFakeTimers();
+    act(() => old.dispatchEvent(new Event("disconnect")));
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(instances).toHaveLength(2);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not leak connections during StrictMode setup and cleanup", async () => {
+    const { unmount } = render(<StrictMode><VncViewer /></StrictMode>);
+    await waitFor(() => expect(instances).toHaveLength(1));
+    unmount();
+    expect(instances[0].disconnect).toHaveBeenCalledOnce();
   });
 });

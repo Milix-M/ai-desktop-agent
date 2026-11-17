@@ -32,3 +32,26 @@ test("history keeps live controls available and receives live completion", async
   await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeDisabled());
   expect(screen.getByRole("textbox")).toBeEnabled();
 });
+
+test("reconnect snapshot releases controls after a task finishes offline", async () => {
+  render(<Home />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  act(() => ws.handler?.({ type: "snapshot", tasks: [{
+    session_id: "running", vm_id: "desktop", state: "completed", is_running: false,
+    action_count: 1, success_count: 1, failure_count: 0, subtasks: [], current_subtask_index: 0,
+  }] }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeDisabled());
+  expect(screen.getByRole("textbox")).toBeEnabled();
+});
+
+test("delayed state updates cannot undo a newer completion", async () => {
+  render(<Home />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  act(() => ws.handler?.({ type: "complete", session_id: "running", vm_id: "desktop", success: true, revision: 8 }));
+  act(() => ws.handler?.({
+    type: "state", session_id: "running", vm_id: "desktop", state: "executing", revision: 4,
+    subtask_index: 0, subtask_count: 1, action_count: 1,
+  }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeDisabled());
+  expect(screen.getByRole("textbox")).toBeEnabled();
+});

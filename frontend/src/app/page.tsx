@@ -40,6 +40,8 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 interface VmView {
+  sessionId?: string | null;
+  revision?: number;
   state: string;
   subtaskIndex: number;
   subtaskCount: number;
@@ -68,7 +70,6 @@ export default function Home() {
   // VM単位の表示状態（ログ・ステータス・進捗はVM間で共有しない）
   const [vmViews, setVmViews] = useState<Record<string, VmView>>({});
   const { width: sidebarWidth, onResizeStart, onResizeMove, onResizeEnd } = useSidebarWidth();
-  const mountedRef = useRef(false);
   // WSハンドラから参照する選択中VM（stale closure回避）
   const selectedVmRef = useRef<string | null>(null);
   selectedVmRef.current = selectedVmId;
@@ -76,7 +77,13 @@ export default function Home() {
   const updateView = useCallback(
     (vmId: string | null | undefined, patch: Partial<VmView>) => {
       const key = vmId ?? selectedVmRef.current ?? "__none__";
-      setVmViews((prev) => ({ ...prev, [key]: { ...(prev[key] ?? EMPTY_VIEW), ...patch } }));
+      setVmViews((prev) => {
+        const current = prev[key] ?? EMPTY_VIEW;
+        if (patch.sessionId && patch.sessionId === current.sessionId &&
+            patch.revision !== undefined && current.revision !== undefined &&
+            patch.revision < current.revision) return prev;
+        return { ...prev, [key]: { ...current, ...patch } };
+      });
     },
     []
   );
@@ -98,6 +105,8 @@ export default function Home() {
     []
   );
 
+  const selectedVm = vms.find((v) => v.id === selectedVmId) ??
+    (selectedVmId === null ? vms[0] ?? null : null);
   const liveView = (selectedVmId && vmViews[selectedVmId]) || EMPTY_VIEW;
   const view = selectedTaskId && historyView?.vmId === selectedVmId
     ? historyView.view
@@ -196,8 +205,6 @@ export default function Home() {
 
   // 初回マウント時：現在の状態を復元（リロード対応）
   useEffect(() => {
-    if (mountedRef.current) return;
-    mountedRef.current = true;
     refreshVms();
     const vmTimer = setInterval(refreshVms, 15000);
     (async () => {
@@ -210,6 +217,8 @@ export default function Home() {
           const vmId = current.vm_id ?? null;
           if (vmId) setSelectedVmId(vmId);
           updateView(vmId, {
+            sessionId: current.session_id,
+            revision: current.revision,
             state: current.state,
             subtaskIndex: current.current_subtask_index,
             subtaskCount: current.subtasks.length,
@@ -230,8 +239,24 @@ export default function Home() {
       const vmId =
         "vm_id" in data ? (data.vm_id ?? undefined) : undefined;
       switch (data.type) {
+        case "snapshot":
+          for (const task of data.tasks) {
+            if (!task.vm_id) continue;
+            updateView(task.vm_id, {
+              sessionId: task.session_id,
+              revision: task.revision,
+              state: task.state,
+              subtaskIndex: task.current_subtask_index,
+              subtaskCount: task.subtasks.length,
+              subtasks: task.subtasks,
+            });
+          }
+          refreshHistory();
+          break;
         case "state":
           updateView(vmId, {
+            sessionId: data.session_id,
+            revision: data.revision,
             state: data.state,
             subtaskIndex: data.subtask_index,
             subtaskCount: data.subtask_count,
@@ -258,7 +283,11 @@ export default function Home() {
             data.success ? "complete" : "error",
             vmId
           );
-          updateView(vmId, { state: data.success ? "completed" : "failed" });
+          updateView(vmId, {
+            sessionId: data.session_id,
+            revision: data.revision,
+            state: data.success ? "completed" : "failed",
+          });
           refreshHistory();
           break;
       }
@@ -271,7 +300,7 @@ export default function Home() {
   const handleVncChange = useCallback(
     (connected: boolean, resolution?: string) => {
       setVncConnected(connected);
-      if (resolution) setVmResolution(resolution);
+      setVmResolution(resolution);
     },
     []
   );
@@ -285,7 +314,7 @@ export default function Home() {
     "recovering",
   ];
   const isRunning = RUNNING_STATES.includes(liveView.state);
-  const submitDisabled = isRunning || liveView.state === "paused";
+  const submitDisabled = isRunning || liveView.state === "paused" || selectedVm?.status !== "running";
 
   const handleSubmit = useCallback(
     async (instruction: string, allowVmRestart: boolean) => {
@@ -301,10 +330,15 @@ export default function Home() {
       addLog(`${instruction}`, "action", vmId);
       try {
         const result = await createTask(instruction, vmId, allowVmRestart);
-        updateView(result.vm_id ?? vmId, { state: result.state });
+        updateView(result.vm_id ?? vmId, {
+          state: result.state,
+          sessionId: result.session_id,
+          revision: result.revision,
+        });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         addLog(`投入エラー: ${msg}`, "error", vmId);
+        throw e;
       }
     },
     [addLog, selectedVmId, updateView]
@@ -367,7 +401,6 @@ export default function Home() {
     }
   }, [addLog, refreshVms]);
 
-  const selectedVm = vms.find((v) => v.id === selectedVmId) ?? vms[0] ?? null;
   const vncUrl = getVncWsUrl(selectedVm?.ws_port);
 
   return (
@@ -386,7 +419,9 @@ export default function Home() {
         creating={creatingVm}
       />
       <div className="main-layout">
-        <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+        {selectedVm?.status === "running" ? (
+          <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+        ) : <div className="vnc-panel" />}
 
         <div
           className="sidebar-resizer"
@@ -400,7 +435,7 @@ export default function Home() {
         </div>
 
         <div className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
-          {!vncConnected && (
+          {!vncConnected && selectedVm?.status === "running" && (
             <div className="section">
               <h2>VNC接続</h2>
               <div className="controls">

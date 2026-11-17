@@ -41,13 +41,13 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
     setConfirming(false);
     setRestarting(true);
     setWatching(true);
-    onLog?.("VM作り直し開始", "action");
+    onLog?.("VM再起動開始", "action");
     try {
       const vm = await restartVm();
       onLog?.(`VM再起動指示OK: ${vm.name ?? vm.status}`, "state");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      onLog?.(`VM作り直し失敗: ${msg}`, "error");
+      onLog?.(`VM再起動失敗: ${msg}`, "error");
       setRestarting(false);
       setWatching(false);
     } finally {
@@ -58,13 +58,13 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
   return (
     <>
       <div className="vm-status" data-testid="vm-status">
-        {restarting ? "作り直し中..." : status}
+        {restarting ? "再起動中..." : status}
       </div>
       {confirming ? (
         <div className="controls">
           <span className="vm-confirm-label">実行中のタスクは停止します</span>
           <button disabled={restarting} onClick={handleRestart}>
-            作り直す
+            再起動する
           </button>
           <button onClick={() => setConfirming(false)}>
             やめる
@@ -73,7 +73,7 @@ export default function VMControls({ onLog, pollIntervalMs = 5000 }: Props) {
       ) : (
         <div className="controls">
           <button disabled={restarting} onClick={() => setConfirming(true)}>
-            VM作り直し
+            VM再起動
           </button>
         </div>
       )}
