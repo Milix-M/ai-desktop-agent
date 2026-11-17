@@ -274,3 +274,24 @@ class TestTokenPersistence:
         store.save(rec)
         d = store.load(rec.id).to_dict()
         assert d["prompt_tokens"] == 1000
+
+
+@pytest.mark.parametrize(
+    "contents", ["[]", '{"prompt_tokens":"invalid"}', "null", '{"actions":false}']
+)
+def test_invalid_record_does_not_break_history_listing(tmp_path, contents):
+    store = TaskStore(tmp_path)
+    (store._dir / "invalid.json").write_text(contents)
+    store.save(TaskRecord("valid", "文書を保存する", "completed", success=True))
+    assert [record.id for record in store.list()] == ["valid"]
+
+
+def test_task_ids_cannot_escape_the_history_directory(tmp_path):
+    store = TaskStore(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"id":"outside"}')
+    assert store.load("../outside") is None
+    assert store.delete("../outside") is False
+    assert outside.exists()
+    with pytest.raises(ValueError):
+        store.save(TaskRecord("../outside", "文書を保存する", "completed"))

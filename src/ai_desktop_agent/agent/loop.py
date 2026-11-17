@@ -115,14 +115,16 @@ class AgentLoop:
         """指示理解に失敗: UNDERSTANDING → FAILED。"""
         self._transition(AgentState.FAILED)
 
-    def plan_ready(self, subtasks: list[Subtask]) -> None:
+    def plan_ready(self, subtasks: list[Subtask], completed_count: int = 0) -> None:
         """計画が完了、実行に移る: PLANNING → EXECUTING。
 
         Args:
             subtasks: 計画されたサブタスクのリスト。
         """
+        if not 0 <= completed_count < len(subtasks):
+            raise ValueError("実行するサブタスクが必要です")
         self.context.subtasks = subtasks
-        self.context.current_subtask_index = 0
+        self.context.current_subtask_index = completed_count
         self.context.retry_counts.clear()
         self._transition(AgentState.EXECUTING)
 

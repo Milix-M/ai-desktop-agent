@@ -594,7 +594,7 @@ class TestVmRestartAction:
         assert restarted == ["vm-test"]
         assert session.loop.state == AgentState.RECOVERING
         assert session._pending_error is not None
-        assert "初期状態" in session._pending_error.error_message
+        assert "ディスクの初期化は行っていません" in session._pending_error.error_message
 
 
 class TestCursorInfo:

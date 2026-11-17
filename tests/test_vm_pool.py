@@ -11,7 +11,11 @@ class _FakeContainer:
         self.status = status
         self.attrs = {
             "Config": {
-                "Labels": {"com.docker.compose.project": "ai-desktop-agent", **(labels or {})}
+                "Labels": {
+                    "com.docker.compose.project": "ai-desktop-agent",
+                    "ai-desktop-agent.project": "ai-desktop-agent",
+                    **(labels or {}),
+                }
             },
             "Image": "test-vm-image:latest",
             "State": {"Health": {"Status": health}} if health else {},

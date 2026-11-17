@@ -59,3 +59,44 @@ async def test_cancel_before_run_starts_still_closes():
     if session._cleanup_task:
         await session._cleanup_task
     assert not display.is_connected
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_server_shutdown_closes_sessions_before_the_shared_vnc_runtime(
+    tmp_path, monkeypatch, started
+):
+    from ai_desktop_agent.server import app as server
+    from ai_desktop_agent.server.android_provision import AndroidProvisioner
+    from ai_desktop_agent.server.store import TaskStore
+    from ai_desktop_agent.vm.vnc_client import VNCClient
+
+    entered = asyncio.Event()
+    llm = MockLLMProvider()
+    llm.aclose = AsyncMock()
+
+    async def wait(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    llm.understand_instruction = wait
+    display = FakeDisplayBackend()
+    session = TaskSession(llm=llm, display=display)
+    monkeypatch.setattr(server, "_store", TaskStore(tmp_path))
+    monkeypatch.setattr(server, "_sessions", {session.id: session})
+    monkeypatch.setattr(server, "_active_session", session)
+    monkeypatch.setattr(AndroidProvisioner, "start", AsyncMock())
+    monkeypatch.setattr(AndroidProvisioner, "stop", AsyncMock())
+
+    def stop_runtime():
+        assert not display.is_connected
+        llm.aclose.assert_awaited_once()
+
+    shutdown = Mock(side_effect=stop_runtime)
+    monkeypatch.setattr(VNCClient, "shutdown_runtime", shutdown)
+    async with server.lifespan(server.app):
+        await session.start_async("文書を保存する")
+        if started:
+            await entered.wait()
+    shutdown.assert_called_once()
+    assert not server._sessions
+    assert server._active_session is None
