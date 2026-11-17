@@ -35,8 +35,8 @@ class CreationProject:
         self.backend = None
         self.url = ""
 
-    async def boot(self):
-        self.backend = self.client.containers.run(
+    def spawn_backend(self):
+        return self.client.containers.run(
             self.image,
             detach=True,
             network=self.control.name,
@@ -60,6 +60,9 @@ class CreationProject:
                 str(self.root / "vm"): {"bind": "/vm", "mode": "rw"},
             },
         )
+
+    async def boot(self):
+        self.backend = self.spawn_backend()
         self.backend.reload()
         port = self.backend.attrs["NetworkSettings"]["Ports"]["8081/tcp"][0]["HostPort"]
         self.url = f"http://127.0.0.1:{port}"
@@ -202,3 +205,48 @@ async def test_a_crashed_copy_is_cleaned_up_without_replaying_the_creation(proje
             assert project.targets(vm_id) == []
     finally:
         os.close(writer)
+
+
+async def test_duplicate_backend_cannot_rewrite_live_history_or_attach_to_desktops(project):
+    async with project.api() as api:
+        accepted = await api.post(
+            "/vm-creations",
+            json={"kind": "container", "name": "二重起動の検査"},
+            headers={"Idempotency-Key": "ownership-" + uuid.uuid4().hex},
+        )
+        assert accepted.status_code == 202, accepted.text
+        result = await completed(api, accepted.json()["id"])
+        assert result["state"] == "succeeded", result
+
+    seeded = project.backend.exec_run(
+        [
+            "/app/.venv/bin/python",
+            "-c",
+            "from ai_desktop_agent.server.store import TaskRecord, TaskStore; "
+            "store=TaskStore(); "
+            "store.save(TaskRecord(id='owner-active', instruction='save report', "
+            "state='executing'))",
+        ]
+    )
+    assert seeded.exit_code == 0, seeded.output
+    async with project.api() as api:
+        before = (await api.get("/tasks/owner-active")).json()
+        assert before["state"] == "executing"
+
+    duplicate = project.spawn_backend()
+    result = await asyncio.to_thread(duplicate.wait, timeout=20)
+    assert result["StatusCode"] != 0
+    assert "同じ保存先" in duplicate.logs().decode(errors="replace")
+    duplicate.reload()
+    assert set(duplicate.attrs["NetworkSettings"]["Networks"]) == {project.control.name}
+    async with project.api() as api:
+        assert (await api.get("/health")).status_code == 200
+        assert (await api.get("/tasks/owner-active")).json() == before
+
+    # SIGKILL releases the kernel lease even though its lock file remains on disk.
+    await project.replace_backend()
+    async with project.api() as api:
+        restored = (await api.get("/tasks/owner-active")).json()
+        assert restored["state"] == "interrupted"
+        assert restored["success"] is False
+        assert restored["instruction"] == before["instruction"]
