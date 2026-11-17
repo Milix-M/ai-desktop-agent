@@ -14,7 +14,7 @@ class WaitingLLM(MockLLMProvider):
 
 async def test_interleaved_and_concurrent_submissions_keep_one_task_per_vm(monkeypatch):
     monkeypatch.setattr(server, "_sessions", {})
-    monkeypatch.setattr(server, "_task_start_lock", asyncio.Lock())
+    monkeypatch.setattr(server, "_vm_operations", server.AsyncKeyedLocks())
     monkeypatch.setattr(server, "_active_session", None)
     monkeypatch.setattr(server, "_resolve_vm", lambda vm_id: SimpleNamespace(id=vm_id))
     monkeypatch.setattr(server, "_connect_vm_display", lambda vm: FakeDisplayBackend())

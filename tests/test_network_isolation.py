@@ -224,12 +224,17 @@ def test_container_entrypoint_binds_only_management_ip_and_disables_forwarded_he
 ):
     pool, docker = pool_for(tmp_path)
     monkeypatch.setenv("AGENT_MANAGEMENT_CIDRS", "127.0.0.0/8,::1/128")
+    monkeypatch.setenv("WEB_CONCURRENCY", "3")
     monkeypatch.setattr(entrypoint, "VmPool", lambda: pool)
     run = Mock()
     monkeypatch.setattr(entrypoint.uvicorn, "run", run)
     entrypoint.main()
     assert run.call_args.kwargs["host"] == "172.30.0.2"
     assert run.call_args.kwargs["proxy_headers"] is False
+    assert run.call_args.kwargs["workers"] == 1
+    assert run.call_args.kwargs["ws"] is entrypoint.AgentWebSocketProtocol
+    assert run.call_args.kwargs["ws_max_size"] == 1024 * 1024
+    assert run.call_args.kwargs["ws_max_queue"] == 4
     import os
 
     assert os.environ["AGENT_MANAGEMENT_CIDRS"] == "172.30.0.0/16"

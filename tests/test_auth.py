@@ -84,6 +84,50 @@ async def test_https_login_sets_a_secure_cookie(api_store):
         assert "Secure" in response.headers["set-cookie"]
 
 
+@pytest.mark.parametrize("previous", ["missing", "expired", "revoked"])
+async def test_logout_clears_a_missing_or_already_expired_session(api_store, previous):
+    async with AsyncClient(
+        transport=ASGITransport(app=server.app), base_url="http://test"
+    ) as client:
+        session = None
+        if previous != "missing":
+            await client.post("/auth/login", json={"key": TEST_ACCESS_KEY})
+            token = client.cookies.get(COOKIE_NAME)
+            session = auth.get_access()._sessions[token]
+            if previous == "expired":
+                session.expires = 0
+            else:
+                auth.get_access().revoke(token)
+        response = await client.post("/auth/logout")
+        assert response.status_code == 200
+        assert "Max-Age=0" in response.headers["set-cookie"]
+        assert client.cookies.get(COOKIE_NAME) is None
+        assert (await client.get("/auth/status")).json() == {"authenticated": False}
+        if session:
+            assert session.revoked.is_set()
+
+
+async def test_logout_still_rejects_a_foreign_origin_without_revoking_the_session(api_store):
+    async with AsyncClient(
+        transport=ASGITransport(app=server.app), base_url="http://test"
+    ) as client:
+        await client.post("/auth/login", json={"key": TEST_ACCESS_KEY})
+        token = client.cookies.get(COOKIE_NAME)
+        response = await client.post("/auth/logout", headers={"Origin": "https://evil.example"})
+        assert response.status_code == 403
+        assert client.cookies.get(COOKIE_NAME) == token
+        assert (await client.get("/auth/status")).json() == {"authenticated": True}
+
+
+async def test_anonymous_logout_does_not_revoke_another_clients_session(api_store):
+    transport = ASGITransport(app=server.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as signed_in:
+        await signed_in.post("/auth/login", json={"key": TEST_ACCESS_KEY})
+        async with AsyncClient(transport=transport, base_url="http://test") as anonymous:
+            assert (await anonymous.post("/auth/logout")).status_code == 200
+        assert (await signed_in.get("/auth/status")).json() == {"authenticated": True}
+
+
 async def test_bearer_key_is_supported_but_query_parameters_are_not(api_store):
     async with AsyncClient(
         transport=ASGITransport(app=server.app), base_url="http://test"
