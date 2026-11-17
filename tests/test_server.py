@@ -1,12 +1,13 @@
 """サーバー起動テスト。"""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.server import app as server_app
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 @pytest.fixture(autouse=True)

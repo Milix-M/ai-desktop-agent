@@ -13,11 +13,18 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Annotated
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
+from ai_desktop_agent.server.auth import (
+    COOKIE_NAME,
+    SESSION_SECONDS,
+    AuthenticationMiddleware,
+    get_access,
+)
 from ai_desktop_agent.server.browser_access import ALLOWED_ORIGINS, BrowserOriginMiddleware
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.session import TaskSession
@@ -65,6 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with contextlib.suppress(Exception):
         faulthandler.register(signal.SIGUSR1)
     marked = get_store().mark_interrupted()
+    get_access()
+    await run_vm_call(get_pool().retire_legacy_relays)
     if marked:
         logger.info("起動時に中断タスク %d 件をマーク", marked)
     from ai_desktop_agent.server.android_provision import AndroidProvisioner
@@ -109,21 +118,87 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
 
 
+@app.exception_handler(RequestValidationError)
+async def invalid_request_handler(request: Request, error: RequestValidationError):
+    # Never echo credentials or invalid Unicode from submitted values into errors.
+    detail = [{key: item[key] for key in ("loc", "msg", "type")} for item in error.errors()]
+    return JSONResponse(
+        status_code=422, content={"detail": detail}, headers={"Cache-Control": "no-store"}
+    )
+
+
 @app.exception_handler(StorageError)
 async def storage_error_handler(request, error: StorageError):
     return JSONResponse(status_code=503, content={"detail": str(error)})
 
 
+app.add_middleware(AuthenticationMiddleware)
+
 # CORS: Next.js (port 3000) からの API 呼び出しを許可
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.add_middleware(BrowserOriginMiddleware)
+
+
+class LoginRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=256)
+
+
+@app.get("/auth/status")
+async def auth_status(request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return {"authenticated": get_access().authenticate(request)[0]}
+
+
+@app.post("/auth/login")
+async def login(request: Request, body: LoginRequest, response: Response):
+    from fastapi import HTTPException
+
+    access = get_access()
+    if not access.valid_key(body.key):
+        raise HTTPException(
+            status_code=401, detail="接続キーが違います", headers={"Cache-Control": "no-store"}
+        )
+    access.revoke(request.cookies.get(COOKIE_NAME, ""))
+    response.set_cookie(
+        COOKIE_NAME,
+        access.new_session(),
+        max_age=SESSION_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"authenticated": True}
+
+
+@app.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    get_access().revoke(request.cookies.get(COOKIE_NAME, ""))
+    response.delete_cookie(COOKIE_NAME, httponly=True, samesite="strict")
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "logged_out"}
+
+
+@app.websocket("/vnc/{vm_id}")
+async def vnc_stream(ws: WebSocket, vm_id: str):
+    from fastapi import HTTPException
+
+    from ai_desktop_agent.server.vnc_proxy import proxy_vnc
+
+    try:
+        vm = await run_vm_call(_resolve_vm, vm_id)
+    except (HTTPException, DockerUnavailableError, StorageError):
+        await ws.close(1008)
+        return
+    await proxy_vnc(ws, vm.vnc_host or "vm")
+
 
 # アクティブなセッション（後方互換：最新の1件）
 _active_session: TaskSession | None = None
@@ -190,8 +265,8 @@ class VmInfoModel(BaseModel):
     name: str
     status: str
     health: str | None = None
-    vnc_port: int = 5900
-    ws_port: int = 6080
+    vnc_port: int = 0
+    ws_port: int = 0
     vnc_host: str = ""
     managed: bool = True
     kind: str = "qemu"

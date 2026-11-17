@@ -2,11 +2,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import yaml
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.server.app import app
 from ai_desktop_agent.server.browser_access import BrowserOriginMiddleware
 from ai_desktop_agent.server.vm_pool import VmPool
+from tests.http import AuthenticatedClient as AsyncClient
 from tests.test_vm_pool import _FakeDocker
 
 
@@ -40,11 +41,10 @@ def test_all_compose_ports_are_loopback_only():
             assert port.startswith("127.0.0.1:"), port
 
 
-def test_dynamic_desktop_and_relay_publish_only_on_loopback(tmp_path, monkeypatch):
+def test_dynamic_desktop_does_not_publish_an_unauthenticated_port(tmp_path, monkeypatch):
     monkeypatch.setenv("DESKTOP_IMAGE_REF", "desktop:test")
     client = _FakeDocker()
     pool = VmPool(client=client, state_file=tmp_path / "state.json")
     pool.create_vm(kind="container")
     ports = [binding for run in client.containers.runs for binding in run.get("ports", {}).values()]
-    assert ports
-    assert all(binding[0] == "127.0.0.1" for binding in ports)
+    assert ports == []

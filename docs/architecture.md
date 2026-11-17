@@ -29,21 +29,15 @@ flowchart LR
         direction LR
         fe["frontend<br/>Next.js :3000"]
         be["backend<br/>FastAPI :8081"]
-        wsd["websockify-desktop<br/>VNC→WS :6081<br/>(container限定)"]
-        desk["desktop<br/>軽量デスクトップ :5901<br/>Xfce+TigerVNC (KVMなし時)"]
-        ws["websockify<br/>VNC→WS :6080<br/>(kvm限定)"]
-        vm["vm<br/>QEMU/KVM :5900 (KVMあり時)<br/>KDE / 4vCPU・4GB"]
-        and["android<br/>Android-x86 :5590<br/>(kvm限定・手動起動、VNC操作)"]
-        vm2["vm-id / desk-id / and-id<br/>動的払い出し :5910+/:6090+"]
+        desk["desktop<br/>Xfce+TigerVNC<br/>(container限定)"]
+        vm["vm<br/>QEMU/KVM<br/>KDE / 4vCPU・4GB"]
+        and["android<br/>Android-x86<br/>(kvm限定・手動起動)"]
+        vm2["vm-id / desk-id / and-id<br/>専用コンテナ"]
         data["data/<br/>tasks/*.json<br/>vms.json"]
         docker["Docker<br/>デーモン"]
     end
     user -->|指示・視聴<br/>HTTP :3000| fe
-    fe -->|REST / WS<br/>:8081| be
-    user -->|画面配信 WS<br/>:6081（KVMなし時）| wsd
-    user -->|画面配信 WS<br/>:6080（KVMあり時）| ws
-    wsd -->|VNC中継<br/>desktop:5900| desk
-    ws -->|VNC中継<br/>vm:5900| vm
+    user -->|認証付き REST / WS<br/>状態通知・画面配信 :8081| be
     be -->|VNC操作（KVMなし時）<br/>desktop:5900| desk
     be -->|VNC操作（KVMあり時）<br/>vm:5900| vm
     be -->|VNC操作<br/>android:5900| and
@@ -52,29 +46,24 @@ flowchart LR
     docker -->|コンテナ払い出し<br/>qcow2フルコピー<br/>動的コンテナはKVM不要| vm2
 ```
 
-| 名称 | 中身 | ポート | 役割 |
+| 名称 | 中身 | ホスト公開ポート | 役割 |
 |---|---|---|---|
 | frontend | Next.js | 3000 | チャットUIとnoVNCビューアとVM管理 |
-| backend | FastAPI | 8081 | 指示受付とエージェント実行とタスク保存 |
-| desktop | XfceとTigerVNC | 5901 | KVMなし時の作業環境。QEMUは不要でcontainer限定 |
-| websockify-desktop | VNCからWSへの中継 | 6081 | desktop向け画面配信でcontainer限定 |
-| vm | QEMUとKVM | 5900 | KVMあり時の作業環境。KDEでkvm限定 |
-| websockify | VNCからWSへの中継 | 6080 | vm向け画面配信でkvm限定 |
-| android | Android-x86とQEMU | 5590 | Android端末でkvm限定の手動起動。VNC操作は通常VMと同じ |
-| websockify-android | VNCからWSへの中継 | 6070 | android向け画面配信でkvm限定の手動起動 |
+| backend | FastAPI | 8081 | 認証、API、状態通知、VNC転送、エージェント実行、履歴保存 |
+| desktop | XfceとTigerVNC | なし | containerプロファイルの作業環境 |
+| vm | QEMUとKVM | なし | KDEの作業環境。kvmプロファイルに属する |
+| android | Android-x86とQEMU | なし | kvmプロファイルの手動起動。VNC操作は通常VMと同じ |
 
-動的環境は5910番台のVNCと6090番台のWSを使い、台数分コンテナが増える。QEMU系はkvmプロファイル、desktop系はcontainerプロファイルに属する。up.shはx86_64、/dev/kvm、ゲストファイルが揃う場合にvm系、それ以外はdesktop系を起動する。初期起動の作業環境は1つで、androidは含まない。USE_KVM=falseはdesktopを選び、trueで条件が不足すれば起動前に止まる。
+動的環境は台数分の専用コンテナを使い、ホストのポートを払い出さない。QEMU系はkvmプロファイル、desktop系はcontainerプロファイルに属する。up.shはx86_64、/dev/kvm、ゲストファイルが揃う場合にvm系、それ以外はdesktop系を起動する。初期起動の作業環境は1つで、androidは含まない。USE_KVM=falseはdesktopを選び、trueで条件が不足すれば起動前に止まる。
 
 | 送信元 | 送信先 | 経路 |
 |---|---|---|
 | ブラウザ | backendのAPIとWS | ホストの:8081 |
-| ブラウザ | 画面配信 | KVMありはホストの:6080、なしはホストの:6081。Androidはホストの:6070 |
+| ブラウザ | 画面配信 | :8081/vnc/{id}。認証後にバックエンドがVNCへ転送する |
 | backend | desktopのVNC | desktop:5900。KVMなし時でDocker内部ネットワーク |
 | backend | VMのVNC | vm:5900。KVM時で動的VMはvm-ID:5900 |
 | backend | AndroidのVNC | android:5900。動的はand-ID:5900 |
-| websockify-desktop | desktopのVNC | 同上 |
-| websockify | VMのVNC | 同上 |
-| websockify-android | AndroidのVNC | 同上 |
+| backend | AndroidのADB | Docker内部の名前:5555 |
 | backend | Docker | /var/run/docker.sock。VM作成と再起動用 |
 
 LLM_PROVIDER、LLM_MODEL、各種APIキーでLLMを設定する。USE_KVMの既定値はauto、ALLOW_TCG_VMはfalse、VM_MEMORYは4096、VM_CPUSは4、DATA_DIRは./dataとなる。up.shはComposeが解決したUSE_KVMを読み、接続先と判定結果をバックエンドにも渡す。VNC_HOSTの既定はComposeではdesktop、バックエンド単体ではlocalhostとなる。VM_MEMORYとVM_CPUSの固定値はComposeで定め、動的払い出しでは環境変数を使う。
@@ -82,6 +71,14 @@ LLM_PROVIDER、LLM_MODEL、各種APIキーでLLMを設定する。USE_KVMの既�
 ## バックエンド
 
 src/ai_desktop_agent/server/app.pyがAPIとWebSocketを提供する。
+
+### 認証
+
+server/auth.pyが接続キーとブラウザセッションを管理する。AGENT_ACCESS_TOKENがなければdata/auth/access-keyを0600で生成する。POST /auth/loginでキーを照合し、12時間有効のHttpOnly・SameSite=Strict Cookieを発行する。HTTPSではSecureも付ける。ブラウザの保存領域やURLにはキーを残さない。
+
+GET /auth/statusとGET /health、POST /auth/login以外は認証を必須とする。APIクライアントはAuthorization: Bearerを使える。POST /auth/logoutと期限切れでセッションを失効させ、開いているWebSocketも閉じる。セッションはメモリ内で管理し、バックエンド再起動後は再ログインする。利用者ごとの権限分離は未対応となる。
+
+画面配信は/vnc/{id}から所属プロジェクトの環境へ接続する。接続先はVM情報から決め、任意のホストやポートを受け付けない。バイナリ転送にはサイズと送信待ち時間の上限を設け、切断時にTCP接続も閉じる。
 
 ### エンドポイント
 
@@ -123,11 +120,11 @@ server/vm_control.pyのVmControllerが既定VMの状態取得と再起動を担�
 
 ### VMプール
 
-server/vm_pool.pyのVmPoolが環境の一覧・作成・起動・停止・再起動・削除を担う。固定desktopはid=desktop、managed=False、既定ポート5901と6081で検出する。default_vmは稼働中のdesktopを優先し、なければ稼働中の先頭を返す。
+server/vm_pool.pyのVmPoolが環境の一覧・作成・起動・停止・再起動・削除を担う。固定desktopはid=desktop、managed=Falseで検出する。default_vmは稼働中のdesktopを優先し、なければ稼働中の先頭を返す。
 
-POST /vmsのkindはqemuが既定で、containerとandroidも選べる。各環境は本体と中継の2コンテナからなる。QEMU系は通常KVMを必要とし、TCGの明示許可時は/dev/kvmを要求しない。containerはKVM不要となる。動的IDの接頭辞はvm、desk、andで、その後に16進数を付ける。動的環境は全種別の合計で8台までとする。
+POST /vmsのkindはqemuが既定で、containerとandroidも選べる。各環境は専用コンテナで動く。QEMU系は通常KVMを必要とし、TCGの明示許可時は/dev/kvmを要求しない。containerはKVM不要となる。動的IDの接頭辞はvm、desk、andで、その後に16進数を付ける。動的環境は全種別の合計で8台までとする。
 
-VNCとWSは5910番台と6090番台、AndroidのADBは5570番台から割り当て、data/vms.jsonに保存する。kindは一覧にも返す。固定vm・desktop・androidもDELETE /vmsで本体と中継を削除できる。ホストパスはバックエンド自身の/app/dataマウント元から逆算する。
+環境情報はdata/vms.jsonに保存し、kindは一覧にも返す。旧APIのvnc_port・ws_port・adb_portは0を返し、画面接続には/vnc/{id}を使う。固定vm・desktop・androidもDELETE /vmsで削除できる。ホストパスはバックエンド自身の/app/dataマウント元から逆算する。
 
 ## 状態機械と実行フロー
 
@@ -298,7 +295,7 @@ VNC実装はvm/vnc_client.pyに置き、vncdotoolを包む。既知の注意点�
 
 ### 実行環境の3種
 
-desktopはdesktop配下に置き、KVMなし時の作業環境とする。XfceとTigerVNCの軽量コンテナとし、QEMUは不要とする。containerプロファイル配下に置く。このためKVMなし時の./scripts/up.shかdocker compose --profile container upでのみ起動する。VNCはdesktop:5900でホスト公開5901、画面配信はwebsockify-desktopの:6081とする。解像度は1280x800でVNC_GEOMETRYとし、認証なしで隔離網前提とする。FirefoxとLibreOfficeのWriterとCalc、xdotool、wmctrlを同梱する。
+desktopはdesktop配下に置き、XfceとTigerVNCをcontainerプロファイルで動かす。QEMUは不要となる。VNCはDocker内部のdesktop:5900で使い、画面配信は認証付きプロキシを通す。解像度は1280x800でVNC_GEOMETRYが指定する。FirefoxとLibreOfficeのWriterとCalc、xdotool、wmctrlを同梱する。
 
 vmはvm配下に置き、QEMUとKVMでKDEを動かす。kvmプロファイルに属し、起動条件と選択は構成の節に従う。up.shがバックエンドの接続先も切り替える。VmPool.default_vmはdesktop稼働時にはdesktopを優先する。
 
@@ -308,7 +305,7 @@ androidはAndroid-x86をQEMUで動かし、動的払い出しとandroidサービ
 
 USE_KVMは未設定時にautoとする。起動前にゲスト4ファイルを確認し、Composeのマウントも存在しないファイルを自動作成しない。QEMUのentrypointも必要なファイルを確認する。TCGはALLOW_TCG_VM=trueでのみ許可する。エージェントのvm_restartが制限環境で要求された場合は失敗として_pending_errorに渡し、別手段での継続を促す。
 
-動的VMとコンテナの全体手順は次の通りとする。VmPoolのserver/vm_pool.pyがDocker経由で本体コンテナとwebsockifyコンテナを対で払い出す。QEMU VMはKVM必須、コンテナは不要とする。
+VmPoolはDocker経由で専用コンテナを払い出す。新しい環境に公開ポートや中継は作らない。起動時に同じプロジェクトの旧中継を撤去し、失敗した場合はバックエンドの起動を止める。既存環境のVNC公開設定は再作成するまで残る。QEMU VMは通常KVMを必要とし、コンテナは不要となる。
 
 ```mermaid
 sequenceDiagram
@@ -317,17 +314,17 @@ sequenceDiagram
     participant POOL as backend (VmPool)
     participant DOCKER as Docker
     participant VM as vm-id / desk-id / and-id
-    participant WS as ws-id (websockify)
     U->>FE: + VM追加 / + コンテナ追加 / + Android追加
     FE->>POOL: POST /vms {kind}
     activate POOL
     POOL->>DOCKER: base qcow2をフルコピー (cp --sparse=always、qemuのみ)
     DOCKER-->>POOL: /vm/overlays/id.qcow2
-    POOL->>DOCKER: 本体コンテナ起動 (QEMUはVNC 5910+、QMP/QGAソケット)
-    POOL->>DOCKER: websockify起動 (WS 6090+、中継先は名前:5900)
-    POOL-->>FE: id, vnc_port, ws_port (status creating)
+    POOL->>DOCKER: 専用コンテナ起動 (VNCはDocker内部の5900)
+    POOL-->>FE: id, kind (status creating)
     deactivate POOL
     FE->>FE: 定期的に /vms を追跡 (一覧15秒/監視2〜5秒) healthyまで
+    FE->>POOL: 認証付き WS /vnc/id
+    POOL->>VM: VNCのバイナリ転送
     FE->>POOL: POST /tasks (vm_idつき)
     POOL->>VM: VNC接続・エージェント実行 (vm:5900 / vm-id:5900)
     VM-->>POOL: 画面・操作
@@ -343,7 +340,7 @@ sequenceDiagram
     POOL->>DOCKER: ディスク削除 (qemuのみ)
     POOL-->>FE: deleted
     deactivate POOL
-    Note right of POOL: compose既定VM (id=vm) は自動検出<br/>ポート割当は data/vms.json 保存<br/>QEMU系 (qemu/android) の作成はKVM必須 (非対応環境は409)<br/>kind=container はKVM不要
+    Note right of POOL: 固定環境も自動検出<br/>環境情報は data/vms.json に保存<br/>QEMU系は通常KVMを必要とする<br/>kind=container はKVM不要
 ```
 
 ### QEMU起動構成
@@ -378,7 +375,7 @@ data/vms.jsonはファイルロックで同時更新を保護し、原子的に�
 
 ### 監視と管理
 
-ヘルス確認はVNCポート疎通でcomposeが行う。QMPのsrc/ai_desktop_agent/vm/qmp.pyはquery-statusなどを行い、/vm/statusのqmp_statusに反映する。guest agentのsrc/ai_desktop_agent/vm/qga.pyはguest-pingとget-osinfo、guest-execのコマンド実行と入出力取得を行う。エージェントがxdotoolなどを直接実行する将来経路とし、現状は診断と検証用とする。websockifyはVNCからWebSocketへの中継とする。既定VMは:6080、動的VMはVMごとのコンテナで6090番台とする。ブラウザはnoVNCのVncViewer.tsxで見る。VmControllerとVmPoolのうち前者は既定VMの状態と再起動、後者は動的VMの一覧と作成と再起動と削除を担う。Dockerソケット経由とし、ポート割当はdata/vms.jsonに保存する。
+ヘルス確認はVNCポート疎通でComposeが行う。QMPのvm/qmp.pyはquery-statusなどを行い、/vm/statusのqmp_statusに反映する。guest agentのvm/qga.pyはguest-ping、get-osinfo、guest-execを提供し、診断と検証に使う。画面配信はserver/vnc_proxy.pyが担い、ブラウザはVncViewer.tsxのnoVNCで表示する。VmControllerは既定VMの状態と再起動、VmPoolは各環境の管理を担う。
 
 ## フロントエンド
 
@@ -388,7 +385,7 @@ Next.jsのApp Routerを使う。InstructionInputで指示と再起動許可を�
 
 ## 安全性
 
-安全性と未実装の対策は[safety.md](safety.md)にまとめる。バックエンドはDockerソケットを使うため、バックエンド侵害時までホストの隔離を保証する構成ではない。認証を備えた外部公開は未対応とする。
+安全性と未実装の対策は[safety.md](safety.md)にまとめる。バックエンドはDockerソケットを使うため、バックエンド侵害時までホストの隔離を保証する構成ではない。利用者ごとの権限分離と外部公開の検証は未対応とする。
 
 ## 制限と今後
 

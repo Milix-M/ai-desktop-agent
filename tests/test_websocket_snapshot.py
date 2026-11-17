@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.state import Goal, Subtask
@@ -10,6 +10,8 @@ from ai_desktop_agent.server import app as server
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskRecord, TaskStore
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from tests.http import AUTH_HEADERS
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 @pytest.fixture
@@ -26,7 +28,7 @@ def store(tmp_path, monkeypatch):
 def test_reconnect_reports_tasks_that_finished_while_offline(store):
     store.save(TaskRecord("old-a", "保存する", "executing", vm_id="A"))
     store.save(TaskRecord("done-b", "入力する", "completed", success=True, vm_id="B"))
-    client = TestClient(server.app)
+    client = TestClient(server.app, headers=AUTH_HEADERS)
     with client.websocket_connect("/ws") as ws:
         snapshot = ws.receive_json()
         states = {task["vm_id"]: task["state"] for task in snapshot["tasks"]}

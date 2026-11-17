@@ -1,10 +1,9 @@
 """動的VMプール — 複数VMの作成・削除・発見。
 
-各VMは以下で構成される:
-- QEMUコンテナ（`vm-<id>`）: baseのフルコピーを起動（共有しない）
-- websockifyコンテナ（`ws-<id>`）: ブラウザ向けVNC中継
+各環境は専用コンテナで動く。QEMUはbaseの独立したコピーを使う。
+ブラウザの画面配信はバックエンドの認証付きVNCプロキシを通す。
 
-compose の `vm` サービス（固定ポート）は id `vm` として自動検出する。
+compose の `vm` サービスは id `vm` として自動検出する。
 Docker が使えない環境では DockerUnavailableError を送出する。
 """
 
@@ -53,17 +52,8 @@ FIXED_RELAY_SERVICE = {
     DESKTOP_SERVICE: "websockify-desktop",
     ANDROID_SERVICE: "websockify-android",
 }
-#: compose管理サービスの既定ポート（ホスト公開用。保存値がない場合）。
-DESKTOP_VNC_PORT = 5901
-DESKTOP_WS_PORT = 6081
-#: 固定Androidの既定ポート（composeのportsに対応）。
-ANDROID_VNC_PORT = 5590
-ANDROID_WS_PORT = 6070
 OVERLAYS_DIR = "/vm/overlays"  # backendコンテナ内のマウント先
 BASE_IMAGE_IN_VM = "/vm/desktop.qcow2"  # vmコンテナ内から見たbase
-VNC_START_PORT = 5910
-WS_START_PORT = 6090
-ADB_START_PORT = 5570
 MAX_VMS = 8
 
 
@@ -75,12 +65,12 @@ class VmInfo:
     name: str
     status: str  # running / exited / creating / not_found
     health: str | None = None
-    vnc_port: int = 5900  # ホスト側公開ポート
-    ws_port: int = 6080  # ホスト側公開ポート
+    vnc_port: int = 0  # 旧API互換。接続は /vnc/{id} を使う
+    ws_port: int = 0  # 旧API互換。外部ポートを払い出さない
     vnc_host: str = ""  # backend からの接続先ホスト名
     managed: bool = True  # False: compose管理の既定VM・desktop
     kind: str = KIND_QEMU  # KIND_QEMU / KIND_CONTAINER / KIND_ANDROID
-    adb_port: int = 0  # ホスト側ADB公開ポート（androidのみ）
+    adb_port: int = 0  # 旧API互換。ADBはDocker内部の5555を使う
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -91,7 +81,7 @@ class VmPool:
 
     Args:
         client: テスト用の差し替え可能な Docker クライアント。
-        state_file: ポート割当等の永続化先。省略時は `$DATA_DIR/vms.json`。
+        state_file: 環境情報の永続化先。省略時は `$DATA_DIR/vms.json`。
         overlays_dir: overlay qcow2 の保存先（backendコンテナ内パス）。
     """
 
@@ -107,6 +97,19 @@ class VmPool:
         self._overlays_dir = overlays_dir
 
     # ── 一覧・取得 ──────────────────────────────────
+
+    def retire_legacy_relays(self) -> None:
+        """Remove this project's unauthenticated relays before exposing the authenticated API."""
+        docker = self._docker()
+        targets = []
+        for service in FIXED_RELAY_SERVICE.values():
+            targets.extend(self._fixed_containers(docker, service))
+        targets.extend(
+            c for c in self._dynamic_containers(docker) if LABEL_WS_FOR in self._labels(c)
+        )
+        for container in targets:
+            container.remove(force=True)
+            logger.info("旧画面配信の中継を削除: %s", container.name)
 
     def _project_name(self, docker: Any) -> str:
         project = os.environ.get("COMPOSE_PROJECT_NAME")
@@ -241,13 +244,12 @@ class VmPool:
     # ── 作成・削除 ──────────────────────────────────
 
     def create_vm(self, name: str | None = None, kind: str = KIND_QEMU) -> VmInfo:
-        """新しい環境を作成して起動する。本体 + 中継の2コンテナ。
+        """新しい専用環境を作成する。公開ポートと中継は作らない。
 
-        kind=qemu: QEMU VM（overlay + 2コンテナ）。KVM必須のため、KVMが
+        kind=qemu: QEMU VM（専用ディスクとコンテナ）。KVM必須のため、KVMが
         利用できない環境では作成を制限する（`KvmUnavailableError`）。
         kind=container: 軽量デスクトップコンテナ。KVM不要でどこでも作れる。
-        kind=android: Android-x86のQEMU起動。VNC操作は通常VMと同一のため
-        中継も作る。KVM必須。
+        kind=android: Android-x86のQEMU起動。KVM必須。
         """
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
@@ -271,8 +273,7 @@ class VmPool:
 
         prefix = ID_PREFIX[kind]
         vm_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
-        vnc_port = self._alloc_port(VNC_START_PORT, lambda v: v.vnc_port)
-        ws_port = self._alloc_port(WS_START_PORT, lambda v: v.ws_port)
+        vnc_port = ws_port = 0
 
         network = self._backend_network(docker)
         common_labels = {
@@ -297,19 +298,13 @@ class VmPool:
                 use_kvm = resolve_use_kvm()
                 memory = os.environ.get("ANDROID_MEMORY", "2048")
                 cpus = os.environ.get("ANDROID_CPUS", "4")
-                # ADB転送のホスト側ポート（backendの強制経路＋開発者の手動adb用）。
-                # コンテナ側は entrypoint の ANDROID_ADB_PORT（既定5555）に転送される。
-                adb_port = self._alloc_port(ADB_START_PORT, lambda v: v.adb_port)
+                # ADBはDocker内部の5555に接続する。ホストには公開しない。
                 docker.containers.run(
                     image,
                     name=vm_name,
                     detach=True,
                     # TCGの明示許可時はKVMデバイスを要求しない。
                     devices=["/dev/kvm:/dev/kvm"] if is_kvm_available(docker) else [],
-                    ports={
-                        "5900/tcp": ("127.0.0.1", vnc_port),
-                        "5555/tcp": ("127.0.0.1", adb_port),
-                    },
                     environment={
                         "ANDROID_ISO": "/android/boot.iso",
                         "ANDROID_MEMORY": memory,
@@ -327,9 +322,6 @@ class VmPool:
                     labels=common_labels,
                     network=network,
                     restart_policy={"Name": "unless-stopped"},
-                )
-                self._start_relay_or_rollback(
-                    docker, vm_id, vm_name, ws_port, network, common_labels
                 )
                 self._save_state(
                     vm_id,
@@ -372,7 +364,6 @@ class VmPool:
                     detach=True,
                     # TCGの明示許可時はKVMデバイスを要求しない。
                     devices=["/dev/kvm:/dev/kvm"] if is_kvm_available(docker) else [],
-                    ports={"5900/tcp": ("127.0.0.1", vnc_port)},
                     environment={
                         "VM_MEMORY": memory,
                         "VM_CPUS": cpus,
@@ -396,7 +387,6 @@ class VmPool:
                     name=vm_name,
                     detach=True,
                     shm_size="1g",
-                    ports={"5900/tcp": ("127.0.0.1", vnc_port)},
                     environment={
                         "VNC_GEOMETRY": os.environ.get("VNC_GEOMETRY", "1280x800"),
                         "VNC_DEPTH": os.environ.get("VNC_DEPTH", "24"),
@@ -406,37 +396,7 @@ class VmPool:
                     restart_policy={"Name": "unless-stopped"},
                 )
 
-            self._start_relay_or_rollback(docker, vm_id, vm_name, ws_port, network, common_labels)
             return self._finish_create(vm_id, name, vm_name, vnc_port, ws_port, kind)
-
-    def _start_relay_or_rollback(self, docker: Any, vm_id: str, *args) -> None:
-        try:
-            self._start_relay(docker, vm_id, *args)
-        except Exception:
-            self.remove_vm(vm_id)
-            raise
-
-    def _start_relay(
-        self,
-        docker: Any,
-        vm_id: str,
-        vm_name: str,
-        ws_port: int,
-        network: str | None,
-        common_labels: dict,
-    ) -> None:
-        """中継（websockify）コンテナを起動する。"""
-        ws_image = os.environ.get("WEBSOCKIFY_IMAGE", "ai-desktop-agent-websockify")
-        docker.containers.run(
-            ws_image,
-            name=f"ai-desktop-agent-ws-{vm_id}",
-            command=f"0.0.0.0:6080 {vm_name}:5900",
-            detach=True,
-            ports={"6080/tcp": ("127.0.0.1", ws_port)},
-            labels={**common_labels, LABEL_WS_FOR: vm_id},
-            network=network,
-            restart_policy={"Name": "unless-stopped"},
-        )
 
     def _finish_create(
         self,
@@ -672,16 +632,7 @@ class VmPool:
             name = saved["name"]
         if kind is None:
             kind = self._labels(container).get(LABEL_KIND, KIND_QEMU)
-        if saved:
-            vnc_port = int(saved.get("vnc_port", 5900))
-            ws_port = int(saved.get("ws_port", 6080))
-            adb_port = int(saved.get("adb_port", 0))
-        elif vm_id == DESKTOP_SERVICE:
-            vnc_port, ws_port, adb_port = DESKTOP_VNC_PORT, DESKTOP_WS_PORT, 0
-        elif vm_id == ANDROID_SERVICE:
-            vnc_port, ws_port, adb_port = ANDROID_VNC_PORT, ANDROID_WS_PORT, 0
-        else:
-            vnc_port, ws_port, adb_port = 5900, 6080, 0
+        vnc_port = ws_port = adb_port = 0
         return VmInfo(
             id=vm_id,
             name=name,
@@ -694,20 +645,6 @@ class VmPool:
             kind=kind,
             adb_port=adb_port,
         )
-
-    def _alloc_port(self, start: int, key) -> int:
-        used = {key(v) for v in self.list_vms()}
-        for container in self._docker().containers.list(all=True):
-            bindings = (container.attrs.get("HostConfig") or {}).get("PortBindings") or {}
-            for ports in bindings.values():
-                for binding in ports or []:
-                    value = binding.get("HostPort", "")
-                    if str(value).isdigit():
-                        used.add(int(value))
-        port = start
-        while port in used:
-            port += 1
-        return port
 
     def _create_overlay(self, vm_id: str) -> str:
         """baseのフルコピーを作り、ホスト側パスを返す。

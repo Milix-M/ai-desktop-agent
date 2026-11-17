@@ -1,9 +1,10 @@
 from unittest.mock import Mock
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.server import app as server
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 @pytest.mark.parametrize("action", ["pause", "resume", "stop"])

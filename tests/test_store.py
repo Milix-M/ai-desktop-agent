@@ -1,7 +1,7 @@
 """タスク永続化（store + 履歴API）のテスト。"""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
@@ -10,6 +10,7 @@ from ai_desktop_agent.server import app as server_app
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import ACTIVE_STATES, TaskRecord, TaskStore
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 @pytest.fixture

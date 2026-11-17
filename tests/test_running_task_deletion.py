@@ -1,13 +1,14 @@
 import asyncio
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.server import app as server
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from tests.http import AuthenticatedClient as AsyncClient
 
 
 class WaitingLLM(MockLLMProvider):

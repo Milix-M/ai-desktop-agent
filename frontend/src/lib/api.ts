@@ -7,8 +7,11 @@ const BACKEND_URL =
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${BACKEND_URL}${path}`;
-  const response = init ? await fetch(url, init) : await fetch(url);
+  const response = await fetch(url, { ...init, credentials: "include" });
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined" && !path.startsWith("/auth/")) {
+      window.dispatchEvent(new Event("auth-required"));
+    }
     let detail = "";
     try {
       const body: unknown = await response.json();
@@ -47,11 +50,22 @@ export function getWsUrl(): string {
   return `${protocol}//${window.location.hostname}:8081/ws`;
 }
 
-export function getVncWsUrl(wsPort?: number): string {
-  const port = wsPort ?? 6080;
-  if (typeof window === "undefined") return `ws://localhost:${port}`;
+export function getVncWsUrl(vmId = "vm"): string {
+  if (typeof window === "undefined") return `ws://localhost:8081/vnc/${encodeURIComponent(vmId)}`;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:${port}`;
+  return `${protocol}//${window.location.hostname}:8081/vnc/${encodeURIComponent(vmId)}`;
+}
+
+export function getAuthStatus(): Promise<{ authenticated: boolean }> {
+  return request("/auth/status");
+}
+
+export function login(key: string): Promise<{ authenticated: boolean }> {
+  return request("/auth/login", post({ key }));
+}
+
+export function logout(): Promise<{ status: string }> {
+  return request("/auth/logout", post());
 }
 
 export function getVms(): Promise<VmInfo[]> {

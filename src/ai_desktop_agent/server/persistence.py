@@ -4,9 +4,10 @@ import fcntl
 import json
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import TextIO
 
 
 class StorageError(RuntimeError):
@@ -27,13 +28,23 @@ def check_writable(directory: Path) -> None:
 
 
 def atomic_json(path: Path, value: object) -> None:
+    _atomic_write(
+        path, lambda output: json.dump(value, output, ensure_ascii=False, allow_nan=False)
+    )
+
+
+def atomic_text(path: Path, value: str) -> None:
+    _atomic_write(path, lambda output: output.write(value))
+
+
+def _atomic_write(path: Path, write: Callable[[TextIO], object]) -> None:
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         temporary = Path(name)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(value, output, ensure_ascii=False, allow_nan=False)
+            write(output)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)

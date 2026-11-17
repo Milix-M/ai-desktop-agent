@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
@@ -17,6 +17,7 @@ from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskRecord, TaskStore
 from ai_desktop_agent.server.vm_pool import LABEL_PROJECT, VmPool
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
+from tests.http import AuthenticatedClient as AsyncClient
 from tests.test_vm_pool import _FakeContainer, _FakeDocker
 
 

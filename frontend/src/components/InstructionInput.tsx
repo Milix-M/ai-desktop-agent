@@ -5,10 +5,12 @@ import { useRef, useState, type KeyboardEvent } from "react";
 interface Props {
   onSubmit: (instruction: string, allowVmRestart: boolean) => Promise<void>;
   disabled: boolean;
+  initialValue?: string;
+  onDraftChange?: (value: string) => void;
 }
 
-export default function InstructionInput({ onSubmit, disabled }: Props) {
-  const [value, setValue] = useState("");
+export default function InstructionInput({ onSubmit, disabled, initialValue = "", onDraftChange }: Props) {
+  const [value, setValue] = useState(initialValue);
   const [allowVmRestart, setAllowVmRestart] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const pendingRef = useRef(false);
@@ -22,6 +24,7 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
     try {
       await onSubmit(trimmed, allowVmRestart);
       setValue("");
+      onDraftChange?.("");
     } catch {
       // The parent shows the error; keep the instruction for retry.
     } finally {
@@ -48,7 +51,7 @@ export default function InstructionInput({ onSubmit, disabled }: Props) {
         className="instruction-input"
         placeholder="例: LibreOfficeで表を作成して /data/report.ods に保存してください"
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => { setValue(e.target.value); onDraftChange?.(e.target.value); }}
         onKeyDown={handleKeyDown}
         disabled={unavailable}
       />
