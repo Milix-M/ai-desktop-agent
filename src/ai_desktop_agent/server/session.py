@@ -9,7 +9,9 @@ region_select による2段階精密クリックをサポートする。
 
 import asyncio
 import contextlib
+import copy
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -39,15 +41,33 @@ from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.privacy import redact, redact_data
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
+from ai_desktop_agent.server.submissions import SubmissionClaim
 from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
 from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
 logger = logging.getLogger(__name__)
+_VOLATILE_SESSION_ORDERS = itertools.count(1)
 
 #: 真っ黒判定の輝度しきい値（DPMS 消灯時は全画素 0）
 BLACK_SCREEN_THRESHOLD = 2.0
+
+
+async def _drain_task(task: asyncio.Future, *, ignore_cancellation: bool = False):
+    """Finish cleanup before propagating cancellation, including repeated stop requests."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    result = task.result()
+    if cancelled and not ignore_cancellation:
+        raise asyncio.CancelledError
+    return result
 
 
 def _image_hash(image_bytes: bytes) -> str:
@@ -153,6 +173,9 @@ class TaskSession:
             # タスク内では不変のため、生成直後の1回だけ設定する。
             self.llm.session_id = self.id
         self._store = store
+        self.session_order = 0 if store is not None else next(_VOLATILE_SESSION_ORDERS)
+        self.request_digest: str | None = None
+        self.request_fingerprint: str | None = None
         self._instruction = ""
         self._created_at = time.time()
         # 実行対象VMのID（複数VMの並列実行用）
@@ -178,6 +201,7 @@ class TaskSession:
         self.executor = ActionExecutor(self.display)
         self._task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._closing_task: asyncio.Task | None = None
         self._resources_closed = False
         # 検証用：実行直前の生画像（オーバーレイなし）
         self._last_before_raw: Screenshot | None = None
@@ -201,6 +225,11 @@ class TaskSession:
         self._on_error: list[Callable] = []
         self._on_complete: list[Callable] = []
         self._control_notifications: set[asyncio.Task] = set()
+        self._persist_lock = asyncio.Lock()
+        self._storage_error: str | None = None
+        self._run_owner: asyncio.Task | None = None
+        self._started = asyncio.Event()
+        self._startup_error: StorageError | None = None
 
     def set_display(self, display: DisplayBackend) -> None:
         """操作対象の表示バックエンドを差し替える（VM指定用）。"""
@@ -238,11 +267,11 @@ class TaskSession:
                 logger.exception("イベント通知に失敗")
 
     async def _emit_state_change(self) -> None:
-        self._persist()
+        await self._persist()
         await self._notify(self._on_state_change, self.loop.state, self.loop.context)
 
     async def _emit_action(self, action: Action, success: bool) -> None:
-        self._persist()
+        await self._persist()
         await self._notify(self._on_action, action, success)
 
     async def _emit_error(self, error: str) -> None:
@@ -260,6 +289,7 @@ class TaskSession:
             タスクが正常に完了したかどうか。
         """
         instruction = redact(instruction)
+        self._run_owner = asyncio.current_task()
         goal = Goal(description=instruction)
         self._instruction = instruction
         self.loop.start(goal)
@@ -284,10 +314,19 @@ class TaskSession:
             return False
 
         finally:
-            await self.aclose()
+            try:
+                await self.aclose()
+            finally:
+                self._run_owner = None
+                self._started.set()
 
     async def _run_task(self, goal: Goal) -> bool:
-        await self._emit_state_change()
+        try:
+            await self._emit_state_change()
+        except StorageError as error:
+            self._startup_error = error
+            raise
+        self._started.set()
         understanding = await self.llm.understand_instruction(goal, platform=self._platform())
         goal.intent = understanding.intent
         goal.target_application = understanding.target_application
@@ -318,15 +357,20 @@ class TaskSession:
                 break
 
         success = self.loop.state == AgentState.COMPLETED
-        self._persist(success=success)
+        await self._drain_control_notifications()
+        await self._persist(success=success)
         await self._emit_complete(success)
         return success
 
     async def _finalize_failure(self) -> None:
         with contextlib.suppress(ValueError):
             self.loop.fail_now()
+        await self._drain_control_notifications(ignore_cancellation=True)
         try:
-            self._persist(success=False)
+            await _drain_task(
+                asyncio.create_task(self._persist(success=False, final_failure=True)),
+                ignore_cancellation=True,
+            )
         except StorageError:
             logger.exception("失敗状態の保存もできませんでした")
         # A failed disk must not prevent the UI from receiving the terminal state.
@@ -335,9 +379,13 @@ class TaskSession:
 
     async def aclose(self) -> None:
         """Release the display and provider connections on every exit path."""
-        if self._resources_closed:
-            return
+        if self._closing_task is None:
+            self._closing_task = asyncio.create_task(self._close_resources())
+        await _drain_task(self._closing_task)
+
+    async def _close_resources(self) -> None:
         self._resources_closed = True
+        await self._drain_control_notifications(ignore_cancellation=True)
         try:
             await asyncio.to_thread(self.display.disconnect)
         except Exception:
@@ -352,12 +400,33 @@ class TaskSession:
 
     def _ensure_closed(self, task: asyncio.Task) -> None:
         # Cancellation before run() starts never enters its finally block.
-        if not self._resources_closed:
+        if task.cancelled() and self.loop.state == AgentState.IDLE:
+            self._cleanup_task = asyncio.create_task(self._cancel_before_start())
+        elif not self._resources_closed:
             self._cleanup_task = asyncio.create_task(self.aclose())
+
+    async def _cancel_before_start(self) -> None:
+        try:
+            self.loop.start(Goal(description=self._instruction))
+            await self._finalize_failure()
+        finally:
+            await self.aclose()
+            self._started.set()
+
+    async def _drain_control_notifications(self, *, ignore_cancellation=False) -> None:
+        pending = tuple(t for t in self._control_notifications if t is not asyncio.current_task())
+        if not pending:
+            return
+        group = asyncio.gather(*pending, return_exceptions=True)
+        await _drain_task(group, ignore_cancellation=ignore_cancellation)
 
     # ── 永続化 ────────────────────────────────────
 
     def snapshot(self, success: bool | None = None) -> TaskRecord:
+        record = self._make_record(success)
+        return TaskRecord.from_dict(redact_data(record.to_dict()))
+
+    def _make_record(self, success: bool | None = None) -> TaskRecord:
         """現在のコンテキストを永続化用レコードに変換する。"""
         ctx = self.loop.context
         goal = ctx.goal
@@ -375,12 +444,13 @@ class TaskSession:
             decision_escalations=int(getattr(self, "decision_escalations", 0) or 0),
             execution_limits=self._budget.limits.to_dict(),
             execution_usage=self._budget.snapshot(),
-            stop_reason=self._budget.stop_reason,
-            error_message=self._budget.error_message,
+            stop_reason=self._budget.stop_reason
+            or ("storage_error" if self._storage_error else None),
+            error_message=self._budget.error_message or self._storage_error or "",
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
-                    params=dict(r.action.params or {}),
+                    params=copy.deepcopy(r.action.params or {}),
                     description=r.action.description,
                     success=r.success,
                     error_message=r.error_message,
@@ -413,19 +483,42 @@ class TaskSession:
             ),
             created_at=self._created_at,
             revision=self.loop.transition_count,
+            session_order=self.session_order,
+            request_digest=self.request_digest,
+            request_fingerprint=self.request_fingerprint,
         )
-        return TaskRecord.from_dict(redact_data(record.to_dict()))
+        return record
 
-    def _persist(self, success: bool | None = None) -> None:
+    async def reserve_start_order(self) -> None:
+        if self._store is not None and not self.session_order:
+            self.session_order = await run_display_call(self._store.reserve_session_order)
+
+    async def _persist(self, success: bool | None = None, *, final_failure=False) -> None:
         """Persist before proceeding to another operation; a failed audit write stops the task."""
         if self._store is None:
             return
-        try:
-            self._store.save(self.snapshot(success=success))
-        except Exception as error:
-            raise StorageError(
-                "タスク履歴を保存できません。保存先の空き容量とアクセス権を確認してください"
-            ) from error
+        record = self._make_record(success)
+        async with self._persist_lock:
+            if self._storage_error and not final_failure:
+                raise StorageError(self._storage_error)
+            try:
+                await self.reserve_start_order()
+                record.session_order = self.session_order
+                await run_display_call(self._store.save, record)
+            except Exception as error:
+                self._storage_error = (
+                    "タスク履歴を保存できません。保存先の空き容量とアクセス権を確認してください"
+                )
+                owner = self._task or self._run_owner
+                if (
+                    not final_failure
+                    and owner
+                    and owner is not asyncio.current_task()
+                    and not owner.done()
+                ):
+                    self._request_display_stop()
+                    owner.cancel()
+                raise StorageError(self._storage_error) from error
 
     # ── EXECUTING フェーズ ─────────────────────
 
@@ -611,6 +704,9 @@ class TaskSession:
     async def _execute_recorded_action(
         self, action: Action, reasoning: str, confidence: float = 1.0
     ) -> bool:
+        await self._wait_if_paused()
+        if self._storage_error:
+            raise StorageError(self._storage_error)
         self._budget.check()
         started = time.monotonic()
         try:
@@ -1457,21 +1553,39 @@ class TaskSession:
 
     # ── 制御 ────────────────────────────────────
 
+    def bind_submission(self, claim: SubmissionClaim, store: TaskStore) -> None:
+        if self.loop.state != AgentState.IDLE or self._task is not None or claim.record is not None:
+            raise RuntimeError("開始済みセッションに投入キーを割り当てることはできません")
+        self.id = claim.task_id
+        self._store = store
+        self.session_order = 0
+        self.request_digest = claim.digest
+        self.request_fingerprint = claim.fingerprint
+        if hasattr(self.llm, "session_id"):
+            self.llm.session_id = self.id
+        claim.session = self
+
     async def start_async(self, instruction: str) -> None:
         """バックグラウンドでタスクを開始する。"""
         if self._task and not self._task.done():
             raise RuntimeError("タスクは既に実行中です")
+        if self.loop.state != AgentState.IDLE or self._resources_closed:
+            raise RuntimeError("完了したセッションは再利用できません")
+        self._instruction = redact(instruction)
         self._task = asyncio.create_task(self.run(instruction))
         self._task.add_done_callback(self._ensure_closed)
+        await self._started.wait()
+        if self._startup_error is not None:
+            raise self._startup_error
 
-    def pause(self) -> None:
+    def pause(self) -> asyncio.Task | None:
         if self.loop.state == AgentState.EXECUTING:
             self.loop.pause()
-            self._notify_control_change()
+            return self._notify_control_change()
 
     def resume(
         self, *, manual_input_id: str | None = None, allow_screen_share: bool = False
-    ) -> None:
+    ) -> asyncio.Task | None:
         if self.manual_input is not None:
             if not allow_screen_share or manual_input_id != self.manual_input["id"]:
                 raise ValueError("手動入力を終え、画面を送信してよいことを確認してください")
@@ -1479,18 +1593,14 @@ class TaskSession:
             return
         if self.loop.state == AgentState.PAUSED:
             self.loop.resume()
-            self._notify_control_change()
+            return self._notify_control_change()
 
-    def _notify_control_change(self) -> None:
+    def _notify_control_change(self) -> asyncio.Task:
         # 制御は同期APIを保ち、待機中の実行ループに依存せず通知する。
-        try:
-            self._persist()
-        except StorageError:
-            self.stop()
-            raise
         task = asyncio.create_task(self._emit_state_change())
         self._control_notifications.add(task)
         task.add_done_callback(self._control_notification_done)
+        return task
 
     def _control_notification_done(self, task: asyncio.Task) -> None:
         self._control_notifications.discard(task)
