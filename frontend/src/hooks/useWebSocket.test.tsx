@@ -20,8 +20,21 @@ beforeEach(() => {
   vi.useFakeTimers();
   Socket.instances = [];
   vi.stubGlobal("WebSocket", Socket);
+  vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => ({ authenticated: true }) } as Response);
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it("an old socket's failed auth check cannot lock a replacement connection", async () => {
+  let resolve!: (value: Response) => void;
+  vi.mocked(fetch).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+  const dispatch = vi.spyOn(window, "dispatchEvent");
+  renderHook(() => useWebSocket(vi.fn()));
+  act(() => { Socket.instances[0].open(); Socket.instances[0].close(); });
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  act(() => Socket.instances[1].open());
+  await act(async () => resolve({ ok: true, json: async () => ({ authenticated: false }) } as Response));
+  expect(dispatch).not.toHaveBeenCalled();
+});
 
 it("reconnects and delivers the new server snapshot", async () => {
   const receive = vi.fn();

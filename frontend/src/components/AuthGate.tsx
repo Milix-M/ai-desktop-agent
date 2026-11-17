@@ -12,45 +12,55 @@ export default function AuthGate({ children, onLogout }: {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
+  const version = useRef(0);
+  const mounted = useRef(true);
 
   useEffect(() => {
+    mounted.current = true;
     let disposed = false;
-    getAuthStatus().then(({ authenticated }) => {
-      if (!disposed) setState(authenticated ? "ready" : "locked");
+    const controller = new AbortController();
+    const check = ++version.current;
+    getAuthStatus(controller.signal).then(({ authenticated }) => {
+      if (!disposed && check === version.current) setState(authenticated ? "ready" : "locked");
     }).catch(() => {
-      if (!disposed) { setState("locked"); setError("サーバーに接続できません"); }
+      if (!disposed && check === version.current) { setState("locked"); setError("サーバーに接続できません"); }
     });
-    const lock = () => { setState("locked"); setKey(""); setError("ログインしてください"); };
+    const lock = () => { version.current++; setState("locked"); setKey(""); setError("ログインしてください"); };
     window.addEventListener("auth-required", lock);
-    return () => { disposed = true; window.removeEventListener("auth-required", lock); };
+    return () => { disposed = true; mounted.current = false; controller.abort(); window.removeEventListener("auth-required", lock); };
   }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (submitting.current || !key) return;
     submitting.current = true;
+    const operation = ++version.current;
     setBusy(true); setError("");
     try {
       await login(key);
+      if (!mounted.current || operation !== version.current) return;
       setKey(""); setState("ready");
     } catch (error) {
-      setError(error instanceof Error ? error.message : "ログインできません");
+      if (mounted.current && operation === version.current) setError(error instanceof Error ? error.message : "ログインできません");
     } finally {
-      submitting.current = false; setBusy(false);
+      submitting.current = false; if (mounted.current) setBusy(false);
     }
   }
 
   async function signOut() {
     if (submitting.current) return;
     submitting.current = true; setBusy(true);
+    const operation = ++version.current;
     try {
       await logout();
+      if (!mounted.current) return;
       onLogout?.();
+      if (operation !== version.current) return;
       setState("locked"); setKey(""); setError("");
     } catch {
-      setError("ログアウトできません。接続を確認してください");
+      if (mounted.current && operation === version.current) setError("ログアウトできません。接続を確認してください");
     } finally {
-      submitting.current = false; setBusy(false);
+      submitting.current = false; if (mounted.current) setBusy(false);
     }
   }
 
