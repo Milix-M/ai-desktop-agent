@@ -535,17 +535,23 @@ class OpenRouterClefProvider(DecisionProvider):
 # ── 応答解釈（形式差の吸収） ────────────────────────
 
 
+def _probability(value: Any) -> float:
+    if not routing.is_probability(value):
+        raise ValueError("決定モデルの確率は0〜1の有限の数値である必要があります")
+    return float(value)
+
+
 def _extract_prob(result: dict[str, Any], keys: tuple[str, ...]) -> float:
     """noul相当の達成確率を探す。見つからなければ例外（LLM退避用）。"""
     # 1. 質問ID直下の数値
     for key in keys:
         node = result.get(key)
         if isinstance(node, (int, float)):
-            return max(0.0, min(1.0, float(node)))
+            return _probability(node)
         if isinstance(node, dict):
             for sub in ("prob_true", "p_yes", "noul", "probability", "prob", "score"):
                 if isinstance(node.get(sub), (int, float)):
-                    return max(0.0, min(1.0, float(node[sub])))
+                    return _probability(node[sub])
     # 2. questions配列形式
     questions = result.get("questions")
     if isinstance(questions, list):
@@ -553,7 +559,7 @@ def _extract_prob(result: dict[str, Any], keys: tuple[str, ...]) -> float:
             if isinstance(q, dict) and q.get("id") in keys:
                 for sub in ("prob_true", "p_yes", "noul", "probability", "prob"):
                     if isinstance(q.get(sub), (int, float)):
-                        return max(0.0, min(1.0, float(q[sub])))
+                        return _probability(q[sub])
     # 3. answers配列形式
     answers = result.get("answers")
     if isinstance(answers, list):
@@ -561,7 +567,7 @@ def _extract_prob(result: dict[str, Any], keys: tuple[str, ...]) -> float:
             if isinstance(a, dict) and a.get("id") in keys:
                 for sub in ("prob_true", "p_yes", "noul", "probability", "prob"):
                     if isinstance(a.get(sub), (int, float)):
-                        return max(0.0, min(1.0, float(a[sub])))
+                        return _probability(a[sub])
     raise ValueError("達成確率を応答から解釈できません")
 
 
@@ -570,7 +576,7 @@ def _numeric_dist(dist: dict[Any, Any]) -> dict[str, float]:
     out: dict[str, float] = {}
     for k, v in dist.items():
         if isinstance(v, (int, float)):
-            out[str(k)] = float(v)
+            out[str(k)] = _probability(v)
     return out
 
 
@@ -645,7 +651,7 @@ def _extract_choice(result: dict[str, Any]) -> tuple[str, float]:
     for key in ("recover_strategy", "strategy", "choice", "top_option"):
         node = result.get(key)
         if isinstance(node, str) and node in valid:
-            return node, 0.7
+            raise ValueError("回復戦略の確率が応答にありません")
         if isinstance(node, dict):
             label = (
                 node.get("option") or node.get("label") or node.get("value") or node.get("choice")
@@ -654,16 +660,14 @@ def _extract_choice(result: dict[str, Any]) -> tuple[str, float]:
             prob = node.get("prob", node.get("probability", node.get("confidence", None)))
             if prob is None and isinstance(dist, dict) and label in dist:
                 prob = dist[label]
-            if not isinstance(prob, (int, float)):
-                prob = 0.7
-            if label in valid:
-                return label, max(0.0, min(1.0, float(prob)))
+            if isinstance(label, str) and label in valid:
+                return label, _probability(prob)
     probs = result.get("probs") or result.get("probabilities") or result.get("options")
     if isinstance(probs, dict):
         known = _numeric_dist({k: v for k, v in probs.items() if k in valid})
         if known:
             best = max(known.items(), key=lambda kv: kv[1])
-            return best[0], max(0.0, min(1.0, best[1]))
+            return best[0], best[1]
     raise ValueError("回復戦略を応答から解釈できません")
 
 

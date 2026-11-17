@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from enum import Enum
 
 
@@ -149,7 +150,11 @@ class Action:
     description: str = ""
 
     def __post_init__(self) -> None:
-        params = self.params or {}
+        if not isinstance(self.action_type, ActionType):
+            raise ValueError("アクション種別が不正です")
+        if self.params is not None and not isinstance(self.params, dict):
+            raise ValueError("アクションのパラメータはオブジェクトで指定してください")
+        params = self.params if self.params is not None else {}
 
         # 必須パラメータ検証
         required = _REQUIRED_PARAMS.get(self.action_type, set())
@@ -168,10 +173,36 @@ class Action:
                 f"不明なパラメータです: {unknown} (action_type={self.action_type.value})"
             )
 
-        if self.action_type == ActionType.REQUEST_USER_INPUT:
-            reason = params["reason"]
-            if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
-                raise ValueError("手動入力の理由は1〜1000文字で指定してください")
+        for name in _X_KEYS | _Y_KEYS | {"width", "height", "amount"}:
+            if name in params and type(params[name]) is not int:
+                raise ValueError(f"{name}は整数で指定してください")
+        for name in ("width", "height", "amount"):
+            if name in params and params[name] <= 0:
+                raise ValueError(f"{name}は正の整数で指定してください")
+        for name in ("seconds", "timeout", "duration_ms"):
+            if name in params:
+                value = params[name]
+                try:
+                    valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+                except OverflowError:
+                    valid = False
+                if not valid:
+                    raise ValueError(f"{name}は有限の0以上の数で指定してください")
+        if "direction" in params and params["direction"] not in ("up", "down"):
+            raise ValueError("スクロール方向はupかdownで指定してください")
+        for name in ("text", "key", "reason"):
+            if name in params and (
+                not isinstance(params[name], str) or (name != "text" and not params[name].strip())
+            ):
+                raise ValueError(f"{name}は文字列で指定してください")
+        if "keys" in params and (
+            not isinstance(params["keys"], list)
+            or not params["keys"]
+            or any(not isinstance(key, str) or not key.strip() for key in params["keys"])
+        ):
+            raise ValueError("keysは空でないキー名の配列で指定してください")
+        if self.action_type == ActionType.REQUEST_USER_INPUT and len(params["reason"]) > 1000:
+            raise ValueError("手動入力の理由は1〜1000文字で指定してください")
 
         # 説明文の自動生成
         if not self.description:

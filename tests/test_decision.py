@@ -209,14 +209,12 @@ class TestOpenRouterClef:
         )
         assert grade == "full"
 
-    def test_mixed_string_values_do_not_crash(self):
+    def test_invalid_probability_requires_llm_fallback(self):
         from ai_desktop_agent.agent.decision.provider import _extract_choice, _extract_grade
 
         assert _extract_grade({"verify_grade": {"type": "score", "score": 0.5}}) == "partial"
-        strategy, prob = _extract_choice(
-            {"recover_strategy": {"choice": "wait_and_retry", "prob": "high"}}
-        )
-        assert (strategy, prob) == ("wait_and_retry", 0.7)
+        with pytest.raises(ValueError):
+            _extract_choice({"recover_strategy": {"choice": "wait_and_retry", "prob": "high"}})
 
 
 class TestDecisionFactory:

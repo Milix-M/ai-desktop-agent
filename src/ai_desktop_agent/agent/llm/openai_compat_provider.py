@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -960,17 +961,12 @@ ID: {current_subtask.id}
             image_bytes=image_bytes,
             system_prompt=_system_prompt(platform),
         )
-        action_type_str = data.get("action_type", "subtask_complete")
-        try:
-            action_type = ActionType(action_type_str)
-        except ValueError:
-            action_type = ActionType.SUBTASK_COMPLETE
-        params = self._sanitize_params(action_type, data.get("params", {}))
-        params = self._clamp_params(action_type, params, screenshot)
+        action = self._parse_action(data)
+        params = self._clamp_params(action.action_type, action.params, screenshot)
         return ActionDecision(
-            action=Action(action_type=action_type, params=params),
+            action=Action(action_type=action.action_type, params=params),
             expected_effect=data.get("expected_effect", ""),
-            confidence=float(data.get("confidence", 0.5)),
+            confidence=data.get("confidence", 0.5),
             reasoning=data.get("reasoning", ""),
         )
 
@@ -1016,7 +1012,7 @@ ID: {current_subtask.id}
             system_prompt=_system_prompt(platform),
         )
         return VerificationResult(
-            success=bool(data.get("success", True)),
+            success=self._boolean(data, "success"),
             reasoning=data.get("reasoning", ""),
             evidence=data.get("evidence", ""),
         )
@@ -1047,24 +1043,31 @@ ID: {subtask.id}
 {history_text}"""
         data = await self._call(prompt, _SCHEMA_RECOVER, system_prompt=_system_prompt(platform))
         raw_actions = data.get("actions", [])
-        recovery_actions = []
-        for a in raw_actions:
-            try:
-                at = ActionType(a.get("action_type", "wait"))
-            except ValueError:
-                continue
-            params = self._sanitize_params(at, a.get("params", {}))
-            try:
-                recovery_actions.append(Action(action_type=at, params=params))
-            except ValueError:
-                logger.warning("回復アクションをスキップ（不正params）: %s", at.value)
-                continue
+        if not isinstance(raw_actions, list):
+            raise ValueError("回復アクションは配列で指定してください")
+        # Validate the entire plan before returning any actions. Skipping a failed focus/click
+        # could otherwise type into a different window or submit an unintended form.
+        recovery_actions = [self._parse_action(action) for action in raw_actions]
         return RecoveryPlan(
             strategy=RecoveryStrategy(data.get("strategy", "wait_and_retry")),
             actions=recovery_actions,
             reasoning=data.get("reasoning", ""),
-            recoverable=bool(data.get("recoverable", True)),
+            recoverable=self._boolean(data, "recoverable"),
         )
+
+    @staticmethod
+    def _boolean(data: dict, name: str) -> bool:
+        value = data.get(name)
+        if type(value) is not bool:
+            raise ValueError(f"モデル応答の{name}は真偽値である必要があります")
+        return value
+
+    @classmethod
+    def _parse_action(cls, data: dict) -> Action:
+        if not isinstance(data, dict) or not isinstance(data.get("action_type"), str):
+            raise ValueError("モデル応答に有効なaction_typeが必要です")
+        action_type = ActionType(data["action_type"])
+        return Action(action_type, cls._sanitize_params(action_type, data.get("params", {})))
 
     # ── 内部 ──────────────────────────────────────
 
@@ -1264,23 +1267,34 @@ ID: {subtask.id}
         candidates = [stripped]
         if "```json" in stripped:
             start = stripped.index("```json") + 7
-            end = stripped.index("```", start)
-            candidates.append(stripped[start:end].strip())
+            end = stripped.find("```", start)
+            candidates.append(stripped[start : end if end != -1 else None].strip())
         elif "```" in stripped:
             start = stripped.index("```") + 3
-            end = stripped.index("```", start)
-            candidates.append(stripped[start:end].strip())
+            end = stripped.find("```", start)
+            candidates.append(stripped[start : end if end != -1 else None].strip())
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start != -1 and end > start:
             candidates.append(stripped[start : end + 1])
 
+        def finite_float(value: str) -> float:
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError("モデル応答の数値は有限である必要があります")
+            return number
+
+        def reject_constant(value: str):
+            raise ValueError("モデル応答にJSONで表現できない数値があります")
+
         for candidate in candidates:
             try:
-                result = json.loads(candidate)
-            except json.JSONDecodeError as e:
+                result = json.loads(
+                    candidate, parse_float=finite_float, parse_constant=reject_constant
+                )
+            except ValueError as e:
                 if first_error is None:
-                    first_error = e
+                    first_error = json.JSONDecodeError(str(e), candidate, 0)
                 continue
             if not isinstance(result, dict):
                 if first_error is None:
@@ -1302,7 +1316,7 @@ ID: {subtask.id}
         from ai_desktop_agent.actions.primitives import allowed_params
 
         if not isinstance(params, dict):
-            return {}
+            raise ValueError("モデル応答のparamsはオブジェクトである必要があります")
         allowed = allowed_params(action_type)
         return {k: v for k, v in params.items() if k in allowed}
 
@@ -1321,11 +1335,9 @@ ID: {subtask.id}
         w, h = screenshot.width, screenshot.height
 
         def _clamp_int(v: Any, lo: int, hi: int) -> int:
-            try:
-                iv = int(v)
-            except (TypeError, ValueError):
-                iv = lo
-            return max(lo, min(iv, hi))
+            if type(v) is not int:
+                raise ValueError("座標は整数で指定してください")
+            return max(lo, min(v, hi))
 
         if action_type in (
             ActionType.MOUSE_MOVE,

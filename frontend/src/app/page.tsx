@@ -17,6 +17,7 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { useSidebarWidth } from "@/hooks/useSidebarWidth";
 import { ServerGeneration } from "@/lib/server-generation";
 import { pendingVmCreations } from "@/lib/vm-creation-retries";
+import { clearTaskSubmissions } from "@/lib/task-submission-retries";
 import { ApiError, createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, stopVm, startVm, getVncWsUrl } from "@/lib/api";
 import type { WsMessage, LogEntry, TaskStatus, TaskHistoryItem, SubtaskInfo, VmInfo, ManualInputRequest, PendingSubmission } from "@/lib/types";
 
@@ -101,7 +102,7 @@ function snapshotView(task: TaskStatus): Omit<VmView, "logs"> {
 export default function Home() {
   const draft = useRef("");
   const submission = useRef<PendingSubmission | null>(null);
-  return <AuthGate onLogout={() => { draft.current = ""; submission.current = null; }}>
+  return <AuthGate onLogout={() => { draft.current = ""; submission.current = null; clearTaskSubmissions(); }}>
     {(actions) => <DesktopWorkspace sessionActions={actions} draft={draft} submission={submission} />}
   </AuthGate>;
 }

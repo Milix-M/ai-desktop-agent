@@ -122,6 +122,7 @@ test("a delayed response from a retired backend cannot replace new live state or
   act(() => ws.handler?.({ type: "snapshot", server_id: "before", through_session_order: 50, tasks: [] }));
   fireEvent.change(input, { target: { value: "報告書を保存する" } });
   fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await waitFor(() => expect(createTask).toHaveBeenCalledOnce());
   act(() => ws.handler?.({ type: "state", server_id: "after", session_id: "restored", session_order: 1,
     vm_id: "desktop", state: "awaiting_user", action_count: 0, subtask_index: 0, subtask_count: 0,
     manual_input: { id: "new-consent", reason: "新しいサーバーの入力待ち" } }));
@@ -234,6 +235,7 @@ test("an old backend's 410 cannot force a new retry key after a restart", async 
   act(() => ws.handler?.({ type: "snapshot", server_id: "before", tasks: [] }));
   fireEvent.change(input, { target: { value: "報告書を保存する" } });
   fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await waitFor(() => expect(createTask).toHaveBeenCalledOnce());
   act(() => ws.handler?.({ type: "snapshot", server_id: "after", through_session_order: 0, tasks: [] }));
   await act(async () => reject(new ApiError(410, "古い接続先では削除済み")));
   fireEvent.click(await screen.findByRole("button", { name: "再送" }));

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ApiError } from "@/lib/api";
+import { forgetTaskSubmission, taskSubmissionRetry } from "@/lib/task-submission-retries";
 import type { PendingSubmission } from "@/lib/types";
 
 interface Props {
@@ -38,11 +39,20 @@ export default function InstructionInput({ onSubmit, disabled, initialValue = ""
         requestId: Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
       };
     }
-    const attempt = attemptRef.current!;
+    let attempt = attemptRef.current!;
     pendingRef.current = true;
     setSubmitting(true);
     try {
+      const requestId = await taskSubmissionRetry(attempt, Boolean(retryAsNew));
+      if (attemptRef.current === attempt) {
+        attempt = { ...attempt, requestId };
+        attemptRef.current = attempt;
+      } else {
+        // A different mounted input has taken ownership while hashing this submission.
+        return;
+      }
       await onSubmit(trimmed, allowVmRestart, attempt.requestId);
+      forgetTaskSubmission(attempt.requestId);
       if (mounted.current && attemptRef.current?.requestId === attempt.requestId) {
         attemptRef.current = null;
         setValue("");
