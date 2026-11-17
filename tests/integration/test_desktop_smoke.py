@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shlex
 import subprocess
 import time
 import uuid
@@ -83,13 +84,15 @@ def test_firefox_can_render_a_page_without_snap(desktop):
     assert desktop.exec_run(["test", "-s", "/tmp/firefox-smoke.png"]).exit_code == 0
 
 
-async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path):
+@pytest.mark.parametrize("content", ["desktop-smoke-ok", "日本語の文章を保存する 👩‍💻 café"])
+async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path, content):
     output_path = f"/tmp/desktop-smoke-{uuid.uuid4().hex}"
+    title = f"Desktop smoke {uuid.uuid4().hex}"
     desktop.exec_run(
         [
             "xfce4-terminal",
             "--disable-server",
-            "--title=Desktop smoke",
+            f"--title={title}",
             "--command=bash --noprofile --norc",
         ],
         user="agent",
@@ -99,7 +102,7 @@ async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path):
     env = {"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority"}
     for _ in range(60):
         found = desktop.exec_run(
-            ["xdotool", "search", "--onlyvisible", "--name", "^Desktop smoke$"],
+            ["xdotool", "search", "--onlyvisible", "--name", title],
             user="agent",
             environment=env,
         )
@@ -117,7 +120,10 @@ async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path):
             super().__init__()
             self.actions = iter(
                 [
-                    Action(ActionType.TYPE, {"text": f"printf desktop-smoke-ok > {output_path}"}),
+                    Action(
+                        ActionType.TYPE,
+                        {"text": f"printf %s {shlex.quote(content)} > {output_path}"},
+                    ),
                     Action(ActionType.KEY_PRESS, {"key": "enter"}),
                     Action(ActionType.SUBTASK_COMPLETE),
                 ]
@@ -132,8 +138,8 @@ async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path):
         async def verify_result(self, *args, **kwargs):
             result = desktop.exec_run(["cat", output_path])
             return VerificationResult(
-                result.exit_code == 0 and result.output == b"desktop-smoke-ok",
-                "file check",
+                result.exit_code == 0 and result.output == content.encode("utf-8"),
+                f"file check: {result.exit_code} {result.output[:300]!r}",
                 "actual file contents",
             )
 
@@ -146,8 +152,56 @@ async def test_scripted_session_writes_a_file_via_real_vnc(desktop, tmp_path):
     store = TaskStore(tmp_path)
     session = TaskSession(llm=ScriptedProvider(), display=display, store=store, decision=None)
     assert await session.run("確認用のファイルを保存する")
-    assert desktop.exec_run(["cat", output_path]).output == b"desktop-smoke-ok"
+    assert desktop.exec_run(["cat", output_path]).output == content.encode("utf-8")
     record = store.load(session.id)
     assert record.state == "completed" and record.success
     assert len(record.actions) == 3
     assert all(action.duration_ms > 0 for action in record.actions)
+
+
+async def test_unicode_paragraphs_can_be_typed_and_saved_in_an_editor(desktop):
+    output = f"/tmp/入力確認-{uuid.uuid4().hex}.txt"
+    env = {"DISPLAY": ":0", "XAUTHORITY": "/home/agent/.Xauthority"}
+    assert desktop.exec_run(["touch", output], user="agent").exit_code == 0
+    desktop.exec_run(
+        ["mousepad", "--disable-server", output],
+        user="agent",
+        environment=env,
+        detach=True,
+    )
+    for _ in range(60):
+        found = desktop.exec_run(
+            ["xdotool", "search", "--onlyvisible", "--class", "Mousepad"],
+            user="agent",
+            environment=env,
+        )
+        if found.exit_code == 0:
+            desktop.exec_run(
+                ["xdotool", "windowactivate", found.output.decode().splitlines()[0]],
+                user="agent",
+                environment=env,
+            )
+            break
+        await asyncio.sleep(0.2)
+    else:
+        pytest.fail("Editor did not open")
+    desktop.reload()
+    port = int(desktop.attrs["NetworkSettings"]["Ports"]["5900/tcp"][0]["HostPort"])
+    display = VNCClient()
+    await asyncio.to_thread(display.connect, "127.0.0.1", port)
+    content = '日本語の長文とリンクではない文字\n\t👩‍💻 café e\u0301 "$()<>\\"\n'
+    content += "".join(chr(0x4E00 + n) for n in range(2200))
+    addition = "\n続けて入力した文章 🦊"
+    try:
+        for paragraph in (content, addition):
+            await asyncio.to_thread(display.type_text, paragraph)
+            await asyncio.sleep(0.3)
+        await asyncio.to_thread(display.key_combo, ["ctrl", "s"])
+        for _ in range(50):
+            result = desktop.exec_run(["cat", output], user="agent")
+            if result.output == (content + addition).encode("utf-8"):
+                break
+            await asyncio.sleep(0.1)
+        assert result.exit_code == 0 and result.output == (content + addition).encode("utf-8")
+    finally:
+        await asyncio.to_thread(display.disconnect)

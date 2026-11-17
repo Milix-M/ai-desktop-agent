@@ -602,6 +602,7 @@ class TestContainerProvisioning:
         assert "devices" not in desk_run, "コンテナ作成で /dev/kvm を要求してはいけない"
         assert desk_run["labels"]["ai-desktop-agent.kind"] == "container"
         assert desk_run["environment"]["VNC_GEOMETRY"] == "1280x800"
+        assert desk_run["environment"]["LANG"] == "C.UTF-8"
         assert not desk_run.get("ports")
         assert pool.get_vm(info.id).kind == "container"
 

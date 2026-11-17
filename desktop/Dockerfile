@@ -3,7 +3,8 @@
 # Xfce + TigerVNC で、backend は通常のVNCクライアントで操作する。
 FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8
 
 # Ubuntu's firefox package is a Snap launcher, which cannot run in this container.
 # https://support.mozilla.org/en-US/kb/install-firefox-linux
