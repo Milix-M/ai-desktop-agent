@@ -62,6 +62,11 @@ class _FakeContainers:
 
     def list(self, all=True, filters=None):
         items = [c for c in self.items if not c.removed]
+        volume = (filters or {}).get("volume")
+        if volume:
+            items = [
+                c for c in items if any(m.get("Name") == volume for m in c.attrs.get("Mounts", []))
+            ]
         label = (filters or {}).get("label", "")
         if label and "=" in label:
             k, v = label.split("=", 1)
@@ -78,7 +83,7 @@ class _FakeContainers:
                 return c
         if name == socket.gethostname():
             return self.client.backend
-        raise ValueError(f"no such container: {name}")
+        raise NotFound(f"no such container: {name}")
 
     def run(self, image, **kwargs):
         self.runs.append({"image": image, **kwargs})
@@ -90,30 +95,39 @@ class _FakeContainers:
             labels=kwargs.get("labels", {}),
         )
         self.items.append(c)
+        c.attrs["Mounts"] = [
+            {"Type": "volume", "Name": name, "Destination": config["bind"]}
+            for name, config in kwargs.get("volumes", {}).items()
+            if name in self.client.volumes.items
+        ]
         if kwargs.get("network"):
             self.client.networks.get(kwargs["network"]).connect(c)
         return c
 
 
 class _FakeNetwork:
-    def __init__(self, collection, name, labels=None, driver="bridge"):
+    def __init__(self, collection, name, labels=None, driver="bridge", **kwargs):
         self.collection = collection
         self.name = self.id = name
         self.attrs = {
             "Labels": labels or {},
             "Driver": driver,
             "Containers": {},
-            "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+            "IPAM": kwargs.get("ipam") or {"Config": [{"Subnet": "172.30.0.0/16"}]},
         }
 
     def reload(self):
         pass
 
-    def connect(self, container):
+    def connect(self, container, **kwargs):
         container._networks = self.collection
         self.attrs["Containers"][container.id] = {"Name": container.name}
         endpoints = container.attrs.setdefault("NetworkSettings", {}).setdefault("Networks", {})
-        endpoints[self.name] = {"IPAddress": "172.30.0.2", "GwPriority": 0}
+        endpoints[self.name] = {
+            "IPAddress": "172.30.0.2",
+            "GwPriority": 0,
+            "Aliases": kwargs.get("aliases"),
+        }
 
     def disconnect(self, container):
         self.attrs["Containers"].pop(container.id, None)
@@ -146,6 +160,7 @@ class _FakeDocker:
         self.backend = _FakeContainer(socket.gethostname())
         self.networks = _FakeNetworks()
         self.containers = _FakeContainers(self)
+        self.volumes = _FakeVolumes(self)
         project = os.environ.get("COMPOSE_PROJECT_NAME", "ai-desktop-agent")
         management = self.networks.create(f"{project}_default")
         management.connect(self.backend)
@@ -153,6 +168,34 @@ class _FakeDocker:
 
     def ping(self):
         return True
+
+
+class _FakeVolume:
+    def __init__(self, collection, name, driver="local", labels=None):
+        self.collection = collection
+        self.name = name
+        self.attrs = {"Labels": labels or {}, "Driver": driver, "Options": None}
+
+    def remove(self, force=False):
+        if self.collection.client.containers.list(all=True, filters={"volume": self.name}):
+            raise RuntimeError("volume in use")
+        self.collection.items.pop(self.name)
+
+
+class _FakeVolumes:
+    def __init__(self, client):
+        self.client = client
+        self.items = {}
+
+    def get(self, name):
+        if name not in self.items:
+            raise NotFound("no volume")
+        return self.items[name]
+
+    def create(self, name, **kwargs):
+        volume = _FakeVolume(self, name, **kwargs)
+        self.items[name] = volume
+        return volume
 
 
 @pytest.fixture

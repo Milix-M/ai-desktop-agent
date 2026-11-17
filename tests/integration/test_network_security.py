@@ -202,6 +202,7 @@ except OSError:pass
                 response.raise_for_status()
             assert (await api.get("/vms")).json() == []
         assert client.networks.list(filters={"label": f"{LABEL_PROJECT}={project}"}) == [control]
+        assert client.volumes.list(filters={"label": f"{LABEL_PROJECT}={project}"}) == [data]
     finally:
         for container in client.containers.list(
             all=True, filters={"label": f"{LABEL_PROJECT}={project}"}
@@ -209,5 +210,6 @@ except OSError:pass
             container.remove(force=True)
         for network in client.networks.list(filters={"label": f"{LABEL_PROJECT}={project}"}):
             network.remove()
-        data.remove(force=True)
+        for volume in client.volumes.list(filters={"label": f"{LABEL_PROJECT}={project}"}):
+            volume.remove()
         client.close()

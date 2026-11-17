@@ -104,9 +104,21 @@ jobs:
       - run: uv sync --frozen
       - run: docker build -t ai-desktop-agent-desktop-smoke desktop
       - run: docker build -t ai-desktop-agent-backend-smoke .
+      - name: Install minimum supported Compose
+        env:
+          COMPOSE_TEST_DIR: ${{ runner.temp }}/agent-compose
+        run: |
+          mkdir -p "$COMPOSE_TEST_DIR/cli-plugins"
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64 -o "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64.sha256 -o "$COMPOSE_TEST_DIR/checksum"
+          digest="$(awk '{print $1}' "$COMPOSE_TEST_DIR/checksum")"
+          printf '%s  %s\n' "$digest" "$COMPOSE_TEST_DIR/cli-plugins/docker-compose" | sha256sum --check --status
+          chmod +x "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
+          DOCKER_CONFIG="$COMPOSE_TEST_DIR" docker compose version
       - run: uv run pytest -m desktop_integration tests/integration/
         env:
           RUN_DESKTOP_SMOKE: "1"
+          DOCKER_CONFIG: ${{ runner.temp }}/agent-compose
 
   # 全ジョブが通ったことの確認（branch protection用）
   all-checks:

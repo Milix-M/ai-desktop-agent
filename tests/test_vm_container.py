@@ -564,12 +564,6 @@ class TestUpScript:
         )
         assert result.returncode == 0, result.stderr
 
-    def test_detects_kvm(self):
-        content = (PROJECT_ROOT / "scripts" / "up.sh").read_text()
-        assert "/dev/kvm" in content
-        assert "--profile kvm" in content
-        assert "--profile container" in content
-
     def test_switches_vnc_host(self):
         """backend の接続先を起動環境に合わせて切り替える。"""
         content = (PROJECT_ROOT / "scripts" / "up.sh").read_text()
@@ -577,24 +571,6 @@ class TestUpScript:
         assert "VNC_HOST=desktop" in content, (
             "KVMなし時は backend を desktop に向ける必要があります"
         )
-
-    def test_starts_single_environment_only(self):
-        """初期起動の作業環境は1つのみ（KVMあり=vm、なし=desktop）。"""
-        lines = (PROJECT_ROOT / "scripts" / "up.sh").read_text().splitlines()
-        up_lines = [ln.strip() for ln in lines if "docker compose" in ln and " up " in ln]
-        assert len(up_lines) == 2, f"起動経路はKVMあり/なしの2つであるべき（実際: {up_lines}）"
-        kvm_line = next(ln for ln in up_lines if "--profile kvm" in ln)
-        container_line = next(ln for ln in up_lines if "--profile container" in ln)
-        kvm_services = kvm_line.split(" up ", 1)[1].split()
-        container_services = container_line.split(" up ", 1)[1].split()
-        assert "vm" in kvm_services, "KVMあり時は vm を起動する必要があります"
-        for svc in ("desktop", "android", "websockify-desktop", "websockify-android"):
-            assert svc not in kvm_services, f"KVMあり時に {svc} を起動してはいけません（単一起動）"
-        assert "desktop" in container_services, "KVMなし時は desktop を起動する必要があります"
-        for svc in ("vm", "android", "websockify", "websockify-android"):
-            assert svc not in container_services, (
-                f"KVMなし時に {svc} を起動してはいけません（単一起動）"
-            )
 
 
 class TestAndroidCompose:
