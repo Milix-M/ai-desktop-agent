@@ -68,7 +68,8 @@ main() {
   fi
   # Build before stopping anything. The guard preserves a verified home backup and
   # holds the update lock through Compose's replacement of the old container.
-  docker compose --profile "$profile" build "$environment" backend frontend
+  docker compose --profile "$profile" build --pull \
+    --build-arg "PACKAGE_REFRESH=$(date -u +%F)" "$environment" backend frontend
   coproc UPGRADE { docker compose --profile "$profile" run --rm -T --no-deps \
     --entrypoint /app/.venv/bin/python backend \
     -m ai_desktop_agent.server.workspace_migration prepare --profile "$profile"; }

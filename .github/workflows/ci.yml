@@ -1,11 +1,16 @@
 name: CI
 
-# develop と PR で実行
+# develop・PR・週次で実行
 on:
   push:
     branches: [develop]
   pull_request:
     branches: [develop]
+  schedule:
+    - cron: "17 21 * * 1"
+
+permissions:
+  contents: read
 
 # 同一ブランチの連続push時は前のrunをキャンセル
 concurrency:
@@ -111,16 +116,21 @@ jobs:
   desktop:
     name: Desktop (Firefox, VNC, QMP, and guest agent)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - run: uv sync --frozen
-      - run: docker build -t ai-desktop-agent-desktop-smoke desktop
-      - run: docker build -t ai-desktop-agent-backend-smoke .
-      - run: docker build -t ai-desktop-agent-qmp-smoke vm
+      - name: Refresh production images
+        run: |
+          refresh="$(date -u +%F)"
+          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-desktop-smoke desktop
+          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-backend-smoke .
+          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-qmp-smoke vm
+          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-frontend-smoke frontend
+          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-android-smoke android
       - run: docker build -t ai-desktop-agent-qga-smoke -f tests/integration/qga.Dockerfile .
       - name: Install minimum supported Compose
         env:
@@ -138,6 +148,22 @@ jobs:
           RUN_DESKTOP_SMOKE: "1"
           DOCKER_CONFIG: ${{ runner.temp }}/agent-compose
           DESKTOP_EVAL_RESULTS_DIR: ${{ runner.temp }}/agent-evaluations
+      - name: Install pinned Trivy
+        run: |
+          curl -fLSs --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz -o "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/trivy-bin"
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/trivy-bin" trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+      - name: Audit production OS packages
+        run: ./scripts/audit-images.sh "$RUNNER_TEMP/os-audit"
+      - name: Upload OS audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-audit
+          path: ${{ runner.temp }}/os-audit/
+          retention-days: 30
       - name: Upload desktop evaluation evidence
         if: always()
         uses: actions/upload-artifact@v4

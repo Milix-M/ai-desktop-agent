@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,7 @@ def log(event):
 if args==['compose','config','--environment']:
     print('USE_KVM=false')
 elif 'build' in args:
+    Path(os.environ['STARTUP_EVENTS']+'.build').write_text(json.dumps(args))
     if os.environ.get('STARTUP_FAILURE')=='build':sys.exit(1)
 elif 'ai_desktop_agent.server.workspace_migration' in args:
     with Path(os.environ['STARTUP_EVENTS']+'.lock').open('a') as lock:
@@ -143,6 +145,22 @@ elif 'up' in args:
         "STARTUP_FAILURE": failure,
     }
     return startup, events, env
+
+
+def test_update_refreshes_base_images_and_os_packages_before_migration(tmp_path):
+    startup, events, env = guarded_startup(tmp_path, "build")
+    before = datetime.now(UTC).date().isoformat()
+    result = subprocess.run(
+        ["bash", str(startup)], env=env, capture_output=True, text=True, timeout=10
+    )
+    after = datetime.now(UTC).date().isoformat()
+    args = json.loads(Path(str(events) + ".build").read_text())
+    assert "--pull" in args
+    refresh = args[args.index("--build-arg") + 1]
+    assert refresh in {f"PACKAGE_REFRESH={before}", f"PACKAGE_REFRESH={after}"}
+    assert args[-3:] == ["desktop", "backend", "frontend"]
+    assert result.returncode != 0
+    assert not events.exists()
 
 
 @pytest.mark.parametrize(

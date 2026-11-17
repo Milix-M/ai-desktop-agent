@@ -1,6 +1,9 @@
 # Stage 1: Build Next.js standalone output
 FROM node:24-alpine AS build
 
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apk upgrade --no-cache
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
@@ -13,6 +16,9 @@ RUN npm run build
 
 # Stage 2: Production runtime
 FROM node:24-alpine AS runner
+
+ARG PACKAGE_REFRESH=manual
+RUN : "$PACKAGE_REFRESH" && apk upgrade --no-cache
 
 WORKDIR /app
 
