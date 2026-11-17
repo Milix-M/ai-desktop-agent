@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from docker.errors import NotFound
 from docker.types import Mount
 
+from ai_desktop_agent.server.docker_discovery import container_labels, refresh_existing
 from ai_desktop_agent.server.networks import LABEL_PROJECT, LABEL_VM_ID
 from ai_desktop_agent.server.persistence import StorageError, atomic_json
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
@@ -112,7 +113,7 @@ class WorkspaceVolumes:
 
     @workspace_operation
     def require_unused(self, volume):
-        if self.client.containers.list(all=True, filters={"volume": volume.name}):
+        if self.client.containers.list(all=True, filters={"volume": volume.name}, sparse=True):
             raise DockerUnavailableError(
                 "ホーム保存先は使用中です。対象コンテナを削除してから再試行してください"
             )
@@ -134,10 +135,14 @@ class WorkspaceVolumes:
 
     @workspace_operation
     def reap_helpers(self):
-        for container in self.client.containers.list(
-            all=True, filters={"label": f"{LABEL_HELPER}=true"}
-        ):
-            labels = (container.attrs.get("Config") or {}).get("Labels") or {}
+        candidates = self.client.containers.list(
+            all=True,
+            filters={"label": [f"{LABEL_HELPER}=true", f"{LABEL_PROJECT}={self.project}"]},
+            sparse=True,
+        )
+        owned = (c for c in candidates if container_labels(c).get(LABEL_PROJECT) == self.project)
+        for container in refresh_existing(owned):
+            labels = container_labels(container)
             if labels.get(LABEL_PROJECT) != self.project:
                 continue
             mounts = container.attrs.get("Mounts") or []
@@ -157,12 +162,9 @@ class WorkspaceVolumes:
             owner = labels.get("ai-desktop-agent.helper-owner")
             if not owner:
                 continue
-            try:
-                parent = self.client.containers.get(owner)
-                if parent.status in {"running", "paused", "restarting"}:
-                    continue
-            except NotFound:
-                pass
+            parents = self.client.containers.list(all=True, filters={"id": owner}, sparse=True)
+            if any(parent.status in {"running", "paused", "restarting"} for parent in parents):
+                continue
             container.remove(force=True)
 
     @contextlib.contextmanager

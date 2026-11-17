@@ -26,16 +26,16 @@ class TestNoVncTaps:
             state_file=tmp_path / "s.json",
             nap=lambda s: None,
         )
-        monkeypatch.setattr(p, "_wait_adb_serial", lambda host: "android:5555")
+        monkeypatch.setattr(p, "_wait_adb_serial", lambda host, **kw: "android:5555")
         monkeypatch.setattr(p, "_apk_paths", lambda: [])
 
         import ai_desktop_agent.server.android_adb as adb_mod
 
         calls = []
-        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s: calls.append("sleep") or True)
-        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s: calls.append("tz") or True)
-        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s: calls.append("wifi") or True)
-        monkeypatch.setattr(adb_mod, "setup_home", lambda s: calls.append("home") or True)
+        monkeypatch.setattr(adb_mod, "setup_sleep", lambda s, **kw: calls.append("sleep") or True)
+        monkeypatch.setattr(adb_mod, "setup_timezone", lambda s, **kw: calls.append("tz") or True)
+        monkeypatch.setattr(adb_mod, "setup_wifi", lambda s, **kw: calls.append("wifi") or True)
+        monkeypatch.setattr(adb_mod, "setup_home", lambda s, **kw: calls.append("home") or True)
         assert p.provision_vm("android") is True
         assert calls == ["sleep", "tz", "wifi", "home"]
 

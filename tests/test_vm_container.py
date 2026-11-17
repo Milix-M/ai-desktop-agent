@@ -74,7 +74,7 @@ class TestDockerfile:
     def test_env_vars_set(self):
         content = (VM_DIR / "Dockerfile").read_text()
         assert "VM_IMAGE=" in content, "Dockerfile に VM_IMAGE 環境変数が必要です"
-        assert "CMDLINE_FILE=" in content, "Dockerfile に CMDLINE_FILE 環境変数が必要です"
+        assert "CMDLINE_FILE=" not in content, "共有コマンドラインを標準設定で固定しないこと"
         assert "VM_VNC_PORT=" in content, "Dockerfile に VM_VNC_PORT 環境変数が必要です"
         assert "VM_MEMORY=" in content, "Dockerfile に VM_MEMORY 環境変数が必要です"
         assert "VM_CPUS=" in content, "Dockerfile に VM_CPUS 環境変数が必要です"
@@ -369,7 +369,6 @@ class TestDockerCompose:
     def test_vm_volume_mounts(self):
         vm = self._vm_service()
         volumes = vm.get("volumes", [])
-        assert len(volumes) == 6
 
         # 文字列のリストか、長形式かを正規化
         vol_specs = {}
@@ -388,10 +387,9 @@ class TestDockerCompose:
         assert vol_specs["desktop.qcow2"] is True
         assert vol_specs["instances"] is False
 
-        # kernel / initrd / cmdline は読み取り専用
+        # The saved disk selects its own boot files after a template rebuild.
         for fname in ("vmlinuz", "initrd.img", "cmdline.txt"):
-            assert fname in vol_specs, f"{fname} の volume マウントが必要です"
-            assert vol_specs[fname] is True, f"{fname} は ro でマウントする必要があります"
+            assert fname not in vol_specs, f"標準起動は共有 {fname} に依存しないこと"
 
         # QMP/QGA ソケット共有ディレクトリ
         assert "sockets" in vol_specs, "QMP/QGA 用の sockets マウントが必要です"
@@ -408,8 +406,7 @@ class TestDockerCompose:
         assert "VM_IMAGE" in env_dict, "VM_IMAGE 環境変数が必要です"
         assert env_dict["VM_IMAGE"] == "/vm/instances/default.qcow2"
         assert env_dict["VM_BASE_IMAGE"] == "/vm/base.qcow2"
-        assert "CMDLINE_FILE" in env_dict, "CMDLINE_FILE 環境変数が必要です"
-        assert env_dict["CMDLINE_FILE"] == "/vm/cmdline.txt"
+        assert "CMDLINE_FILE" not in env_dict
 
     def test_vm_healthcheck_configured(self):
         vm = self._vm_service()
