@@ -44,10 +44,16 @@ backend常駐のAndroidProvisionerが未設定端末をADBのshell命令で初�
 - ホーム選択はset-home-activityでLauncherに固定する(9.0実機名。Pixel名QuickstepActivityは不可)
 - タイムゾーンはAsia/Tokyoとし、ホストJSTと一致する
 - ネットワークはEthernet既定(VIRT_WIFI=0)。eth0のまま残しEthernetTrackerがDHCPで10.0.2.15を自動取得する。Wi-Fi接続は必須としない(9.0の `cmd wifi` はshell権限で使えず、wlan0自体が無い構成のため)。Ethernet疎通があればwifi失敗でも成功扱いとする
-- スリープ抑止はSleep最大値とスクリーンセーバー無効、Stay awake維持、画面ロックなしとする。OS標準設定のみとし、定期キー送信はしない
+- スリープ抑止はSleep最大値とスクリーンセーバー無効、Stay awake維持とする。OS標準設定のみを使い、画面ロックの設定は変えず、定期キー送信もしない
 - F-Droidはadb installで導入し、以降はドロワー常駐とする(初回は120秒タイムアウト)
 
-手順はADBのみとする。server/android_adb.pyがsettings put系とsvc系とcmd系で設定する。到達不能時は警告記録に留め、次回に再試行する。ゲストadbdのTCP listenはinitrdパッチ(scripts/patch-android-initrd.py + ADB_TCP=1)がdefault.propに追記して開ける。upするだけでホームと日本時間とネットとストア付きで起動する。無効化はANDROID_PROVISION=0とする。実行中タスクがある環境は避けて実行する。
+設定命令はserver/android_adb.pyに置く。ADBへ接続できなければ次の巡回で再試行し、実行中のタスクがある環境は設定しない。ANDROID_PROVISION=0で自動設定を無効にする。
+
+タスク開始や環境の停止・起動・削除では、その環境の初期設定を中断し、設定用のADBコマンドが終了してから操作を渡す。backendの終了時も設定スレッドの終了を待つ。端末で実行済みの変更は戻さず、未完の設定は次の巡回で再試行する。ADB接続待ちから設定・APK導入までの実行予算は20分とする。中断時は実行中の対象確認が終わるまで待つ。
+
+固定のext4ディスクはUUIDで識別し、通常の書き込みでは初期設定を繰り返さない。固定ディスクを識別できなければ本体のコンテナIDを使い、動的環境もコンテナIDで識別する。識別子が変わると再設定する。初期設定の記録とADB接続には画面と同じ本体を使う。既定では設定記録をdata/android-provision.jsonに保存する。記録が破損するとbackendは初期設定を止め、元のファイルを残す。バックアップから記録を復元する。
+
+設定開始時は接続先・コンテナID・保存領域の識別子をまとめて確認する。ADBコマンドの実行前と実行中にも対象を確認し、本体や保存領域の変更、照会失敗を検知すると中断する。同じ本体と保存領域を確認してから完了を記録する。
 
 仕組みはentrypointがdata.img不在時に空作成し、mkfs.ext4でシード同梱なし、-driveでvirtio接続、DATA=vdaを-appendに付与する。initrdのmount_dataが処理する。設定内容はADB投入で入れる。確認記録の2026-10-17では空data起動でADB device化・eth0自動取得・Home Launcher固定・日本時間・F-Droid導入を確認した。
 
@@ -85,7 +91,7 @@ VIRT_WIFI=0既定でeth0のまま残す。virt_wifi有効時はeth0がwifi_eth�
 
 ### ADB転送
 
-QEMUのuser-netでゲスト5555番をコンテナのANDROID_ADB_PORT既定5555番に転送する。ANDROID_ADB_FORWARD=1既定とし、無効化は0とする。hostfwdは0.0.0.0 bind必須(127.0.0.1ではコンテナloのみでbackend不通)。backendはandroid:5555固定、and始まり:5555動的で届く。動的払い出しはホスト側5570番台も払い出す。開発者の手動adb用とする。ゲストadbdのTCP listenはinitrdパッチ+ADB_TCP=1で開ける。`adb connect` は到達不能でもrc=0を返す実測があるため出力判定(connected to)で行う。
+QEMUのuser-netでゲスト5555番をコンテナのANDROID_ADB_PORT既定5555番に転送する。ANDROID_ADB_FORWARD=1既定とし、無効化は0とする。hostfwdは0.0.0.0 bind必須(127.0.0.1ではコンテナloのみでbackend不通)。backendはandroid:5555固定、and始まり:5555動的で届く。既定構成ではホストへADBポートを公開しない。ゲストadbdのTCP listenはinitrdパッチ+ADB_TCP=1で開ける。`adb connect` は到達不能でもrc=0を返す実測があるため出力判定(connected to)で行う。
 
 ### 寝たら起こす
 
@@ -106,5 +112,5 @@ QEMUのuser-netでゲスト5555番をコンテナのANDROID_ADB_PORT既定5555�
 
 ## 観測
 
-- 閲覧はfrontendの3001番の本リポジトリ上書き設定から環境タブでAndroid選択、またはnoVNC直結6070番、VNC直結5590番とする
-- ログはdocker logs ai-desktop-agent-backend-1 | grep -i provisionとする。投入の開始と完了と未完が出る。対象がいない間は静かである
+- 閲覧はhttp://localhost:3000の操作画面へログインし、Androidの環境を選ぶ
+- ログはdocker compose logs backendで確認する。初期設定の開始・完了・未完・中断と失敗を記録する
