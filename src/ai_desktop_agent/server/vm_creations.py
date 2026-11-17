@@ -119,7 +119,7 @@ class CreationStore:
             except BlockingIOError as error:
                 owner.close()
                 raise DockerUnavailableError(
-                    "環境作成を管理する別のバックエンドが稼働しています"
+                    "同じ保存先を使う別のバックエンドが稼働しています"
                 ) from error
             except OSError:
                 owner.close()
@@ -180,6 +180,7 @@ class CreationStore:
 class VmCreationService:
     def __init__(self, pool: VmPool, store: CreationStore):
         self.pool, self.store = pool, store
+        self._ownership: asyncio.Task | None = None
         self._starting: asyncio.Task | None = None
         self._worker: asyncio.Task | None = None
         self._close_task: asyncio.Task | None = None
@@ -191,6 +192,27 @@ class VmCreationService:
         self._pending: dict[str, asyncio.Event] = {}
         self._slots: dict[str, VmCreationSlot] = {}
         self._queue: asyncio.Queue[CreationRecord | None] = asyncio.Queue()
+
+    async def acquire_ownership(self) -> None:
+        """Claim the backend's existing lease before recovery or any other startup writes."""
+        self._check_available()
+        if (
+            self._ownership is not None
+            and self._ownership.done()
+            and not self._ownership.cancelled()
+            and self._ownership.exception() is not None
+        ):
+            self._ownership = None
+        if self._ownership is None:
+
+            def acquire():
+                # Retain the descriptor even if the awaiting lifespan is cancelled.
+                self._owner = self.store.acquire_owner()
+
+            self._ownership = asyncio.create_task(run_display_call(acquire))
+            self._ownership.add_done_callback(self._retrieve_error)
+        await asyncio.shield(self._ownership)
+        self._check_available()
 
     async def start(self) -> None:
         if self._closing:
@@ -223,7 +245,7 @@ class VmCreationService:
             raise self._poison
 
     async def _start(self) -> None:
-        self._owner = await run_display_call(self.store.acquire_owner)
+        await self.acquire_ownership()
         try:
             pending = await run_display_call(self.store.incomplete)
             queued = []
@@ -254,8 +276,8 @@ class VmCreationService:
             self._pending.clear()
             while not self._queue.empty():
                 self._queue.get_nowait()
-            self._owner.close()
-            self._owner = None
+            # The lifespan may still be draining startup/shutdown work. Only close()
+            # releases its lease; a recoverable daemon failure can retry under this owner.
             raise
 
     def _enqueue(self, record: CreationRecord, slot: VmCreationSlot) -> None:
@@ -403,6 +425,8 @@ class VmCreationService:
     async def _close(self) -> None:
         if self._submissions:
             await asyncio.gather(*self._submissions, return_exceptions=True)
+        if self._ownership is not None:
+            await asyncio.gather(self._ownership, return_exceptions=True)
         if self._starting is not None:
             await asyncio.gather(self._starting, return_exceptions=True)
         if self._worker is not None:

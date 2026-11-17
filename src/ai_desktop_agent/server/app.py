@@ -105,21 +105,38 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """起動時に中断タスクをマークし、Android抑止タスクを開始する。"""
-    global _active_session, _android_provisioner, _server_id, _vm_creations
+    """Own the shared data before recovery, and retain ownership through shutdown."""
+    global _vm_creations
+
+    ExecutionLimits.from_env()
+    creations = get_vm_creations()
+    try:
+        await creations.acquire_ownership()
+        async with _owned_lifespan(creations):
+            yield
+    finally:
+        try:
+            await _drain_task(asyncio.create_task(creations.close()))
+        finally:
+            if _vm_creations is creations:
+                _vm_creations = None
+
+
+@asynccontextmanager
+async def _owned_lifespan(creations: VmCreationService) -> AsyncIterator[None]:
+    global _android_provisioner, _server_id
     import faulthandler
     import signal
 
     _server_id = uuid.uuid4().hex
-    ExecutionLimits.from_env()
     # 固着診断用：SIGUSR1 で全スレッドのスタックをdocker logsへ出す（プロセスは継続）。
     # seccompでptrace/py-spyが使えない環境向け。
     with contextlib.suppress(Exception):
         faulthandler.register(signal.SIGUSR1)
     get_access()
-    store = await asyncio.to_thread(get_store)
-    await asyncio.to_thread(store.redact_existing)
-    marked = await asyncio.to_thread(store.mark_interrupted)
+    store = await run_display_call(get_store)
+    await run_display_call(store.redact_existing)
+    marked = await run_display_call(store.mark_interrupted)
     await run_vm_call(get_pool().retire_legacy_relays)
     await run_vm_call(get_pool().isolate_environments)
     if marked:
@@ -143,36 +160,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     provisioner = AndroidProvisioner(pool=get_pool(), is_running_check=_android_busy)
     _android_provisioner = provisioner
-    creations = get_vm_creations()
     try:
         await creations.start()
         await provisioner.start()
         yield
     finally:
-        try:
-            await provisioner.stop()
-        finally:
-            _android_provisioner = None
-            sessions = list(_sessions.values())
-            for session in sessions:
-                session.stop()
-            try:
-                await asyncio.gather(
-                    *(s._task for s in sessions if s._task is not None), return_exceptions=True
-                )
-            finally:
-                try:
-                    await creations.close()
-                finally:
-                    _vm_creations = None
-            await asyncio.gather(
-                *(s._cleanup_task for s in sessions if s._cleanup_task is not None),
-                return_exceptions=True,
-            )
-            await asyncio.gather(*(s.aclose() for s in sessions), return_exceptions=True)
-            _sessions.clear()
-            _active_session = None
-            await asyncio.to_thread(VNCClient.shutdown_runtime)
+        await _drain_task(asyncio.create_task(_shutdown_backend(provisioner)))
+
+
+async def _shutdown_backend(provisioner) -> None:
+    global _active_session, _android_provisioner
+
+    try:
+        await provisioner.stop()
+    finally:
+        _android_provisioner = None
+        sessions = list(_sessions.values())
+        for session in sessions:
+            session.stop()
+        await asyncio.gather(
+            *(s._task for s in sessions if s._task is not None), return_exceptions=True
+        )
+        await asyncio.gather(
+            *(s._cleanup_task for s in sessions if s._cleanup_task is not None),
+            return_exceptions=True,
+        )
+        await asyncio.gather(*(s.aclose() for s in sessions), return_exceptions=True)
+        _sessions.clear()
+        _active_session = None
+        await run_display_call(VNCClient.shutdown_runtime)
 
 
 app = FastAPI(title="AI Desktop Agent", version="0.1.0", lifespan=lifespan)
