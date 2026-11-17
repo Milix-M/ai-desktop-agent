@@ -18,6 +18,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select checks
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.select.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select checks from changed paths
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/ci_scope.py select "$BASE_SHA"
+
   lint:
     name: Lint (ruff check)
     runs-on: ubuntu-latest
@@ -28,12 +43,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Run ruff check
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ scripts/ci_scope.py
 
   format:
     name: Format (ruff format --check)
@@ -45,15 +62,19 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Run ruff format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/ scripts/ci_scope.py
 
   test:
     name: Test (pytest + coverage)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,12 +83,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Run tests with coverage
-        run: uv run pytest --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
+        run: uv run pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
 
       - name: Upload coverage to artifact
         uses: actions/upload-artifact@v4
@@ -85,6 +108,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - run: uv sync --frozen
       - name: Export locked runtime dependencies
         run: uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-requirements.txt"
@@ -93,6 +118,7 @@ jobs:
 
   frontend:
     name: Frontend (lint, types, test, build)
+    needs: changes
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -107,14 +133,20 @@ jobs:
       - run: npm ci
       - run: npm audit --omit=dev
       - run: npm run lint
+        if: needs.changes.outputs.full == 'true'
       - run: npm run typecheck
+        if: needs.changes.outputs.full == 'true'
       - run: npm test
+        if: needs.changes.outputs.full == 'true'
       - run: npm run build
+        if: needs.changes.outputs.full == 'true'
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
   desktop:
     name: Desktop (Firefox, VNC, QMP, and guest agent)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -122,16 +154,73 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - run: uv sync --frozen
-      - name: Refresh production images
-        run: |
-          refresh="$(date -u +%F)"
-          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-desktop-smoke desktop
-          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-backend-smoke .
-          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-qmp-smoke vm
-          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-frontend-smoke frontend
-          docker build --pull --build-arg "PACKAGE_REFRESH=$refresh" -t ai-desktop-agent-android-smoke android
-      - run: docker build -t ai-desktop-agent-qga-smoke -f tests/integration/qga.Dockerfile .
+      - name: Set production package refresh date
+        id: refresh
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build desktop image
+        uses: docker/build-push-action@v6
+        with:
+          context: desktop
+          tags: ai-desktop-agent-desktop-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=desktop-smoke
+          cache-to: type=gha,scope=desktop-smoke,mode=max
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ai-desktop-agent-backend-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=backend-smoke
+          cache-to: type=gha,scope=backend-smoke,mode=max
+      - name: Build QMP image
+        uses: docker/build-push-action@v6
+        with:
+          context: vm
+          tags: ai-desktop-agent-qmp-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=qmp-smoke
+          cache-to: type=gha,scope=qmp-smoke,mode=max
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          tags: ai-desktop-agent-frontend-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=frontend-smoke
+          cache-to: type=gha,scope=frontend-smoke,mode=max
+      - name: Build android image
+        uses: docker/build-push-action@v6
+        with:
+          context: android
+          tags: ai-desktop-agent-android-smoke
+          build-args: PACKAGE_REFRESH=${{ steps.refresh.outputs.date }}
+          load: true
+          pull: true
+          cache-from: type=gha,scope=android-smoke
+          cache-to: type=gha,scope=android-smoke,mode=max
+      - name: Build guest-agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/integration/qga.Dockerfile
+          tags: ai-desktop-agent-qga-smoke
+          load: true
+          pull: true
+          cache-from: type=gha,scope=qga-smoke
+          cache-to: type=gha,scope=qga-smoke,mode=max
       - name: Install minimum supported Compose
         env:
           COMPOSE_TEST_DIR: ${{ runner.temp }}/agent-compose
@@ -175,19 +264,12 @@ jobs:
   # 全ジョブが通ったことの確認（branch protection用）
   all-checks:
     name: All checks passed
-    needs: [lint, format, test, dependencies, frontend, desktop]
+    needs: [changes, lint, format, test, dependencies, frontend, desktop]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Check results
-        run: |
-          if [[ "${{ needs.lint.result }}" != "success" ]] || \
-             [[ "${{ needs.format.result }}" != "success" ]] || \
-             [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.dependencies.result }}" != "success" ]] || \
-             [[ "${{ needs.frontend.result }}" != "success" ]] || \
-             [[ "${{ needs.desktop.result }}" != "success" ]]; then
-            echo "Some checks failed"
-            exit 1
-          fi
-          echo "All checks passed"
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python scripts/ci_scope.py verify

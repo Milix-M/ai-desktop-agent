@@ -361,7 +361,7 @@ class TestOpenAICompatProvider:
         assert "response_format" not in second_kwargs
 
     @pytest.mark.asyncio
-    async def test_no_fallback_on_auth_error(self, provider):
+    async def test_no_fallback_on_auth_error(self, provider, provider_retry_sleep):
         """401ではフォールバックせず例外が伝播する。"""
         err = Exception("Unauthorized (401)")
         err.status_code = 401  # type: ignore[attr-defined]
@@ -369,6 +369,8 @@ class TestOpenAICompatProvider:
         with pytest.raises(Exception, match="Unauthorized"):
             await provider._call("prompt", {"name": "s", "schema": {"type": "object"}})
         assert provider._structured_output is True
+        assert provider._client.chat.completions.create.call_count == 3
+        assert [call.args for call in provider_retry_sleep.await_args_list] == [(1.5,), (3.0,)]
 
     def test_parse_json_with_surrounding_text(self, provider):
         """説明文混じりの応答からJSONを抽出できる。"""
@@ -719,7 +721,7 @@ class TestEmptyRetry:
         return MagicMock(choices=[choice])
 
     @pytest.mark.asyncio
-    async def test_empty_then_success(self):
+    async def test_empty_then_success(self, provider_retry_sleep):
         """2回空応答の後に正常応答が来れば決定が返る。"""
         from unittest.mock import AsyncMock, patch
 
@@ -742,9 +744,10 @@ class TestEmptyRetry:
         data = await provider._call("prompt")
         assert data["action_type"] == "wait"
         assert provider._client.chat.completions.create.call_count == 3
+        assert [call.args for call in provider_retry_sleep.await_args_list] == [(1.5,), (3.0,)]
 
     @pytest.mark.asyncio
-    async def test_persistent_empty_raises(self):
+    async def test_persistent_empty_raises(self, provider_retry_sleep):
         """空応答が続くと上限で打ち切る。"""
         from unittest.mock import AsyncMock, patch
 
@@ -757,3 +760,5 @@ class TestEmptyRetry:
         provider._client.chat.completions.create = AsyncMock(return_value=self._resp(""))
         with pytest.raises(ValueError, match="空応答"):
             await provider._call("prompt")
+        assert provider._client.chat.completions.create.call_count == 3
+        assert [call.args for call in provider_retry_sleep.await_args_list] == [(1.5,), (3.0,)]
