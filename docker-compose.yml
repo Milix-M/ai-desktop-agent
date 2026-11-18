@@ -4,6 +4,7 @@ services:
   # KVMあり環境では vm のみ起動し、こちらは起動しない（1つに絞って軽量化）。
   desktop:
     profiles: ["container"]
+    runtime: ${DESKTOP_RUNTIME:-}
     networks: [env_desktop]
     cap_drop: [NET_RAW]
     build:
@@ -81,6 +82,7 @@ services:
       - VNC_HOST=${VNC_HOST:-desktop}
       - VNC_PORT=5900
       - PORT=8081
+      - DESKTOP_RUNTIME=${DESKTOP_RUNTIME:-}
       - DESKTOP_MEMORY_MB=${DESKTOP_MEMORY_MB:-2048}
       - DESKTOP_CPUS=${DESKTOP_CPUS:-2}
       - DESKTOP_PIDS_LIMIT=${DESKTOP_PIDS_LIMIT:-1024}

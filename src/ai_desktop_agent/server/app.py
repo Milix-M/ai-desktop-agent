@@ -45,7 +45,7 @@ from ai_desktop_agent.server.browser_access import (
     BrowserOriginMiddleware,
     ManagementNetworkMiddleware,
 )
-from ai_desktop_agent.server.desktop_resources import DesktopResources
+from ai_desktop_agent.server.desktop_resources import DesktopResources, desktop_runtime_from_env
 from ai_desktop_agent.server.persistence import DeletionError, StorageError
 from ai_desktop_agent.server.request_limits import RequestBodyLimitMiddleware
 from ai_desktop_agent.server.session import TaskSession, _drain_task
@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     ExecutionLimits.from_env()
     DesktopResources.from_env()
+    desktop_runtime_from_env()
     creations = get_vm_creations()
     try:
         await creations.acquire_ownership()

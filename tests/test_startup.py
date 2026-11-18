@@ -121,6 +121,11 @@ def log(event):
     with Path(os.environ['STARTUP_EVENTS']).open('a') as out: out.write(event+'\\n')
 if args==['compose','config','--environment']:
     print('USE_KVM=false')
+    if os.environ.get('STARTUP_RUNTIME'): print('DESKTOP_RUNTIME='+os.environ['STARTUP_RUNTIME'])
+elif args[:1]==['info']:
+    assert 'runsc' in args[-1]
+    log('runtime')
+    if os.environ.get('STARTUP_RUNTIME_REGISTERED'): print('yes')
 elif 'build' in args:
     Path(os.environ['STARTUP_EVENTS']+'.build').write_text(json.dumps(args))
     if os.environ.get('STARTUP_FAILURE')=='build':sys.exit(1)
@@ -161,6 +166,29 @@ def test_update_refreshes_base_images_and_os_packages_before_migration(tmp_path)
     assert args[-3:] == ["desktop", "backend", "frontend"]
     assert result.returncode != 0
     assert not events.exists()
+
+
+@pytest.mark.parametrize(
+    "runtime,registered,events_expected,error",
+    [
+        ("invalid", False, [], "DESKTOP_RUNTIME"),
+        ("runsc", False, ["runtime"], "requires the runsc runtime"),
+        ("runsc", True, ["runtime", "prepare", "up", "commit"], ""),
+    ],
+)
+def test_startup_validates_runtime_before_updating(
+    tmp_path, runtime, registered, events_expected, error
+):
+    startup, events, env = guarded_startup(tmp_path)
+    env["STARTUP_RUNTIME"] = runtime
+    env["STARTUP_RUNTIME_REGISTERED"] = "1" if registered else ""
+    result = subprocess.run(
+        ["bash", str(startup)], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert (result.returncode == 0) == (not error)
+    assert error in result.stderr
+    assert (events.read_text().splitlines() if events.exists() else []) == events_expected
+    assert Path(str(events) + ".build").exists() == (not error)
 
 
 @pytest.mark.parametrize(

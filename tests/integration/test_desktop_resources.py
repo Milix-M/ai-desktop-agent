@@ -25,6 +25,7 @@ def test_compose_desktop_enforces_limits_and_passes_them_to_backend(tmp_path, cu
         "DESKTOP_MEMORY_MB": str(memory_mb),
         "DESKTOP_CPUS": str(cpus),
         "DESKTOP_PIDS_LIMIT": str(pids),
+        "DESKTOP_RUNTIME": "runc" if custom else "",
     }
     env = {k: v for k, v in os.environ.items() if k not in settings}
     shutil.copyfile(
@@ -63,6 +64,7 @@ def test_compose_desktop_enforces_limits_and_passes_them_to_backend(tmp_path, cu
         config = json.loads(compose("config", "--format", "json").stdout)
         for name, value in settings.items():
             assert config["services"]["backend"]["environment"][name] == value
+        assert config["services"]["desktop"].get("runtime") == ("runc" if custom else None)
         compose("up", "-d", "--no-build", "--no-deps", "--wait", "desktop")
         [guest] = client.containers.list(
             filters={
@@ -73,6 +75,7 @@ def test_compose_desktop_enforces_limits_and_passes_them_to_backend(tmp_path, cu
             }
         )
         host = guest.attrs["HostConfig"]
+        assert host["Runtime"] == (settings["DESKTOP_RUNTIME"] or client.info()["DefaultRuntime"])
         assert host["Memory"] == host["MemorySwap"] == memory_mb * 1024**2
         assert host["NanoCpus"] == cpus * 1_000_000_000
         assert host["PidsLimit"] == pids
