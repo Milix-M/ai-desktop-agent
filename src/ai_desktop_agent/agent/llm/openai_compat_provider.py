@@ -54,10 +54,17 @@ PLATFORM_LINUX = "linux"
 PLATFORM_ANDROID = "android"
 
 
+def _planning_prompt(platform: str) -> str:
+    return (
+        f"{platform}のGUI操作を計画します。"
+        "秘密情報は利用者の手動入力とし、VM再起動は許可が必要です。"
+    )
+
+
 def _system_prompt(platform: str = PLATFORM_LINUX) -> str:
     """プラットフォーム別のシステムプロンプトを返す。"""
     if platform == PLATFORM_ANDROID:
-        return _SYSTEM_PROMPT + _ANDROID_PROMPT
+        return _COMMON_ACTION_PROMPT + _ANDROID_PROMPT
     return _SYSTEM_PROMPT
 
 
@@ -65,42 +72,13 @@ def _system_prompt(platform: str = PLATFORM_LINUX) -> str:
 # システムプロンプト — 画面の見方と操作のルール
 # ========================================================================
 
-_SYSTEM_PROMPT = """あなたは Linux デスクトップ（KDE Plasma, 1024x768）を遠隔操作する
+_COMMON_ACTION_PROMPT = """あなたは画面を遠隔操作する
 AI エージェントです。
 ユーザーの指示に従い、GUI 操作を自律実行します。
 
-# 画面の見方
-
-スクリーンショットには以下の視覚的補助が描画されています：
-- **赤いグリッド線**: 50px 間隔の細線（100px ごとにやや太い線）
-- **座標マーカー**: 上端に X 座標、左端に Y 座標の数字（100px 間隔）
-  - 例: 上端に「300」、左端に「200」とあれば、その交点付近が (300, 200)
-- **緑の十字**: 現在のマウスカーソル位置
-- **赤枠**: 画面の外周
-
-# 座標の読み取り方
-
-1. まず画面上端の数字を見て、ターゲットの X 座標を読む
-2. 左端の数字を見て、ターゲットの Y 座標を読む
-3. グリッド線を基準に、マーカーの間を比例補間する
-4. 精度を上げたい場合は region_select で拡大表示を要求する
-
-座標は左上が (0, 0)、右方向が +x、下方向が +y です。
-
-# 2段階精密クリック戦略（重要）
-
-ボタンや小さな UI をクリックする際は、以下の 2 段階を使い分けてください：
-
-**【直接クリック】（確信度 0.8 以上の場合のみ）**
-- 大きなボタン、ウィンドウタイトルバー、デスクトップアイコンなど
-- 座標マーカーから自信を持って位置が特定できる場合
-- 例: 上端「400」付近、左端「300」付近のボタン → left_click {x: 400, y: 300}
-
-**【region_select → 精密クリック】（確信度が低い場合）**
-- 小さいボタン、テキスト入力欄、チェックボックス、メニュー項目
-- 座標マーカーだけでは自信がない場合
-- ターゲット周辺を含む領域（100〜300px 四方）を region_select で要求
-- 返される拡大画像で正確な座標を読んでから left_click する
+画面左上を原点とし、上端のX座標・左端のY座標とグリッド線から位置を読み取ってください。
+緑の十字はカーソルです。確信度0.8以上なら直接クリックできます。
+小さい対象や位置が不確かな対象は周囲100〜300pxをregion_selectし、拡大画面で選んでください。
 
 # 操作可能なアクション
 
@@ -138,6 +116,12 @@ AI エージェントです。
 6. **subtask_complete は操作の後に**：そのサブタスクで1つも操作せずに完了宣言すると
    システムに却下される。まずクリック・入力・キー操作・待機のいずれかを実行し、
    期待結果が画面に現れたことを確認してから完了を宣言する。
+"""
+
+_SYSTEM_PROMPT = (
+    _COMMON_ACTION_PROMPT
+    + """
+Linux デスクトップの操作
 7. **アプリ起動はキーボード優先**：タスクバーの小さいアイコンへの直接クリックは
    誤爆しやすいため最後の手段にする。第一選択は Alt+F2（ランナー）→
    アプリ名を type → Enter。ランナーが使えない場合のみアイコンを使う。
@@ -149,12 +133,13 @@ AI エージェントです。
    完了を宣言する（推測での完了宣言はしない）。
 
 画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
+)
 
 _ANDROID_PROMPT = """
 # 操作対象: Android 端末（Android 9, x86 タブレット, 1024x768）
 
 このタスクの操作対象は Linux ではなく **Android 端末** です。
-上記の Linux デスクトップ向けルールのうち、以下は Android では使えません：
+Android では以下の操作を使えません：
 
 - 禁止: 端末アプリ・KRunner・Alt+F2・Ctrl+Alt+T・`which`・`apt`・`snap`
   （Android に端末・パッケージ管理・ランナーはありません）
@@ -196,6 +181,7 @@ _ACTION_TYPES = [
     "type",
     "request_user_input",
     "key_press",
+    "repeat_navigation",
     "key_combo",
     "wait",
     "region_select",
@@ -505,6 +491,19 @@ _SCHEMA_DECOMPOSE = {
     },
 }
 
+_SCHEMA_INITIAL = {
+    "name": "initial_plan",
+    "strict": True,
+    "schema": {
+        **_SCHEMA_UNDERSTAND["schema"],
+        "properties": {
+            **_SCHEMA_UNDERSTAND["schema"]["properties"],
+            "subtasks": _SCHEMA_DECOMPOSE["schema"]["properties"]["subtasks"],
+        },
+        "required": [*_SCHEMA_UNDERSTAND["schema"]["required"], "subtasks"],
+    },
+}
+
 _SCHEMA_VERIFY = {
     "name": "verify_result",
     "strict": True,
@@ -756,13 +755,13 @@ _SCHEMA_RECOVER = {
 }
 
 
-def _manual_input_schema(decision: bool) -> dict:
+def _action_variant(name: str, params: dict, *, decision: bool) -> dict:
     properties = {
-        "action_type": {"const": "request_user_input"},
+        "action_type": {"const": name},
         "params": {
             "type": "object",
-            "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
-            "required": ["reason"],
+            "properties": params,
+            "required": list(params),
             "additionalProperties": False,
         },
     }
@@ -780,9 +779,22 @@ def _manual_input_schema(decision: bool) -> dict:
     }
 
 
-_SCHEMA_ACTION["schema"]["oneOf"].append(_manual_input_schema(True))
+_manual_reason = {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}}
+_SCHEMA_ACTION["schema"]["oneOf"].extend(
+    [
+        _action_variant("request_user_input", _manual_reason, decision=True),
+        _action_variant(
+            "repeat_navigation",
+            {
+                "key": {"enum": ["up", "down", "left", "right"], "type": "string"},
+                "count": {"type": "integer", "minimum": 2, "maximum": 5},
+            },
+            decision=True,
+        ),
+    ]
+)
 _SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["oneOf"].append(
-    _manual_input_schema(False)
+    _action_variant("request_user_input", _manual_reason, decision=False)
 )
 
 
@@ -849,6 +861,21 @@ class OpenAICompatProvider(LLMProvider):
     async def aclose(self) -> None:
         await self._client.close()
 
+    async def initial_plan(
+        self, goal: Goal, platform: str
+    ) -> tuple[UnderstandingResult, DecompositionResult]:
+        prompt = (
+            "指示の意図・対象アプリ・制約と、期待結果つきの操作計画を返してください。"
+            "IDはstep_1から連番にしてください。\n" + goal.description
+        )
+        data = await self._call(prompt, _SCHEMA_INITIAL, system_prompt=_planning_prompt(platform))
+        return (
+            UnderstandingResult(
+                data["intent"], data["target_application"], data["constraints"], data["reasoning"]
+            ),
+            self._decomposition(data, 0),
+        )
+
     async def understand_instruction(
         self, goal: Goal, platform: str = PLATFORM_LINUX
     ) -> UnderstandingResult:
@@ -856,7 +883,9 @@ class OpenAICompatProvider(LLMProvider):
 
 【ユーザー指示】
 {goal.description}"""
-        data = await self._call(prompt, _SCHEMA_UNDERSTAND, system_prompt=_system_prompt(platform))
+        data = await self._call(
+            prompt, _SCHEMA_UNDERSTAND, system_prompt=_planning_prompt(platform)
+        )
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
             target_application=data.get("target_application"),
@@ -869,8 +898,6 @@ class OpenAICompatProvider(LLMProvider):
     async def decompose_task(
         self, goal: Goal, subtask_count: int, platform: str = PLATFORM_LINUX
     ) -> DecompositionResult:
-        from ai_desktop_agent.agent.state import Subtask
-
         constraints_text = ", ".join(goal.constraints) if goal.constraints else "なし"
         prompt = (
             "タスクをサブタスクに分解してください。"
@@ -882,7 +909,11 @@ class OpenAICompatProvider(LLMProvider):
             f"制約: {constraints_text}\n"
             f"\nサブタスクIDは step_{subtask_count + 1} からの連番で生成してください。"
         )
-        data = await self._call(prompt, _SCHEMA_DECOMPOSE, system_prompt=_system_prompt(platform))
+        data = await self._call(prompt, _SCHEMA_DECOMPOSE, system_prompt=_planning_prompt(platform))
+        return self._decomposition(data, subtask_count)
+
+    @staticmethod
+    def _decomposition(data: dict, subtask_count: int) -> DecompositionResult:
         raw_subtasks = data.get("subtasks", [])
         subtasks = [
             Subtask(
@@ -940,6 +971,7 @@ class OpenAICompatProvider(LLMProvider):
 """
 
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
+入力先が確定し途中確認が不要なら、同じ方向キー2〜5回をrepeat_navigationで返せます。
 {zoom_block}
 {screen_block}
 【ゴール】{goal.description}
@@ -961,10 +993,26 @@ ID: {current_subtask.id}
             image_bytes=image_bytes,
             system_prompt=_system_prompt(platform),
         )
-        action = self._parse_action(data)
+        repeats = 1
+        if data.get("action_type") == "repeat_navigation":
+            params = data.get("params")
+            if not isinstance(params, dict) or params.get("key") not in (
+                "up",
+                "down",
+                "left",
+                "right",
+            ):
+                raise ValueError("方向キーが必要です")
+            repeats = params.get("count")
+            if type(repeats) is not int or not 2 <= repeats <= 5:
+                raise ValueError("方向キーの回数は2〜5回です")
+            action = Action(ActionType.KEY_PRESS, {"key": params["key"]})
+        else:
+            action = self._parse_action(data)
         params = self._clamp_params(action.action_type, action.params, screenshot)
         return ActionDecision(
             action=Action(action_type=action.action_type, params=params),
+            repeats=repeats,
             expected_effect=data.get("expected_effect", ""),
             confidence=data.get("confidence", 0.5),
             reasoning=data.get("reasoning", ""),
@@ -1009,7 +1057,7 @@ ID: {current_subtask.id}
             prompt,
             _SCHEMA_VERIFY,
             image_bytes=screenshot.image_bytes if screenshot else None,
-            system_prompt=_system_prompt(platform),
+            system_prompt=f"{platform}のGUI作業の達成状況を観測できる証拠から判定してください。",
         )
         return VerificationResult(
             success=self._boolean(data, "success"),
@@ -1376,9 +1424,10 @@ ID: {subtask.id}
         lines = []
         for i, record in enumerate(history, 1):
             status = "✓" if record.success else "✗"
-            lines.append(
-                f"{i}. [{status}] {record.action.action_type.value} {record.action.params}"
-            )
+            params = record.action.params
+            if record.action.action_type == ActionType.TYPE and len(params["text"]) > 80:
+                params = {"text": f"（{len(params['text'])}文字）"}
+            lines.append(f"{i}. [{status}] {record.action.action_type.value} {params}")
             if record.error_message:
                 lines.append(f"   エラー: {record.error_message}")
         return "\n".join(lines)

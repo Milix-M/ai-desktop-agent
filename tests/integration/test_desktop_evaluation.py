@@ -41,7 +41,7 @@ def test_scripted_evaluation_checks_three_fresh_desktops_and_cleans_up(tmp_path)
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads((output / "report.json").read_text())
-    assert report["mode"] == "scripted" and report["model"] == "scripted-v1"
+    assert report["mode"] == "scripted" and report["model"] == "scripted-v2"
     assert report["status"] == "completed" and report["requested_attempts"] == 3
     assert report["summary"]["successes"] == 3 and report["summary"]["infrastructure_errors"] == 0
     assert report["summary"]["model_requests"] == 0

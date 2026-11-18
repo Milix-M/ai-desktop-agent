@@ -37,6 +37,49 @@ class TestOpenAICompatProvider:
         response.choices = [choice]
         return response
 
+    @pytest.mark.asyncio
+    async def test_initial_plan_uses_one_request(self, provider):
+        send = AsyncMock(
+            return_value=self._make_mock_response(
+                {
+                    "intent": "text_editing",
+                    "target_application": "Mousepad",
+                    "constraints": ["書式を保つ"],
+                    "reasoning": "編集",
+                    "subtasks": [
+                        {"id": "step_1", "description": "編集", "expected_outcome": "保存済み"}
+                    ],
+                }
+            )
+        )
+        provider._client.chat.completions.create = send
+        goal, plan = await provider.initial_plan(Goal("編集してください"), "linux")
+        send.assert_awaited_once()
+        assert goal.constraints == ["書式を保つ"]
+        assert plan.subtasks[0].expected_outcome == "保存済み"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "key,count,valid", [("down", 3, True), ("enter", 2, False), ("up", 6, False)]
+    )
+    async def test_bounded_navigation(self, provider, key, count, valid):
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {
+                    "action_type": "repeat_navigation",
+                    "params": {"key": key, "count": count},
+                }
+            )
+        )
+        args = (Goal("移動"), Subtask(id="s", description="移動"), [], self._fake_screenshot())
+        if valid:
+            decision = await provider.decide_next_action(*args)
+            assert decision.repeats == count
+            assert decision.action == Action(ActionType.KEY_PRESS, {"key": key})
+        else:
+            with pytest.raises(ValueError):
+                await provider.decide_next_action(*args)
+
     def test_provider_name(self, provider):
         assert provider.provider_name == "openai_compat"
 
