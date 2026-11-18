@@ -87,10 +87,10 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra mcp
 
       - name: Run tests with coverage
-        run: uv run pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
+        run: uv run --frozen --extra mcp pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
 
       - name: Upload coverage to artifact
         uses: actions/upload-artifact@v4
@@ -112,7 +112,7 @@ jobs:
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen
       - name: Export locked runtime dependencies
-        run: uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-requirements.txt"
+        run: uv export --frozen --no-dev --extra mcp --no-emit-project --output-file "$RUNNER_TEMP/runtime-requirements.txt"
       - name: Audit known vulnerabilities
         run: uv run pip-audit --strict --require-hashes --disable-pip --requirement "$RUNNER_TEMP/runtime-requirements.txt"
 

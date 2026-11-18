@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 from ai_desktop_agent.agent.budget import ExecutionLimits
+from ai_desktop_agent.agent.output import TaskOutput
 from ai_desktop_agent.privacy import install_log_redaction, redact_data
 from ai_desktop_agent.server.auth import (
     COOKIE_NAME,
@@ -70,6 +71,7 @@ from ai_desktop_agent.server.vm_creations import (
 )
 from ai_desktop_agent.server.vm_locks import AsyncKeyedLocks
 from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.server.webhook import TaskWebhook, open_task_webhook
 from ai_desktop_agent.server.websocket_io import close_websocket
 from ai_desktop_agent.vm.async_io import (
     VmCreationBusyError,
@@ -91,6 +93,7 @@ logger = logging.getLogger(__name__)
 # ── 永続化ストア（遅延初期化：テスト時は差し替え可能） ──
 
 _store: TaskStore | None = None
+_task_webhook: TaskWebhook | None = None
 
 
 def get_store() -> TaskStore:
@@ -127,7 +130,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def _owned_lifespan(creations: VmCreationService) -> AsyncIterator[None]:
-    global _android_provisioner, _server_id
+    global _android_provisioner, _server_id, _task_webhook
     import faulthandler
     import signal
 
@@ -162,13 +165,18 @@ async def _owned_lifespan(creations: VmCreationService) -> AsyncIterator[None]:
         return False
 
     provisioner = AndroidProvisioner(pool=get_pool(), is_running_check=_android_busy)
-    _android_provisioner = provisioner
-    try:
-        await creations.start()
-        await provisioner.start()
-        yield
-    finally:
-        await _drain_task(asyncio.create_task(_shutdown_backend(provisioner)))
+    async with open_task_webhook() as webhook:
+        _android_provisioner = provisioner
+        _task_webhook = webhook
+        try:
+            await creations.start()
+            await provisioner.start()
+            yield
+        finally:
+            try:
+                await _drain_task(asyncio.create_task(_shutdown_backend(provisioner)))
+            finally:
+                _task_webhook = None
 
 
 async def _shutdown_backend(provisioner) -> None:
@@ -350,6 +358,7 @@ class CreateTaskRequest(BaseModel):
     ]
     vm_id: str | None = None  # 省略時は稼働中の既定VM
     allow_vm_restart: bool = False  # エージェント判断でのVM再起動を許可
+    replace_running: bool = True
 
 
 class TaskStatus(BaseModel):
@@ -438,6 +447,7 @@ class TaskSummary(BaseModel):
 
 
 class TaskDetail(TaskSummary):
+    result: list[TaskOutput] = []
     actions: list[StoredActionItem] = []
     subtasks: list[dict] = []
     current_subtask_index: int = 0
@@ -549,7 +559,11 @@ async def _submission_claim(key: str, req: CreateTaskRequest):
 
     def acquire():
         nonlocal claim
-        claim = get_store().claim_submission(key_digest(key), fingerprint(req.model_dump()))
+        payload = req.model_dump()
+        if req.replace_running:
+            # Preserve fingerprints written before replacement was configurable.
+            del payload["replace_running"]
+        claim = get_store().claim_submission(key_digest(key), fingerprint(payload))
 
     try:
         await run_display_call(acquire)
@@ -589,6 +603,8 @@ async def _start_task_on_vm(req, vm, claim: SubmissionClaim | None = None):
     global _active_session
 
     previous = [s for s in _sessions.values() if s.vm_id == vm.id and s.is_running]
+    if previous and not req.replace_running:
+        raise HTTPException(status_code=409, detail="この環境で別のタスクを実行中です")
     _check_task_replacement(previous)
     display = None
     session = None
@@ -625,6 +641,15 @@ async def _start_task_on_vm(req, vm, claim: SubmissionClaim | None = None):
         raise
     session.vm_id = vm.id
     session.allow_vm_restart = req.allow_vm_restart
+
+    webhook = _task_webhook
+    if webhook is not None:
+        store = get_store()
+
+        async def notify_webhook(success: bool) -> None:
+            await webhook.task_finished(store, session.id, success)
+
+        session.on_complete(notify_webhook)
 
     # 全 WebSocket 接続にセッション情報を付与して配送する
     _forward_registrations(session)
@@ -937,6 +962,7 @@ async def get_task(task_id: str) -> TaskDetail:
     summary = _to_summary(d)
     return TaskDetail(
         **summary.model_dump(),
+        result=rec.result,
         actions=[StoredActionItem(**a) for a in d.get("actions", [])],
         subtasks=d.get("subtasks", []),
         current_subtask_index=d.get("current_subtask_index", 0),

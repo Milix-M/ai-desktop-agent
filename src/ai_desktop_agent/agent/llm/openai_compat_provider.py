@@ -37,6 +37,7 @@ from ai_desktop_agent.agent.llm.types import (
     UnderstandingResult,
     VerificationResult,
 )
+from ai_desktop_agent.agent.output import parse_task_output
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.privacy import (
     install_log_redaction,
@@ -123,7 +124,9 @@ AI エージェントです。
 - vm_restart: {reason: str} — VM再起動（事前にユーザーの許可が必要。
   許可されていないタスクでは却下される。ディスクの初期化は行わない。
   再接続後の画面を確認し、保存済みの作業をやり直さずに続行する）
-- subtask_complete: {} — 現在のサブタスク完了
+- subtask_complete: {summary, data_json} — 現在のサブタスク完了
+  summary に利用者への結果を簡潔に書く。依頼された値は画面で確認した事実だけを書く。
+  data_json は件数やIDなどを含むJSONオブジェクトを文字列で返す。不要なら空文字にする。
 
 ※ 毎ターン最新の画面が自動で送られるため、画面再取得のためのアクションは不要。
    アプリの起動を待つ場合は wait を使う。
@@ -430,8 +433,11 @@ _SCHEMA_ACTION = {
                     "action_type": {"const": "subtask_complete"},
                     "params": {
                         "type": "object",
-                        "properties": {},
-                        "required": [],
+                        "properties": {
+                            "summary": {"type": "string"},
+                            "data_json": {"type": "string"},
+                        },
+                        "required": ["summary", "data_json"],
                         "additionalProperties": False,
                     },
                     "expected_effect": {"type": "string"},
@@ -1317,6 +1323,18 @@ ID: {subtask.id}
 
         if not isinstance(params, dict):
             raise ValueError("モデル応答のparamsはオブジェクトである必要があります")
+        if action_type == ActionType.SUBTASK_COMPLETE:
+            output = parse_task_output(params.get("summary"), params.get("data_json"))
+            if output is None:
+                return {}
+            return {
+                "summary": output.summary,
+                "data_json": (
+                    json.dumps(output.data, ensure_ascii=False, separators=(",", ":"))
+                    if output.data is not None
+                    else ""
+                ),
+            }
         allowed = allowed_params(action_type)
         return {k: v for k, v in params.items() if k in allowed}
 
