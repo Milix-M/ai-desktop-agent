@@ -132,6 +132,12 @@ class ScriptedProvider(MockLLMProvider):
                 text(case.expected),
                 combo("ctrl", "s"),
             ]
+        elif case.id == "text-append":
+            actions = [
+                combo("ctrl", "end"),
+                text(case.expected.removeprefix(case.initial)),
+                combo("ctrl", "s"),
+            ]
         elif case.id == "file-rename":
             actions = [
                 key("home"),
@@ -187,7 +193,7 @@ def prepare_case(container, case, directory):
             output.addfile(info, io.BytesIO(data))
     container.put_archive(directory, archive.getvalue())
     path = directory + "/" + case.filename
-    if case.id == "text-edit":
+    if case.id in ("text-edit", "text-append"):
         command = ["mousepad", "--disable-server", path]
     elif case.id == "file-rename":
         command = ["thunar", directory]

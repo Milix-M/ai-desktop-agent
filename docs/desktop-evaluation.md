@@ -1,10 +1,11 @@
 # 定型作業を評価する
 
-コンテナ内の3課題で、タスクの完了と保存成果物の一致を別々に検査する。初期状態と検査条件を固定する構成は[OSWorldの課題定義](https://github.com/xlang-ai/OSWorld/blob/main/evaluation_examples/README.md)を参考にした。
+コンテナ内の4課題で、タスクの完了と保存成果物の一致を別々に検査する。初期状態と検査条件を固定する構成は[OSWorldの課題定義](https://github.com/xlang-ai/OSWorld/blob/main/evaluation_examples/README.md)を参考にした。
 
 | 課題ID | 保存成果物の検査 |
 | --- | --- |
 | `text-edit` | Mousepadで編集した文章の一致 |
+| `text-append` | 元の2行を保持し、指定の1行と末尾改行を追記 |
 | `file-rename` | 新しい名前・内容の一致、元の名前の消失、別ファイルの保持 |
 | `spreadsheet-total` | CalcのSUM式・計算結果・元のセルの保持 |
 

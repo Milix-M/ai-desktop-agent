@@ -189,249 +189,6 @@ _ACTION_TYPES = [
     "subtask_complete",
 ]
 
-_SCHEMA_ACTION = {
-    "name": "action_decision",
-    "schema": {
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "left_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "right_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "double_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "mouse_move"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "drag"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "start_x": {"type": "integer"},
-                            "start_y": {"type": "integer"},
-                            "end_x": {"type": "integer"},
-                            "end_y": {"type": "integer"},
-                        },
-                        "required": ["start_x", "start_y", "end_x", "end_y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "scroll"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "direction": {"type": "string", "enum": ["up", "down"]},
-                            "amount": {"type": "integer"},
-                        },
-                        "required": ["direction", "amount"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "type"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "key_press"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"key": {"type": "string"}},
-                        "required": ["key"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "key_combo"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
-                        "required": ["keys"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "wait"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"seconds": {"type": "number"}},
-                        "required": ["seconds"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "region_select"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "x": {"type": "integer"},
-                            "y": {"type": "integer"},
-                            "width": {"type": "integer"},
-                            "height": {"type": "integer"},
-                        },
-                        "required": ["x", "y", "width", "height"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "vm_restart"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"reason": {"type": "string"}},
-                        "required": ["reason"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "subtask_complete"},
-                    "params": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-        ]
-    },
-}
-
-
 _SCHEMA_UNDERSTAND = {
     "name": "understand_instruction",
     "strict": True,
@@ -531,11 +288,11 @@ _SCHEMA_RECOVER = {
             "actions": {
                 "type": "array",
                 "items": {
-                    "oneOf": [
+                    "anyOf": [
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "left_click"},
+                                "action_type": {"type": "string", "const": "left_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -552,7 +309,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "right_click"},
+                                "action_type": {"type": "string", "const": "right_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -569,7 +326,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "double_click"},
+                                "action_type": {"type": "string", "const": "double_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -586,7 +343,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "mouse_move"},
+                                "action_type": {"type": "string", "const": "mouse_move"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -603,7 +360,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "drag"},
+                                "action_type": {"type": "string", "const": "drag"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -622,7 +379,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "scroll"},
+                                "action_type": {"type": "string", "const": "scroll"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -639,7 +396,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "type"},
+                                "action_type": {"type": "string", "const": "type"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string"}},
@@ -653,7 +410,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "key_press"},
+                                "action_type": {"type": "string", "const": "key_press"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"key": {"type": "string"}},
@@ -667,7 +424,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "key_combo"},
+                                "action_type": {"type": "string", "const": "key_combo"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -683,7 +440,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "wait"},
+                                "action_type": {"type": "string", "const": "wait"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"seconds": {"type": "number"}},
@@ -697,7 +454,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "region_select"},
+                                "action_type": {"type": "string", "const": "region_select"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -716,7 +473,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "vm_restart"},
+                                "action_type": {"type": "string", "const": "vm_restart"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -732,7 +489,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "subtask_complete"},
+                                "action_type": {"type": "string", "const": "subtask_complete"},
                                 "params": {
                                     "type": "object",
                                     "properties": {},
@@ -755,47 +512,54 @@ _SCHEMA_RECOVER = {
 }
 
 
-def _action_variant(name: str, params: dict, *, decision: bool) -> dict:
-    properties = {
-        "action_type": {"const": name},
-        "params": {
-            "type": "object",
-            "properties": params,
-            "required": list(params),
-            "additionalProperties": False,
-        },
-    }
-    if decision:
-        properties.update(
-            expected_effect={"type": "string"},
-            confidence={"type": "number", "minimum": 0.0, "maximum": 1.0},
-            reasoning={"type": "string"},
-        )
+def _action_variant(name: str, params: dict) -> dict:
     return {
         "type": "object",
-        "properties": properties,
-        "required": list(properties),
+        "properties": {
+            "action_type": {"type": "string", "const": name},
+            "params": {
+                "type": "object",
+                "properties": params,
+                "required": list(params),
+                "additionalProperties": False,
+            },
+        },
+        "required": ["action_type", "params"],
         "additionalProperties": False,
     }
 
 
-_manual_reason = {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}}
-_SCHEMA_ACTION["schema"]["oneOf"].extend(
-    [
-        _action_variant("request_user_input", _manual_reason, decision=True),
-        _action_variant(
-            "repeat_navigation",
-            {
-                "key": {"enum": ["up", "down", "left", "right"], "type": "string"},
-                "count": {"type": "integer", "minimum": 2, "maximum": 5},
+_recovery_variants = _SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["anyOf"]
+_recovery_variants.append(
+    _action_variant(
+        "request_user_input", {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}}
+    )
+)
+_SCHEMA_ACTION = {
+    "name": "action_decision",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "anyOf": [
+                    *_recovery_variants,
+                    _action_variant(
+                        "repeat_navigation",
+                        {
+                            "key": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                            "count": {"type": "integer", "minimum": 2, "maximum": 5},
+                        },
+                    ),
+                ]
             },
-            decision=True,
-        ),
-    ]
-)
-_SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["oneOf"].append(
-    _action_variant("request_user_input", _manual_reason, decision=False)
-)
+            "expected_effect": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reasoning": {"type": "string"},
+        },
+        "required": ["action", "expected_effect", "confidence", "reasoning"],
+        "additionalProperties": False,
+    },
+}
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -847,6 +611,9 @@ class OpenAICompatProvider(LLMProvider):
         # structured output (response_format) が使えるかどうか。
         # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
         self._structured_output = True
+        self._completion_limit_only = (
+            self._client.base_url.host == "api.openai.com" and model.startswith("gpt-6.")
+        )
 
     @property
     def provider_name(self) -> str:
@@ -866,6 +633,9 @@ class OpenAICompatProvider(LLMProvider):
     ) -> tuple[UnderstandingResult, DecompositionResult]:
         prompt = (
             "指示の意図・対象アプリ・制約と、期待結果つきの操作計画を返してください。"
+            "単一の成果物を一つのサブタスクにまとめ、開く・選択・入力・保存を分割しない。"
+            "期待結果は画面で確認できる最終状態とし、維持すべき制約はconstraintsに残す。"
+            "ユーザーが明示的に求めた検証は計画に含める。"
             "IDはstep_1から連番にしてください。\n" + goal.description
         )
         data = await self._call(prompt, _SCHEMA_INITIAL, system_prompt=_planning_prompt(platform))
@@ -901,7 +671,7 @@ class OpenAICompatProvider(LLMProvider):
         constraints_text = ", ".join(goal.constraints) if goal.constraints else "なし"
         prompt = (
             "タスクをサブタスクに分解してください。"
-            "各サブタスクは単一の操作単位にしてください。\n"
+            "各サブタスクは、画面で確認できる成果物または利用者の明示的な検証単位にしてください。\n"
             f"\n【ゴール】\n"
             f"意図: {goal.intent}\n"
             f"説明: {goal.description}\n"
@@ -978,6 +748,7 @@ class OpenAICompatProvider(LLMProvider):
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}
 
+【制約】{goal.constraints}
 【現在のサブタスク】
 ID: {current_subtask.id}
 説明: {current_subtask.description}
@@ -993,9 +764,12 @@ ID: {current_subtask.id}
             image_bytes=image_bytes,
             system_prompt=_system_prompt(platform),
         )
+        action_data = data.get("action", data)
+        if not isinstance(action_data, dict):
+            raise ValueError("モデル応答のactionはオブジェクトである必要があります")
         repeats = 1
-        if data.get("action_type") == "repeat_navigation":
-            params = data.get("params")
+        if action_data.get("action_type") == "repeat_navigation":
+            params = action_data.get("params")
             if not isinstance(params, dict) or params.get("key") not in (
                 "up",
                 "down",
@@ -1008,7 +782,7 @@ ID: {current_subtask.id}
                 raise ValueError("方向キーの回数は2〜5回です")
             action = Action(ActionType.KEY_PRESS, {"key": params["key"]})
         else:
-            action = self._parse_action(data)
+            action = self._parse_action(action_data)
         params = self._clamp_params(action.action_type, action.params, screenshot)
         return ActionDecision(
             action=Action(action_type=action.action_type, params=params),
@@ -1163,13 +937,15 @@ ID: {subtask.id}
             try:
                 kwargs: dict[str, Any] = {
                     "model": self._model,
-                    "max_tokens": self._max_tokens,
-                    "temperature": self._temperature,
                     "messages": [
                         {"role": "system", "content": system_prompt or _SYSTEM_PROMPT},
                         {"role": "user", "content": user_content},
                     ],
                 }
+                if self._completion_limit_only:
+                    kwargs["max_completion_tokens"] = self._max_tokens
+                else:
+                    kwargs.update(max_tokens=self._max_tokens, temperature=self._temperature)
                 if use_schema:
                     kwargs["response_format"] = {
                         "type": "json_schema",

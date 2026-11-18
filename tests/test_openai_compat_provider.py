@@ -66,8 +66,10 @@ class TestOpenAICompatProvider:
         provider._client.chat.completions.create = AsyncMock(
             return_value=self._make_mock_response(
                 {
-                    "action_type": "repeat_navigation",
-                    "params": {"key": key, "count": count},
+                    "action": {
+                        "action_type": "repeat_navigation",
+                        "params": {"key": key, "count": count},
+                    },
                 }
             )
         )
@@ -79,6 +81,18 @@ class TestOpenAICompatProvider:
         else:
             with pytest.raises(ValueError):
                 await provider.decide_next_action(*args)
+
+    async def test_gpt6_sends_supported_completion_limit(self):
+        provider = OpenAICompatProvider(model="gpt-6.2-sol", api_key="test-key")
+        try:
+            send = AsyncMock(return_value=self._make_mock_response({"ok": True}))
+            provider._client.chat.completions.create = send
+            await provider._call("ok")
+            args = send.await_args.kwargs
+            assert args["max_completion_tokens"] == provider._max_tokens
+            assert "temperature" not in args and "max_tokens" not in args
+        finally:
+            await provider.aclose()
 
     def test_provider_name(self, provider):
         assert provider.provider_name == "openai_compat"
