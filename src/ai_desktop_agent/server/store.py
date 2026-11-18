@@ -18,6 +18,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+from ai_desktop_agent.agent.output import TaskOutput
 from ai_desktop_agent.privacy import redact_data
 from ai_desktop_agent.server.persistence import (
     StorageError,
@@ -150,6 +151,8 @@ class TaskRecord:
     stop_reason: str | None = None
     error_message: str = ""
 
+    result: list[TaskOutput] = dataclasses.field(default_factory=list)
+
     def to_dict(self, *, include_actions: bool = True) -> dict:
         result = {
             "id": self.id,
@@ -180,6 +183,7 @@ class TaskRecord:
             "failure_count": sum(1 for a in self.actions if not a.success),
         }
         if include_actions:
+            result["result"] = [output.model_dump() for output in self.result]
             result["actions"] = [dataclasses.asdict(a) for a in self.actions]
         return result
 
@@ -200,6 +204,7 @@ class TaskRecord:
                 "request_digest": (str, type(None)),
                 "request_fingerprint": (str, type(None)),
                 "actions": (list,),
+                "result": (list,),
                 "subtasks": (list,),
                 "goal": (dict,),
                 "execution_limits": (dict,),
@@ -254,6 +259,7 @@ class TaskRecord:
             instruction=str(d.get("instruction", "")),
             state=str(d.get("state", "idle")),
             success=d.get("success"),
+            result=[TaskOutput.model_validate(item) for item in d.get("result", [])],
             actions=[StoredAction(**a) for a in d.get("actions", [])],
             subtasks=list(d.get("subtasks", [])),
             current_subtask_index=int(d.get("current_subtask_index", 0)),

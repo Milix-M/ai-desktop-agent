@@ -99,9 +99,9 @@ GET /auth/statusとGET /health、POST /auth/login、POST /auth/logout以外は�
 | 方法 | パス | 用途 |
 |---|---|---|
 | GET | /health | 生存確認 |
-| POST | /tasks | タスク投入。instructionとvm_idとallow_vm_restartを指定できる |
+| POST | /tasks | タスク投入。instructionとvm_idとallow_vm_restartを指定できる。replace_running=falseで実行中の環境への投入を拒否する |
 | GET | /tasks | 履歴一覧。新しい順に返す |
-| GET | /tasks/{id} | タスク詳細。操作履歴と推論を含む |
+| GET | /tasks/{id} | タスク詳細。操作履歴と推論、利用者向けの結果（result）を含む |
 | DELETE | /tasks/{id} | 履歴削除。実行中なら止めてから消す |
 | GET | /tasks/current | 最新タスク状態。vm_idで環境を選べる |
 | POST | /tasks/current/{pause,resume,stop} | タスク制御 |
@@ -144,7 +144,7 @@ request_user_inputはTaskSessionで処理し、awaiting_userの間は画面取�
 
 ### タスク投入の再送
 
-POST /tasksは任意のIdempotency-Keyを受け付ける。キーはASCIIの英数字・ハイフン・アンダースコアを16〜128文字で指定する。同じキーと内容の再送では受付済みタスクの状態をreplayed=trueで返す。同じキーで指示・vm_id・allow_vm_restartのいずれかが異なる場合と受付処理中は409、受付後に履歴が削除されていれば410を返す。キーを省略した投入は毎回新しいタスクを作る。
+POST /tasksは任意のIdempotency-Keyを受け付ける。キーはASCIIの英数字・ハイフン・アンダースコアを16〜128文字で指定する。同じキーと内容の再送では受付済みタスクの状態をreplayed=trueで返す。同じキーで指示・vm_id・allow_vm_restart・replace_runningのいずれかが異なる場合と受付処理中は409、受付後に履歴が削除されていれば410を返す。キーを省略した投入は毎回新しいタスクを作る。
 
 server/submissions.pyとTaskStoreはキーと要求内容のハッシュで照合し、data/submissionsに受付記録を保存する。原文の指示やキーは受付記録に含めない。同じキーの初回保存はファイルロックで保護し、HTTP要求が中断されても保存完了までロックを保持する。タスク記録と受付記録を保存してからモデルを呼び出す。履歴を削除しても受付記録を残し、バックエンド再起動後の再送にも使う。受付記録や対応する履歴の破損は503として止める。
 

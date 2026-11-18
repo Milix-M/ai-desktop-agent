@@ -172,6 +172,7 @@ CIでは対応下限のCompose 2.33.1で実デスクトップを検査する。�
 
 ## 詳細
 
+- [MCP・Webhookでタスク結果を使う](docs/task-integrations.md)
 - [構成とAPI](docs/architecture.md)
 - [安全性と利用範囲](docs/safety.md)
 - [本番利用に向けた確認事項](docs/production-readiness.md)

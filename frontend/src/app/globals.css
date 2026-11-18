@@ -813,3 +813,8 @@ body {
   color: var(--dim);
   margin-right: 6px;
 }
+
+.task-result p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

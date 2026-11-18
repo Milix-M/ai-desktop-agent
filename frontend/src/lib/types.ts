@@ -143,7 +143,13 @@ export interface TaskAction {
   confidence: number;
 }
 
+export interface TaskOutput {
+  summary: string;
+  data: Record<string, unknown> | null;
+}
+
 export interface TaskDetail extends TaskHistoryItem {
+  result?: TaskOutput[];
   execution_usage?: {
     requests?: number;
     input_tokens?: number;

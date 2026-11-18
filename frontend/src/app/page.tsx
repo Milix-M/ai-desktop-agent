@@ -19,7 +19,7 @@ import { ServerGeneration } from "@/lib/server-generation";
 import { pendingVmCreations } from "@/lib/vm-creation-retries";
 import { clearTaskSubmissions } from "@/lib/task-submission-retries";
 import { ApiError, createTask, controlTask, getCurrentTask, getTaskDetail, getTaskHistory, deleteTask, getVms, createVm, deleteVm, stopVm, startVm, getVncWsUrl } from "@/lib/api";
-import type { WsMessage, LogEntry, TaskStatus, TaskHistoryItem, SubtaskInfo, VmInfo, ManualInputRequest, PendingSubmission } from "@/lib/types";
+import type { WsMessage, LogEntry, TaskStatus, TaskHistoryItem, TaskOutput, SubtaskInfo, VmInfo, ManualInputRequest, PendingSubmission } from "@/lib/types";
 
 let logIdCounter = 0;
 
@@ -55,6 +55,7 @@ interface VmView {
   subtaskCount: number;
   subtasks: SubtaskInfo[];
   logs: LogEntry[];
+  result?: TaskOutput[];
   manualInput?: ManualInputRequest | null;
 }
 
@@ -264,6 +265,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             subtaskIndex: detail.current_subtask_index,
             subtasks: detail.subtasks.map((s) => ({ id: s.id, description: s.description })),
             logs: entries,
+            result: detail.result,
           },
         });
       } catch (error) {
@@ -765,6 +767,12 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             }}
           />
 
+          {view.result && view.result.length > 0 && (
+            <section className="section task-result">
+              <h2>実行結果</h2>
+              {view.result.map((output, index) => <p key={index}>{output.summary}</p>)}
+            </section>
+          )}
           <LogPanel entries={logs} />
         </div>
       </div>
