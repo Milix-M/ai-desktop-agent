@@ -47,6 +47,14 @@ KVMとゲストファイルが揃う場合はQEMU VM、それ以外はXfceのコ
 
 直接の `docker compose up` は移行処理を通らない。[バックアップと復元](docs/workspace-backups.md)に保存範囲と復元手順をまとめる。
 
+## コンテナデスクトップをgVisorで動かす
+
+[gVisorのDocker設定手順](https://gvisor.dev/docs/user_guide/quick_start/docker/)に従い、Dockerホストに `runsc` を登録する。アプリ内の作業を保存し、`.env` に `DESKTOP_RUNTIME=runsc` を設定して `./scripts/up.sh` を実行する。固定環境をコンテナにする場合は `USE_KVM=false` も設定する。
+
+設定は固定desktopの再作成時と、［コンテナ追加］で新しい環境を作成するときに適用する。固定desktopのホームは更新手順で引き継ぎ、作成済みの追加環境は作成時のランタイムで動く。設定を省くとDockerホストの既定を使う。標準ランタイムを明示するには `DESKTOP_RUNTIME=runc` を指定する。
+
+`runsc` の登録がない場合、`./scripts/up.sh` は環境を停止する前に終了し、追加コンテナの作成も失敗する。gVisorで隔離する対象は作業コンテナで、管理バックエンドは引き続きDockerソケットを使う。
+
 ## 指示を出す
 
 環境のタブを選び、指示を入力して［実行］を選ぶ。Enterで送信、Shift+Enterで改行する。日本語変換中のEnterでは送信しない。

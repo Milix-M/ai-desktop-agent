@@ -4,13 +4,14 @@ from unittest.mock import Mock
 
 import pytest
 
+from ai_desktop_agent.server.vm_control import DockerUnavailableError
 from ai_desktop_agent.server.vm_pool import VmPool
 from tests.test_vm_pool import _FakeDocker
 
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
-    for name in ("DESKTOP_MEMORY_MB", "DESKTOP_CPUS", "DESKTOP_PIDS_LIMIT"):
+    for name in ("DESKTOP_MEMORY_MB", "DESKTOP_CPUS", "DESKTOP_PIDS_LIMIT", "DESKTOP_RUNTIME"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -30,6 +31,31 @@ def test_new_desktops_have_bounded_resources(tmp_path, monkeypatch, custom):
     assert run.get("pids_limit") == (768 if custom else 1024)
 
 
+@pytest.mark.parametrize("runtime", [None, "runc", "runsc"])
+def test_new_desktops_use_selected_runtime(tmp_path, monkeypatch, runtime):
+    if runtime is not None:
+        monkeypatch.setenv("DESKTOP_RUNTIME", runtime)
+    client = _FakeDocker()
+    client.info = Mock(return_value={"Runtimes": {"runsc": {}}})
+    pool = VmPool(client=client, state_file=tmp_path / "vms.json")
+    pool.create_vm(kind="container")
+    assert client.containers.runs[-1]["runtime"] == runtime
+    assert client.info.call_count == (1 if runtime == "runsc" else 0)
+
+
+def test_unregistered_runsc_fails_before_allocating_a_desktop(tmp_path, monkeypatch):
+    monkeypatch.setenv("DESKTOP_RUNTIME", "runsc")
+    client = _FakeDocker()
+    client.info = Mock(return_value={"Runtimes": {"runc": {}}})
+    state = tmp_path / "vms.json"
+    pool = VmPool(client=client, state_file=state)
+    with pytest.raises(DockerUnavailableError, match="runsc"):
+        pool.create_vm(kind="container")
+    assert not client.containers.runs and not state.exists()
+    assert len(client.networks.items) == 1
+    assert not client.volumes.items
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -47,6 +73,7 @@ def test_new_desktops_have_bounded_resources(tmp_path, monkeypatch, custom):
         ("DESKTOP_PIDS_LIMIT", "-1"),
         ("DESKTOP_PIDS_LIMIT", "1.5"),
         ("DESKTOP_PIDS_LIMIT", "1_024"),
+        ("DESKTOP_RUNTIME", "unknown"),
     ],
 )
 async def test_invalid_limits_fail_before_allocating_or_recovering(

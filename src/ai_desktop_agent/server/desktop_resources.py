@@ -1,9 +1,16 @@
-"""Resource limits for container desktops; QEMU guest sizing is separate."""
+"""Docker runtime and resource settings for container desktops."""
 
 import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+
+
+def desktop_runtime_from_env() -> str | None:
+    runtime = os.environ.get("DESKTOP_RUNTIME") or None
+    if runtime not in (None, "runc", "runsc"):
+        raise ValueError("DESKTOP_RUNTIME は未設定、runc、runsc のいずれかにしてください")
+    return runtime
 
 
 def _number(name: str, default: str, minimum: Decimal, scale: int = 1) -> int:

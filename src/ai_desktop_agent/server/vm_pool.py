@@ -25,7 +25,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from ai_desktop_agent.server.desktop_resources import DesktopResources  # noqa: E402
+from ai_desktop_agent.server.desktop_resources import (  # noqa: E402
+    DesktopResources,
+    desktop_runtime_from_env,
+)
 from ai_desktop_agent.server.docker_discovery import (  # noqa: E402
     container_labels,
     refresh_existing,
@@ -364,7 +367,10 @@ class VmPool:
             raise ValueError(f"kind は qemu/container/android のいずれか: {kind}")
 
         resources = DesktopResources.from_env() if kind == KIND_CONTAINER else None
+        runtime = desktop_runtime_from_env() if kind == KIND_CONTAINER else None
         docker = self._docker()
+        if runtime == "runsc":
+            self._require_runsc(docker)
         if (
             kind in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
@@ -507,6 +513,7 @@ class VmPool:
                     image,
                     name=vm_name,
                     detach=True,
+                    runtime=runtime,
                     cap_drop=["NET_RAW"],
                     shm_size="1g",
                     **resources.docker_options(),
@@ -722,6 +729,14 @@ class VmPool:
         return True
 
     # ── 内部 ────────────────────────────────────────
+
+    @staticmethod
+    @_discovery_operation
+    def _require_runsc(client: Any) -> None:
+        if "runsc" not in (client.info().get("Runtimes") or {}):
+            raise DockerUnavailableError(
+                "DESKTOP_RUNTIME=runsc を使うにはDockerにrunscを登録してください"
+            )
 
     def _docker(self) -> Any:
         if self._client is not None:
