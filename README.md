@@ -1,5 +1,7 @@
 # AI Desktop Agent
 
+![AI Desktop Agentのプロダクトイメージ](docs/images/readme-hero.png)
+
 自然言語の指示で、VMやコンテナ内のデスクトップをAIが操作する。ブラウザで画面を見ながら、指示・一時停止・停止・履歴の確認ができる。
 
 ## 起動する
