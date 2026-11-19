@@ -19,6 +19,11 @@ NS = {
 }
 
 
+class _NoDtdTreeBuilder(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        raise ValueError("成果物のXMLにDOCTYPEは使えません")
+
+
 @dataclass(frozen=True)
 class DesktopCase:
     id: str
@@ -112,10 +117,9 @@ def read_artifact(container, path: str) -> bytes | None:
             raise ValueError("成果物は通常ファイルである必要があります")
         if members[0].size > MAX_ARTIFACT_BYTES:
             raise ValueError("成果物が検査サイズの上限を超えました")
-        file = archive.extractfile(members[0])
-        if file is None:
-            raise ValueError("成果物を読み取れません")
-        return file.read(MAX_ARTIFACT_BYTES + 1)
+        # The member is a regular file, so extractfile cannot return None.
+        with archive.extractfile(members[0]) as file:
+            return file.read(MAX_ARTIFACT_BYTES)
 
 
 def spreadsheet_matches(data: bytes) -> bool:
@@ -124,12 +128,10 @@ def spreadsheet_matches(data: bytes) -> bool:
         if info.file_size > MAX_ARTIFACT_BYTES:
             return False
         with archive.open(info) as file:
-            content = file.read(MAX_ARTIFACT_BYTES + 1)
-        if len(content) > MAX_ARTIFACT_BYTES:
-            return False
+            content = file.read(MAX_ARTIFACT_BYTES)
     if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
         return False
-    root = ET.fromstring(content)
+    root = ET.fromstring(content, parser=ET.XMLParser(target=_NoDtdTreeBuilder()))
     table = root.find("office:body/office:spreadsheet/table:table", NS)
     if table is None:
         return False
