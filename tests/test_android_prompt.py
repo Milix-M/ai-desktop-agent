@@ -20,7 +20,7 @@ class TestSystemPrompt:
 
     def test_android_appends_android_section(self):
         prompt = _system_prompt(PLATFORM_ANDROID)
-        assert "Linux デスクトップ" in prompt  # 基盤は共通
+        assert "sudo apt install" not in prompt
         assert "Android 端末" in prompt
         assert "Alt+F2" in prompt  # 禁止事項として言及
         assert "Quickstep" in prompt  # ホーム選択の案内

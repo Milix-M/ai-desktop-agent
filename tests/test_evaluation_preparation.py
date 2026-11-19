@@ -47,8 +47,10 @@ def test_guest_preparation_returns_the_exact_seed_files_and_preserves_ownership(
     baseline = {name: files.get(name) for name in desktop.filenames(case)}
     assert not check_case(case, baseline)[0]
     commands = [call.args[0] for call in container.exec_run.call_args_list]
+    mousepad = ["mousepad", "--disable-server", directory + "/" + case.filename]
     expected = {
-        "text-edit": ["mousepad", "--disable-server", directory + "/" + case.filename],
+        "text-edit": mousepad,
+        "text-append": mousepad,
         "file-rename": ["thunar", directory],
         "spreadsheet-total": [
             "libreoffice",

@@ -131,7 +131,7 @@ class ScriptedProvider(MockLLMProvider):
     """Exercise the harness with known GUI actions; never label this as model accuracy."""
 
     def __init__(self, case):
-        super().__init__(model="scripted-v1")
+        super().__init__(model="scripted-v2")
 
         def combo(*keys):
             return Action(ActionType.KEY_COMBO, {"keys": list(keys)})
@@ -149,6 +149,12 @@ class ScriptedProvider(MockLLMProvider):
                 text(case.expected),
                 combo("ctrl", "s"),
             ]
+        elif case.id == "text-append":
+            actions = [
+                combo("ctrl", "end"),
+                text(case.expected.removeprefix(case.initial)),
+                combo("ctrl", "s"),
+            ]
         elif case.id == "file-rename":
             actions = [
                 key("home"),
@@ -162,9 +168,7 @@ class ScriptedProvider(MockLLMProvider):
             actions = [
                 key("escape"),
                 combo("ctrl", "home"),
-                key("down"),
-                key("down"),
-                key("down"),
+                ActionDecision(key("down"), "3行下へ移動", 1.0, "評価基盤の動作確認", repeats=3),
                 text("合計"),
                 key("tab"),
                 text("=SUM(B2:B3)"),
@@ -175,6 +179,8 @@ class ScriptedProvider(MockLLMProvider):
 
     async def decide_next_action(self, *args, **kwargs):
         action = next(self.actions, Action(ActionType.SUBTASK_COMPLETE))
+        if isinstance(action, ActionDecision):
+            return action
         return ActionDecision(action, "定型操作を実行する", 1.0, "評価基盤の動作確認")
 
 
@@ -205,7 +211,7 @@ def prepare_case(container, case, directory):
     if not container.put_archive(directory, archive.getvalue()):
         raise RuntimeError("評価環境の初期ファイルを配置できませんでした")
     path = directory + "/" + case.filename
-    if case.id == "text-edit":
+    if case.id in ("text-edit", "text-append"):
         command = ["mousepad", "--disable-server", path]
     elif case.id == "file-rename":
         command = ["thunar", directory]

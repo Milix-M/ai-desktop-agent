@@ -130,7 +130,7 @@ async def test_real_connections_cannot_be_adopted_after_admission_or_lost_after_
         assert proof.get("binding_error") == expected and proof["current_is_original"], proof
         assert proof["replacement_connected"] and proof["replacement_readable"], proof
     if mode == "active":
-        assert proof["requests"] == ["understand_instruction"] and proof["run_cancelled"], proof
+        assert proof["requests"] == ["initial_plan"] and proof["run_cancelled"], proof
         assert proof["state"] == "failed" and proof["stop_reason"] == "cancelled", proof
         assert proof["vm_id"] == "desk-original", proof
     else:

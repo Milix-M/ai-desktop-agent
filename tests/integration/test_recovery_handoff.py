@@ -32,15 +32,11 @@ async def test_successful_manual_recovery_does_not_reuse_a_real_failed_key_error
     async def respond(body: dict):
         stage = body["response_format"]["json_schema"]["name"]
         requests.append(stage)
-        if stage == "understand_instruction":
+        if stage == "initial_plan":
             data = {
                 "intent": "inspect",
                 "target_application": None,
                 "constraints": [],
-                "reasoning": "inspect the visible document",
-            }
-        elif stage == "decompose_task":
-            data = {
                 "subtasks": [
                     {
                         "id": "inspect",
@@ -123,8 +119,7 @@ async def test_successful_manual_recovery_does_not_reuse_a_real_failed_key_error
         assert record.actions[1].error_message == ""
         assert record.actions[2].action_type == "subtask_complete" and record.actions[2].success
         assert requests == [
-            "understand_instruction",
-            "decompose_task",
+            "initial_plan",
             "action_decision",
             "recover_from_error",
             "action_decision",
