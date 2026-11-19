@@ -61,6 +61,7 @@ async def llm_with_transport(handler):
         ("TASK_MAX_REQUESTS", "1.5"),
         ("TASK_MAX_TOKENS", ""),
         ("TASK_MAX_COST_USD", "nan"),
+        ("TASK_MAX_COST_USD", "0"),
         ("TASK_MAX_COST_USD", "1"),
         ("TASK_INPUT_USD_PER_MILLION", "1"),
     ],
@@ -220,9 +221,9 @@ async def test_decision_limit_is_shared_and_never_falls_back_to_llm(
     assert len(seen) == 1
     llm.verify_result.assert_not_awaited()
     llm.recover_from_error.assert_not_awaited()
-    assert session._store.load(session.id).stop_reason == (
-        "token_limit" if failure == "tokens" else "usage_unavailable"
-    )
+    record = session._store.load(session.id)
+    assert record.decision_calls == 1
+    assert record.stop_reason == ("token_limit" if failure == "tokens" else "usage_unavailable")
 
 
 @pytest.mark.parametrize(

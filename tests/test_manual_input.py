@@ -199,10 +199,17 @@ async def test_stop_while_waiting_records_an_interruption_and_closes_connections
     assert session.manual_input is None and not session.display.is_connected
 
 
-async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exit_mode", ["resume", "stop", "deadline"])
+@pytest.mark.parametrize("release_fails", [False, True], ids=["released", "release-failed"])
+async def test_input_release_finishes_before_agent_continues_or_session_exits(
+    tmp_path, monkeypatch, exit_mode, release_fails
+):
+    from ai_desktop_agent.server.vnc_input import VncInput
+
     session = manual_session(tmp_path, limits=ExecutionLimits(max_seconds=600))
-    loop = asyncio.get_running_loop()
-    schedule = loop.call_later
+    session.display.capture_screen = MockCapture(session.display.capture_screen)
+    event_loop = asyncio.get_running_loop()
+    schedule = event_loop.call_later
     deadlines = []
 
     def record_deadline(delay, callback, *args, **kwargs):
@@ -211,15 +218,63 @@ async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path,
             deadlines.append((timer, callback, args))
         return timer
 
-    monkeypatch.setattr(loop, "call_later", record_deadline)
+    monkeypatch.setattr(event_loop, "call_later", record_deadline)
+    await session.start_async("ログインする")
+    pending = await wait_for_manual(session)
+    release_started, unblock = asyncio.Event(), asyncio.Event()
+
+    async def release():
+        release_started.set()
+        await unblock.wait()
+        if release_fails:
+            raise ConnectionError("desktop connection lost")
+
+    writer = Mock(drain=AsyncMock(side_effect=release))
+    viewer = VncInput(writer, lambda: session._input_authority)
+    viewer.forward(b"RFB 003.008\n\x01\x01\x04\x01\0\0\0\0\xff\xe3")
+    calls = session.llm.decide_next_action.call_count
+    captures = session.display.capture_screen.calls
+    try:
+        if exit_mode == "resume":
+            session.resume(manual_input_id=pending["id"], allow_screen_share=True)
+        elif exit_mode == "stop":
+            session.stop()
+        else:
+            assert len(deadlines) == 1
+            timer, expire, args = deadlines[0]
+            timer.cancel()
+            expire(*args)
+        await asyncio.wait_for(release_started.wait(), 2)
+        if exit_mode == "stop":
+            session.stop()  # Repeated cancellation must not abandon input cleanup.
+        assert not session._task.done()
+        assert session.llm.decide_next_action.call_count == calls
+        assert session.display.capture_screen.calls == captures
+        assert session.manual_input is None and session._input_authority is None
+        assert writer.write.call_args.args == (b"\x04\0\0\0\0\0\xff\xe3",)
+        unblock.set()
+        result = (await asyncio.wait_for(asyncio.gather(session._task, return_exceptions=True), 3))[
+            0
+        ]
+        if exit_mode == "resume" and not release_fails:
+            assert result is True
+            assert session.llm.decide_next_action.call_count > calls
+        else:
+            assert result is False or isinstance(result, asyncio.CancelledError)
+            assert session.llm.decide_next_action.call_count == calls
+            assert session.display.capture_screen.calls == captures
+            assert session._store.load(session.id).state == "failed"
+    finally:
+        unblock.set()
+        session.stop()
+        await asyncio.gather(session._task, return_exceptions=True)
+
+
+async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path):
+    session = manual_session(tmp_path, limits=ExecutionLimits(max_seconds=0.2))
     session._capture_screenshot = AsyncMock(return_value=session.display.capture_screen())
     await session.start_async("ログインする")
     await wait_for_manual(session)
-    # Fire the registered duration timer only once the state being tested is reached.
-    assert len(deadlines) == 1
-    timer, expire, args = deadlines[0]
-    timer.cancel()
-    expire(*args)
     assert not await asyncio.wait_for(session._task, 2)
     record = session._store.load(session.id)
     assert record.stop_reason == "duration_limit" and record.state == "failed"

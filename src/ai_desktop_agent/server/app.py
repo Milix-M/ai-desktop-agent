@@ -312,7 +312,19 @@ async def vnc_stream(ws: WebSocket, vm_id: str):
     except (HTTPException, DockerUnavailableError, StorageError):
         await ws.close(1008)
         return
-    await proxy_vnc(ws, vm.vnc_host or "vm")
+
+    def input_authority():
+        for session in _sessions.values():
+            if (
+                session.vm_id == vm.id
+                and session.is_running
+                and session._manual_resume is not None
+                and not session._manual_resume.is_set()
+            ):
+                return session._input_authority
+        return None
+
+    await proxy_vnc(ws, vm.vnc_host or "vm", input_authority=input_authority)
 
 
 # アクティブなセッション（後方互換：最新の1件）
@@ -998,9 +1010,15 @@ async def delete_task(task_id: str) -> dict[str, str]:
     if session is None and _active_session and _active_session.id == task_id:
         session = _active_session
     if session is not None:
+        task = session._task
+        if task is None:
+            raise HTTPException(
+                status_code=409,
+                detail="タスクを開始しています。開始後にもう一度削除してください",
+                headers={"Retry-After": "1"},
+            )
         session.stop()
-        if session._task is not None:
-            await asyncio.gather(session._task, return_exceptions=True)
+        await asyncio.gather(task, return_exceptions=True)
         if session._cleanup_task is not None:
             await asyncio.shield(session._cleanup_task)
         _sessions.pop(task_id, None)

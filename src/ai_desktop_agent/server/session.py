@@ -15,19 +15,20 @@ import itertools
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 
 from ai_desktop_agent.actions.executor import ActionExecutor
-from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.actions.primitives import CLICK_ACTIONS, Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits, TaskBudget, TaskLimitError
 from ai_desktop_agent.agent.decision.provider import (
     DecisionProvider,
     create_decision_provider_from_env,
 )
-from ai_desktop_agent.agent.llm.base import LLMProvider
+from ai_desktop_agent.agent.llm.base import LLMProvider, ModelResponseError
 from ai_desktop_agent.agent.llm.factory import create_llm_provider
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
@@ -43,8 +44,10 @@ from ai_desktop_agent.privacy import redact, redact_data
 from ai_desktop_agent.server.persistence import StorageError
 from ai_desktop_agent.server.store import StoredAction, TaskRecord, TaskStore
 from ai_desktop_agent.server.submissions import SubmissionClaim
+from ai_desktop_agent.server.vnc_input import InputAuthority
+from ai_desktop_agent.validation import validate_text
 from ai_desktop_agent.vm.async_io import run_display_call, run_vm_call
-from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.base import DisplayBackend, held_input
 from ai_desktop_agent.vm.screenshot import Screenshot
 from ai_desktop_agent.vm.vnc_client import VNCClient
 
@@ -220,6 +223,7 @@ class TaskSession:
         self._replan_count = 0
         self.manual_input: dict | None = None
         self._manual_resume: asyncio.Event | None = None
+        self._input_authority: InputAuthority | None = None
 
         # イベントコールバック
         self._on_state_change: list[Callable] = []
@@ -229,21 +233,45 @@ class TaskSession:
         self._control_notifications: set[asyncio.Task] = set()
         self._persist_lock = asyncio.Lock()
         self._storage_error: str | None = None
+        self._failure: tuple[str, str] | None = None
         self._run_owner: asyncio.Task | None = None
         self._started = asyncio.Event()
         self._startup_error: StorageError | None = None
+        self._lifecycle_lock = threading.RLock()
+        self._display_change: threading.Event | None = None
+        self._closing_requested = False
 
     def set_display(self, display: DisplayBackend) -> None:
-        """操作対象の表示バックエンドを差し替える（VM指定用）。"""
-        try:
+        """開始前の表示接続を差し替え、切断に成功してから管理先を移す。"""
+        if display is None:
+            raise ValueError("表示接続を指定してください")
+        with self._lifecycle_lock:
+            if display is self.display:
+                return
+            if (
+                self.loop.state != AgentState.IDLE
+                or self.is_running
+                or self._closing_requested
+                or self.request_digest is not None
+            ):
+                raise RuntimeError("開始済み・終了処理中のセッションの表示接続は変更できません")
+            if self._display_change is not None:
+                raise RuntimeError("表示接続の切替が進行中です")
+            changed = threading.Event()
+            self._display_change = changed
             old = self.display
-            if old is not None and old is not display:
-                with contextlib.suppress(Exception):
-                    old.disconnect()
-        except AttributeError:
-            pass
-        self.display = display
-        self.executor = ActionExecutor(self.display)
+        try:
+            executor = ActionExecutor(display)
+            old.disconnect()
+            with self._lifecycle_lock:
+                if self._closing_requested:
+                    raise RuntimeError("セッションの終了処理が始まったため表示接続を変更できません")
+                self.display = display
+                self.executor = executor
+        finally:
+            with self._lifecycle_lock:
+                self._display_change = None
+                changed.set()
 
     # ── イベント ──────────────────────────────
 
@@ -269,8 +297,14 @@ class TaskSession:
                 logger.exception("イベント通知に失敗")
 
     async def _emit_state_change(self) -> None:
+        subtask = self.loop.context.current_subtask if not self.loop.is_done else None
+        if subtask is None:
+            self._budget.set_subtask(None)
+        else:
+            self._budget.set_subtask(subtask.id, subtask.timeout_seconds, subtask.description)
         await self._persist()
-        await self._notify(self._on_state_change, self.loop.state, self.loop.context)
+        if not self.loop.is_done:
+            await self._notify(self._on_state_change, self.loop.state, self.loop.context)
 
     async def _emit_action(self, action: Action, success: bool) -> None:
         await self._persist()
@@ -282,6 +316,27 @@ class TaskSession:
     async def _emit_complete(self, success: bool) -> None:
         await self._notify(self._on_complete, success)
 
+    async def _notify_terminal(self, success: bool, error_message: str | None = None) -> None:
+        # Delivery is outside execution and cannot trigger another outcome or completion.
+        try:
+            await self._notify(self._on_state_change, self.loop.state, self.loop.context)
+            if error_message is not None:
+                await self._emit_error(error_message)
+        finally:
+            await self._emit_complete(success)
+
+    def _remember_failure(self, code: str, message: str) -> None:
+        # A late cancellation must not replace the failure that already ended the task.
+        if self._failure is None:
+            self._failure = (code, redact(message))
+
+    async def _fail(self, code: str, message: str) -> None:
+        self._budget.check()
+        self._remember_failure(code, message)
+        self.loop.fail_now()
+        # Terminal notifications must observe the saved cause, even after a reload.
+        await self._emit_state_change()
+
     # ── メインループ ───────────────────────────
 
     async def run(self, instruction: str) -> bool:
@@ -290,31 +345,47 @@ class TaskSession:
         Returns:
             タスクが正常に完了したかどうか。
         """
-        instruction = redact(instruction)
-        self._run_owner = asyncio.current_task()
-        goal = Goal(description=instruction)
-        self._instruction = instruction
-        self.loop.start(goal)
+        owner = asyncio.current_task()
+        with self._lifecycle_lock:
+            if self._display_change is not None:
+                raise RuntimeError("表示接続の切替中はタスクを開始できません")
+            if self._run_owner is not None or (
+                self._task is not None and self._task is not owner and not self._task.done()
+            ):
+                raise RuntimeError("タスクは既に実行中です")
+            if self.loop.state != AgentState.IDLE or self._closing_requested:
+                raise RuntimeError("完了したセッションは再利用できません")
+            validate_text(instruction, "指示")
+            instruction = redact(instruction)
+            goal = Goal(description=instruction)
+            self._run_owner = owner
+            self._instruction = instruction
         try:
+            self.loop.start(goal)
             async with self._budget.activate(self._request_display_stop):
-                return await self._run_task(goal)
+                success = await self._run_task(goal)
         except TaskLimitError as error:
             logger.warning("タスクの実行制限: %s", error)
-            await self._emit_error(str(error))
-            await self._finalize_failure()
+            await self._finalize_failure(error_message=str(error))
             return False
         except asyncio.CancelledError:
             # stop() による中断：状態を FAILED に倒して保存（沈黙終了を防ぐ）
             logger.warning("タスクがキャンセルされました")
+            self._remember_failure("cancelled", "タスクを停止しました")
             await self._finalize_failure()
             raise
         except Exception as e:
             logger.exception("タスク実行中にエラー: %s", e)
-            await self._emit_error(str(e))
+            message = redact(str(e)) or "タスクの実行中にエラーが発生しました"
+            self._remember_failure("execution_error", message)
             # 実行中状態のまま残さないよう FAILED に倒す
-            await self._finalize_failure()
+            await self._finalize_failure(error_message=message)
             return False
-
+        else:
+            await self._notify_terminal(
+                success, self._failure[1] if self._failure is not None else None
+            )
+            return success
         finally:
             try:
                 await self.aclose()
@@ -330,6 +401,7 @@ class TaskSession:
             raise
         self._started.set()
         understanding = await self.llm.understand_instruction(goal, platform=self._platform())
+        self._budget.check()
         goal.intent = understanding.intent
         goal.target_application = understanding.target_application
         goal.constraints = understanding.constraints
@@ -337,11 +409,11 @@ class TaskSession:
         await self._emit_state_change()
 
         decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
+        self._budget.check()
         if not decomposition.subtasks:
-            self.loop.planning_failed()
-            await self._emit_error("タスクの分解に失敗しました")
-            await self._emit_state_change()
-            await self._emit_complete(False)
+            await self._fail(
+                "planning_failed", f"タスクの分解に失敗しました: {decomposition.reasoning}"
+            )
             return False
 
         self.loop.plan_ready(decomposition.subtasks)
@@ -356,15 +428,14 @@ class TaskSession:
             elif self.loop.state == AgentState.PAUSED:
                 await asyncio.sleep(0.5)
             else:
-                break
+                await self._fail("invalid_state", "タスクの状態を確認できないため停止しました")
 
         success = self.loop.state == AgentState.COMPLETED
         await self._drain_control_notifications()
         await self._persist(success=success)
-        await self._emit_complete(success)
         return success
 
-    async def _finalize_failure(self) -> None:
+    async def _finalize_failure(self, *, error_message: str | None = None) -> None:
         with contextlib.suppress(ValueError):
             self.loop.fail_now()
         await self._drain_control_notifications(ignore_cancellation=True)
@@ -376,17 +447,32 @@ class TaskSession:
         except StorageError:
             logger.exception("失敗状態の保存もできませんでした")
         # A failed disk must not prevent the UI from receiving the terminal state.
-        await self._notify(self._on_state_change, self.loop.state, self.loop.context)
-        await self._emit_complete(False)
+        await self._notify_terminal(False, error_message)
 
     async def aclose(self) -> None:
         """Release the display and provider connections on every exit path."""
+        with self._lifecycle_lock:
+            self._closing_requested = True
+        current = asyncio.current_task()
+        owner = self._task or self._run_owner
+        if owner is not None and owner is not current and not owner.done():
+            if not self.loop.is_done:
+                self.stop()
+            await _drain_task(asyncio.gather(owner, return_exceptions=True))
+        # A run cancelled before its first turn publishes its failure in the
+        # completion callback. Retain ownership through that publication too.
+        if self._cleanup_task is not None and self._cleanup_task is not current:
+            await _drain_task(self._cleanup_task)
         if self._closing_task is None:
             self._closing_task = asyncio.create_task(self._close_resources())
         await _drain_task(self._closing_task)
 
     async def _close_resources(self) -> None:
         self._resources_closed = True
+        with self._lifecycle_lock:
+            changed = self._display_change
+        if changed is not None:
+            await run_display_call(changed.wait)
         await self._drain_control_notifications(ignore_cancellation=True)
         try:
             await asyncio.to_thread(self.display.disconnect)
@@ -409,6 +495,7 @@ class TaskSession:
 
     async def _cancel_before_start(self) -> None:
         try:
+            self._remember_failure("cancelled", "タスクを停止しました")
             self.loop.start(Goal(description=self._instruction))
             await self._finalize_failure()
         finally:
@@ -448,8 +535,11 @@ class TaskSession:
             execution_limits=self._budget.limits.to_dict(),
             execution_usage=self._budget.snapshot(),
             stop_reason=self._budget.stop_reason
-            or ("storage_error" if self._storage_error else None),
-            error_message=self._budget.error_message or self._storage_error or "",
+            or ("storage_error" if self._storage_error else None)
+            or (self._failure[0] if self._failure else None),
+            error_message=self._budget.error_message
+            or self._storage_error
+            or (self._failure[1] if self._failure else ""),
             actions=[
                 StoredAction(
                     action_type=r.action.action_type.value,
@@ -534,15 +624,13 @@ class TaskSession:
         """
         subtask = self.loop.context.current_subtask
         if subtask is None:
-            self.loop.recover_failed()
+            await self._fail("invalid_state", "実行対象のサブタスクがありません")
             return
 
         # ステップ上限（トークン燃費対策）
         if len(self.loop.context.action_history) >= MAX_ACTIONS_PER_TASK:
             logger.warning("アクション上限に到達したため中断します")
-            await self._emit_error("アクション上限に到達しました")
-            self.loop.fail_now()
-            await self._emit_state_change()
+            await self._fail("action_limit", "アクション上限に到達しました")
             return
 
         # 現在の画面を取得（オーバーレイ付き）
@@ -591,54 +679,42 @@ class TaskSession:
             # 3回連続で完了宣言なら受け入れる（本当に何もない場合の脱出）
             pass
 
-        # VM再起動は専用フローで処理する
         await self._wait_if_paused()
+        low_confidence = (
+            decision.action.action_type in CLICK_ACTIONS
+            and decision.confidence < LOW_CONFIDENCE_THRESHOLD
+        )
+        if (
+            decision.action.action_type == ActionType.REGION_SELECT
+            or low_confidence
+            or self._is_repeat_click(decision.action)
+        ):
+            original = decision
+            region = (
+                decision
+                if decision.action.action_type == ActionType.REGION_SELECT
+                else self._region_around(decision.action.params, screenshot)
+            )
+            decision = await self._handle_region_zoom(subtask, region)
+            await self._wait_if_paused()
+            if decision is None:
+                self._pending_error = ErrorContext(
+                    action=original.action,
+                    error_message="拡大画像から操作位置を確認できませんでした。別の方法を試してください。",
+                    retry_count=0,
+                )
+                self.loop.action_executed()
+                self.loop.wait_complete()
+                self.loop.verify_failed()
+                await self._emit_error(self._pending_error.error_message)
+                await self._emit_state_change()
+                return
+
+        # A zoom response can choose a session-only action too. Apply the same
+        # restart permission and audit path after every decision source.
         if decision.action.action_type == ActionType.VM_RESTART:
             await self._execute_vm_restart(decision)
             return
-        # 低確信度クリックは拡大へ回す（いきなり撃たせない）
-        if (
-            decision.action.action_type
-            in (
-                ActionType.LEFT_CLICK,
-                ActionType.RIGHT_CLICK,
-                ActionType.DOUBLE_CLICK,
-                ActionType.MIDDLE_CLICK,
-            )
-            and decision.confidence < LOW_CONFIDENCE_THRESHOLD
-        ):
-            logger.info(
-                "低確信度 (%.2f) のため拡大へ回します: %s",
-                decision.confidence,
-                decision.action.params,
-            )
-            region_decision = self._region_around(decision.action.params, screenshot)
-            decision = await self._handle_region_zoom(subtask, region_decision)
-            await self._wait_if_paused()
-            if decision is None:
-                self.loop.action_executed()
-                self.loop.wait_complete()
-                self.loop.verify_failed()
-                await self._emit_state_change()
-                return
-        # region_select の処理：ズーム → 再判断 → 精密操作
-        elif decision.action.action_type == ActionType.REGION_SELECT:
-            decision = await self._handle_region_zoom(subtask, decision)
-            await self._wait_if_paused()
-            if decision is None:
-                # ズーム後も判断できなかった
-                self.loop.action_executed()
-                self.loop.wait_complete()
-                self.loop.verify_failed()
-                await self._emit_state_change()
-                return
-        # 同一座標の連続クリックは拡大へ回す（無限ループ防止）
-        elif self._is_repeat_click(decision.action):
-            logger.info("同一座標の連続クリックを検出、拡大へ回します: %s", decision.action.params)
-            region_decision = self._region_around(decision.action.params, screenshot)
-            zoomed = await self._handle_region_zoom(subtask, region_decision)
-            if zoomed is not None:
-                decision = zoomed
 
         # 画面内にクランプ（範囲外座標のズレを防ぐ）
         decision = self._clamp_decision(decision, screenshot)
@@ -732,7 +808,7 @@ class TaskSession:
         self.loop.record_action(
             action,
             success,
-            error=self.executor.last_error,
+            error=self.executor.last_error if not success else "",
             reasoning=reasoning,
             confidence=confidence,
             duration_ms=(time.monotonic() - started) * 1000,
@@ -743,13 +819,18 @@ class TaskSession:
         previous = self.loop.wait_for_user()
         self._manual_resume = asyncio.Event()
         self.manual_input = {"id": uuid.uuid4().hex, "reason": redact(action.params["reason"])}
+        authority = self._input_authority = InputAuthority()
         try:
             await self._emit_state_change()
             await self._manual_resume.wait()
-            self.loop.user_input_done(previous)
         finally:
             self.manual_input = None
             self._manual_resume = None
+            self._input_authority = None
+            # Finish all browser key/button releases before the agent can use
+            # the desktop again, including timeout and repeated cancellation.
+            await _drain_task(asyncio.create_task(authority.revoke()))
+        self.loop.user_input_done(previous)
 
     async def _execute_vm_restart(self, decision: ActionDecision) -> None:
         """VM_RESTART を処理する：許可制で再起動、後は回復フローへ。
@@ -766,7 +847,13 @@ class TaskSession:
 
         if not self.allow_vm_restart:
             logger.info("VM再起動は許可されていないため却下: %s", reason)
-            self.loop.record_action(action, False, "VM再起動は許可されていません")
+            self.loop.record_action(
+                action,
+                False,
+                "VM再起動は許可されていません",
+                reasoning=decision.reasoning,
+                confidence=decision.confidence,
+            )
             self._pending_error = ErrorContext(
                 action=action,
                 error_message=(
@@ -784,8 +871,12 @@ class TaskSession:
 
         started = time.monotonic()
         try:
-            pool = VmPool()
-            info = await run_vm_call(pool.restart_vm, self.vm_id or "vm")
+
+            def restart():
+                with VmPool() as pool:
+                    return pool.restart_vm(self.vm_id or "vm")
+
+            info = await run_vm_call(restart)
             logger.info("VM再起動を実行: %s (%s)", info.id, reason)
             await asyncio.sleep(RESTART_SETTLE_SECONDS)
             ok, error = True, ""
@@ -795,6 +886,7 @@ class TaskSession:
                 False,
                 error="再起動の処理中に中断しました。環境の状態を確認してください",
                 reasoning=decision.reasoning,
+                confidence=decision.confidence,
                 duration_ms=(time.monotonic() - started) * 1000,
             )
             raise
@@ -803,7 +895,14 @@ class TaskSession:
             ok, error = False, f"VM再起動に失敗しました: {e}"
 
         await self._wait_if_paused()
-        self.loop.record_action(action, ok, error)
+        self.loop.record_action(
+            action,
+            ok,
+            error,
+            reasoning=decision.reasoning,
+            confidence=decision.confidence,
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
         if ok:
             self._pending_error = ErrorContext(
                 action=action,
@@ -830,8 +929,8 @@ class TaskSession:
     ) -> ActionDecision | None:
         """region_select を処理: 領域拡大 → LLM再問い合わせ → 精密アクション。
 
-        座標逆変換は ``absolute = origin + zoomed_coord / total_scale`` で行う。
-        入れ子の region_select にも対応できるよう、原点と累積倍率を追跡する。
+        各軸の座標逆変換は ``absolute = origin + zoomed_coord / axis_scale`` で行う。
+        元画像から毎回切り出すため、倍率は現在の切り出しの実倍率を使う。
         拡大画像には相対座標グリッドを重畳してLLMの読み取りを助ける。
 
         Args:
@@ -843,35 +942,39 @@ class TaskSession:
             精密なアクション決定、または失敗時は None。
         """
         del depth  # 反復ループで深さを管理するため未使用
+        await self._wait_if_paused()
+        self._budget.check()
         try:
             raw = await run_display_call(self.display.capture_raw)
+        except TaskLimitError:
+            raise
         except Exception:
             logger.exception("拡大用の生画像取得に失敗")
             return None
 
         abs_origin_x, abs_origin_y = 0, 0
-        total_scale = 1.0
+        scale_x = scale_y = 1.0
         pending = decision
+        view = raw
 
         for level in range(MAX_REGION_ZOOM_DEPTH + 1):
-            if pending.action.action_type != ActionType.REGION_SELECT:
-                break
+            pending = self._clamp_decision(pending, view)
             params = pending.action.params or {}
             try:
                 rx = int(params.get("x", 0))
                 ry = int(params.get("y", 0))
-                rw = int(params.get("width", ZOOM_AUTO_SIZE))
-                rh = int(params.get("height", ZOOM_AUTO_SIZE))
+                rw = min(int(params.get("width", ZOOM_AUTO_SIZE)), view.width)
+                rh = min(int(params.get("height", ZOOM_AUTO_SIZE)), view.height)
             except (TypeError, ValueError):
                 logger.warning("不正な region_select パラメータ")
                 return None
 
             # 現在画像座標系 → 絶対座標系へ変換
-            abs_x = abs_origin_x + int(rx / total_scale) if total_scale else rx
-            abs_y = abs_origin_y + int(ry / total_scale) if total_scale else ry
+            abs_x = abs_origin_x + int(rx / scale_x)
+            abs_y = abs_origin_y + int(ry / scale_y)
             # 幅・高さも現在の倍率で割って絶対サイズに戻す
-            abs_w = max(ZOOM_MIN_SIZE, min(int(rw / total_scale), ZOOM_MAX_SIZE))
-            abs_h = max(ZOOM_MIN_SIZE, min(int(rh / total_scale), ZOOM_MAX_SIZE))
+            abs_w = max(ZOOM_MIN_SIZE, min(int(rw / scale_x), ZOOM_MAX_SIZE))
+            abs_h = max(ZOOM_MIN_SIZE, min(int(rh / scale_y), ZOOM_MAX_SIZE))
             # 画面内にクリップ
             abs_x = max(0, min(abs_x, raw.width - 1))
             abs_y = max(0, min(abs_y, raw.height - 1))
@@ -888,19 +991,20 @@ class TaskSession:
                 params,
             )
 
-            zoomed, (_ox, _oy, actual_scale) = raw.crop_with_meta(
-                abs_x, abs_y, abs_w, abs_h, scale=ZOOM_SCALE
-            )
+            zoomed, geometry = raw.crop_with_geometry(abs_x, abs_y, abs_w, abs_h, scale=ZOOM_SCALE)
             # 拡大画像に相対グリッドを重畳（細かめ25pxで精度向上）
             try:
                 zoomed = zoomed.with_overlay(grid_spacing=25)
             except TypeError:
                 zoomed = zoomed.with_overlay()
 
-            abs_origin_x, abs_origin_y = abs_x, abs_y
-            total_scale = total_scale * actual_scale
+            abs_origin_x, abs_origin_y = geometry.origin_x, geometry.origin_y
+            scale_x, scale_y = geometry.scale_x, geometry.scale_y
+            view = zoomed
 
             # 拡大画像を使って LLM に再判断させる
+            await self._wait_if_paused()
+            self._budget.check()
             zoom_decision = await self.llm.decide_next_action(
                 goal=self.loop.context.goal or Goal(description=""),
                 current_subtask=subtask,
@@ -908,19 +1012,28 @@ class TaskSession:
                 screenshot=zoomed,
                 is_zoomed=True,
                 zoom_origin=(abs_origin_x, abs_origin_y),
-                zoom_scale=total_scale,
+                zoom_scale=scale_x,
                 platform=self._platform(),
             )
+            self._budget.check()
             pending = zoom_decision
+            if pending.action.action_type != ActionType.REGION_SELECT:
+                break
         else:
             logger.warning("region_select の最大深度に達しました。フォールバックします。")
             return None
 
-        if pending.action.action_type == ActionType.REGION_SELECT:
-            logger.warning("ズーム後も region_select が返されました")
+        if (
+            pending.action.action_type in CLICK_ACTIONS
+            and pending.confidence < LOW_CONFIDENCE_THRESHOLD
+        ):
+            logger.warning("拡大後もクリック位置の確信度が不足しています")
             return None
 
-        # 相対座標を絶対座標に変換（total_scale で割るのが要点）
+        # Clamp in the image the model actually saw, before converting back to
+        # desktop coordinates. Otherwise a crop-relative overflow hits unseen UI.
+        pending = self._clamp_decision(pending, view)
+        # 相対座標を、各軸の実倍率を使って絶対座標に変換する。
         if pending.action.params:
             mapped_params = dict(pending.action.params)
 
@@ -930,14 +1043,14 @@ class TaskSession:
                         rel = int(mapped_params[coord_key])
                     except (TypeError, ValueError):
                         continue
-                    mapped_params[coord_key] = abs_origin_x + int(rel / total_scale)
+                    mapped_params[coord_key] = abs_origin_x + int(rel / scale_x)
             for coord_key in ("y", "start_y", "end_y"):
                 if coord_key in mapped_params:
                     try:
                         rel = int(mapped_params[coord_key])
                     except (TypeError, ValueError):
                         continue
-                    mapped_params[coord_key] = abs_origin_y + int(rel / total_scale)
+                    mapped_params[coord_key] = abs_origin_y + int(rel / scale_y)
 
             # 画面内にクランプ
             mapped_params = self._clamp_params_to_raw(mapped_params, raw)
@@ -957,10 +1070,11 @@ class TaskSession:
                 return None
 
         logger.info(
-            "精密アクション: %s (confidence=%.2f, scale=%.2f)",
+            "精密アクション: %s (confidence=%.2f, scale_x=%.2f, scale_y=%.2f)",
             pending.action.action_type.value,
             pending.confidence,
-            total_scale,
+            scale_x,
+            scale_y,
         )
         return pending
 
@@ -1129,9 +1243,15 @@ class TaskSession:
             ActionType.LEFT_CLICK,
             ActionType.RIGHT_CLICK,
             ActionType.DOUBLE_CLICK,
+            ActionType.MIDDLE_CLICK,
         ):
             verified = await self._verify_click_effect(last)
             if not verified:
+                self._pending_error = ErrorContext(
+                    action=last.action,
+                    error_message="クリック後の画面変化を確認できませんでした",
+                    retry_count=0,
+                )
                 self.loop.verify_failed()
                 await self._emit_state_change()
                 return
@@ -1146,8 +1266,7 @@ class TaskSession:
         """
         subtask = self.loop.context.current_subtask
         if subtask is None:
-            self.loop.recover_failed()
-            await self._emit_state_change()
+            await self._fail("invalid_state", "実行対象のサブタスクがありません")
             return
 
         try:
@@ -1162,13 +1281,14 @@ class TaskSession:
             # 決定モデルを試す（処理順3番目の完了確認）。中間・失敗時はLLMに退避。
             if self.decision is not None:
                 try:
+                    self.decision_calls += 1
                     judged = await self.decision.verify_completion(
                         expected_outcome=subtask.expected_outcome,
                         evidence_text=record.reasoning,
                         confidence_hint=record.confidence,
                         image_bytes=screenshot.image_bytes,
                     )
-                    self.decision_calls += 1
+                    self._budget.check()
                     if judged.success is not None:
                         logger.info(
                             "完了確認を決定モデルで判定: success=%s prob=%.2f grade=%s",
@@ -1205,10 +1325,12 @@ class TaskSession:
             raise
         except Exception:
             logger.exception("サブタスク検証中にエラー")
-            self.loop.verify_failed()
-            await self._emit_state_change()
-            return
+            # The provider owns transport/response retries. An exhausted or
+            # permanent service error is not a negative completion verdict and
+            # must not send the task back to execution without an error context.
+            raise
 
+        self._budget.check()
         if result.success:
             logger.info("サブタスク達成を確認: %s", subtask.id)
             params = record.action.params or {}
@@ -1230,9 +1352,11 @@ class TaskSession:
             result.reasoning,
         )
         if fails > subtask.max_retries:
-            await self._emit_error(f"サブタスク未達のため中断: {subtask.description}")
-            self.loop.fail_now()
-            await self._emit_state_change()
+            await self._fail(
+                "verification_failed",
+                f"サブタスク未達のため中断: {subtask.description}。"
+                f"検証結果: {result.reasoning} {result.evidence}",
+            )
             return
 
         self._pending_error = ErrorContext(
@@ -1283,7 +1407,7 @@ class TaskSession:
         """RECOVERING フェーズ: エラーからの回復。"""
         subtask = self.loop.context.current_subtask
         if subtask is None:
-            self.loop.recover_failed()
+            await self._fail("invalid_state", "実行対象のサブタスクがありません")
             return
 
         # 最後の失敗アクションを取得
@@ -1298,9 +1422,10 @@ class TaskSession:
         retry_key = f"{subtask.id}:{last_error.action.action_type.value}"
         retries = self.loop.context.retry_counts.get(retry_key, 0)
         if retries >= subtask.max_retries:
-            self.loop.recover_failed()
-            await self._emit_error(f"再試行の上限に到達しました: {subtask.description}")
-            await self._emit_state_change()
+            await self._fail(
+                "retry_limit",
+                f"再試行の上限に到達しました: {subtask.description}。{last_error.error_message}",
+            )
             return
         self.loop.context.retry_counts[retry_key] = retries + 1
         last_error.retry_count = retries
@@ -1314,13 +1439,14 @@ class TaskSession:
                     f"{'OK' if r.success else 'NG:' + (r.error_message or '')}"
                     for r in self.loop.context.action_history[-10:]
                 )
+                self.decision_calls += 1
                 judged = await self.decision.choose_recovery(
                     error_message=last_error.error_message,
                     subtask_description=subtask.description,
                     history_text=history_text,
                     retry_count=last_error.retry_count,
                 )
-                self.decision_calls += 1
+                self._budget.check()
                 if not judged.escalate:
                     logger.info(
                         "回復方針を決定モデルで選択: %s prob=%.2f",
@@ -1352,9 +1478,16 @@ class TaskSession:
                 platform=self._platform(),
             )
 
+        self._budget.check()
         if not plan.recoverable or plan.strategy == RecoveryStrategy.GIVE_UP:
-            self.loop.recover_failed()
-            await self._emit_state_change()
+            await self._fail(
+                "recovery_failed",
+                f"回復を断念しました: {last_error.error_message}\n回復方針: {plan.reasoning}",
+            )
+            return
+
+        if plan.strategy == RecoveryStrategy.REPLAN_SUBTASK and self._replan_count >= 3:
+            await self._fail("replan_limit", "再計画の上限に到達しました")
             return
 
         # Preserve the chosen strategy for the next screenshot-based decision.
@@ -1366,11 +1499,6 @@ class TaskSession:
         if not await self._execute_recovery_actions(plan, retries):
             return
         if plan.strategy == RecoveryStrategy.REPLAN_SUBTASK:
-            if self._replan_count >= 3:
-                self.loop.recover_failed()
-                await self._emit_error("再計画の上限に到達しました")
-                await self._emit_state_change()
-                return
             self._replan_count += 1
             self.loop.recover_replan()
             await self._emit_state_change()
@@ -1389,15 +1517,21 @@ class TaskSession:
             decomposition = await self.llm.decompose_task(
                 goal, len(completed), platform=self._platform()
             )
+            self._budget.check()
             if not decomposition.subtasks:
-                self.loop.planning_failed()
-                await self._emit_error("再計画に失敗しました")
-            else:
-                subtasks = [
-                    replace(s, id=f"replan_{self._replan_count}_{i}")
-                    for i, s in enumerate(decomposition.subtasks)
-                ]
-                self.loop.plan_ready([*completed, *subtasks], completed_count=len(completed))
+                await self._fail(
+                    "replanning_failed", f"再計画に失敗しました: {decomposition.reasoning}"
+                )
+                return
+            subtasks = []
+            used_ids = {subtask.id for subtask in completed}
+            for i, subtask in enumerate(decomposition.subtasks):
+                identifier = f"replan_{self._replan_count}_{i}"
+                while identifier in used_ids:
+                    identifier += "_"
+                used_ids.add(identifier)
+                subtasks.append(replace(subtask, id=identifier))
+            self.loop.plan_ready([*completed, *subtasks], completed_count=len(completed))
             await self._emit_state_change()
             return
 
@@ -1410,9 +1544,7 @@ class TaskSession:
             actions = [Action(ActionType.WAIT, {"seconds": STUCK_WAIT_SECONDS})]
         for action in actions:
             if len(self.loop.context.action_history) >= MAX_ACTIONS_PER_TASK:
-                self.loop.recover_failed()
-                await self._emit_error("アクション上限に到達しました")
-                await self._emit_state_change()
+                await self._fail("action_limit", "アクション上限に到達しました")
                 return False
             # Restart permission and completion verification also apply to recovery actions.
             if action.action_type == ActionType.VM_RESTART:
@@ -1459,10 +1591,13 @@ class TaskSession:
                     error_context=error_context,
                     platform=self._platform(),
                 )
+                self._budget.check()
                 self._consec_empty_decides = 0
                 return decision
             except ValueError as e:
-                retryable = isinstance(e, json.JSONDecodeError) or "応答が空" in str(e)
+                retryable = not isinstance(e, ModelResponseError) and (
+                    isinstance(e, json.JSONDecodeError) or "応答が空" in str(e)
+                )
                 if not retryable or attempt >= max_attempts - 1:
                     self._consec_empty_decides += 1
                     raise
@@ -1530,16 +1665,18 @@ class TaskSession:
                 return
             except Exception:
                 logger.debug("wake_android() に失敗、フォールバックする", exc_info=True)
+
         # フォールバック（wake_android 未実装バックエンド用）
+        def hold(key: str) -> None:
+            # The worker owns the full press/release pair, including cancellation
+            # and an uncertain key-down acknowledgement.
+            with held_input(self.display.key_down, self.display.key_up, key):
+                time.sleep(ANDROID_WAKE_HOLD_SECONDS)
+
         try:
-            await run_display_call(self.display.key_down, "escape")
-            await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            await run_display_call(self.display.key_up, "escape")
-            await asyncio.sleep(0.3)
-            await run_display_call(self.display.key_down, "menu")
-            await asyncio.sleep(ANDROID_WAKE_HOLD_SECONDS)
-            await run_display_call(self.display.key_up, "menu")
-            await asyncio.sleep(0.3)
+            for key in ("escape", "menu"):
+                await run_display_call(hold, key)
+                await asyncio.sleep(0.3)
         except Exception:
             logger.debug("Androidウェイクキー送信に失敗", exc_info=True)
             return
@@ -1561,26 +1698,40 @@ class TaskSession:
     # ── 制御 ────────────────────────────────────
 
     def bind_submission(self, claim: SubmissionClaim, store: TaskStore) -> None:
-        if self.loop.state != AgentState.IDLE or self._task is not None or claim.record is not None:
-            raise RuntimeError("開始済みセッションに投入キーを割り当てることはできません")
-        self.id = claim.task_id
-        self._store = store
-        self.session_order = 0
-        self.request_digest = claim.digest
-        self.request_fingerprint = claim.fingerprint
-        if hasattr(self.llm, "session_id"):
-            self.llm.session_id = self.id
-        claim.session = self
+        with self._lifecycle_lock:
+            if self._display_change is not None:
+                raise RuntimeError("表示接続の切替中は投入キーを割り当てられません")
+            if (
+                self.loop.state != AgentState.IDLE
+                or self._task is not None
+                or self._run_owner is not None
+                or self._closing_requested
+                or self.request_digest is not None
+                or claim.record is not None
+            ):
+                raise RuntimeError("投入キーは未開始のセッションに1回だけ割り当てられます")
+            self.id = claim.task_id
+            self._store = store
+            self.session_order = 0
+            self.request_digest = claim.digest
+            self.request_fingerprint = claim.fingerprint
+            if hasattr(self.llm, "session_id"):
+                self.llm.session_id = self.id
+            claim.session = self
 
     async def start_async(self, instruction: str) -> None:
         """バックグラウンドでタスクを開始する。"""
-        if self._task and not self._task.done():
-            raise RuntimeError("タスクは既に実行中です")
-        if self.loop.state != AgentState.IDLE or self._resources_closed:
-            raise RuntimeError("完了したセッションは再利用できません")
-        self._instruction = redact(instruction)
-        self._task = asyncio.create_task(self.run(instruction))
-        self._task.add_done_callback(self._ensure_closed)
+        with self._lifecycle_lock:
+            if self._display_change is not None:
+                raise RuntimeError("表示接続の切替中はタスクを開始できません")
+            if self.is_running:
+                raise RuntimeError("タスクは既に実行中です")
+            if self.loop.state != AgentState.IDLE or self._closing_requested:
+                raise RuntimeError("完了したセッションは再利用できません")
+            validate_text(instruction, "指示")
+            self._instruction = redact(instruction)
+            self._task = asyncio.create_task(self.run(instruction))
+            self._task.add_done_callback(self._ensure_closed)
         await self._started.wait()
         if self._startup_error is not None:
             raise self._startup_error
@@ -1615,9 +1766,11 @@ class TaskSession:
             logger.error("タスク制御の状態通知に失敗", exc_info=task.exception())
 
     def stop(self) -> None:
-        if self._task and not self._task.done():
+        owner = self._task or self._run_owner
+        if owner is not None and not owner.done():
+            self._budget.request_cancel()
             self._request_display_stop()
-            self._task.cancel()
+            owner.cancel()
 
     def _request_display_stop(self) -> None:
         try:
@@ -1629,4 +1782,5 @@ class TaskSession:
 
     @property
     def is_running(self) -> bool:
-        return self._task is not None and not self._task.done()
+        owner = self._task or self._run_owner
+        return owner is not None and not owner.done()
