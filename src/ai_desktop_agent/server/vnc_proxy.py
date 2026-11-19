@@ -3,23 +3,33 @@
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 
 from anyio import CancelScope
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ai_desktop_agent.server.vnc_input import InputAuthority, RfbInputError, VncInput
 from ai_desktop_agent.server.websocket_io import MAX_MESSAGE_BYTES, close_websocket
 
 logger = logging.getLogger(__name__)
 IO_TIMEOUT = 10
 
 
-async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
+async def proxy_vnc(
+    ws: WebSocket,
+    host: str,
+    port: int = 5900,
+    *,
+    input_authority: Callable[[], InputAuthority | None] = lambda: None,
+) -> None:
     writer = None
+    inputs = None
     pumps: list[asyncio.Task] = []
     close_code = 1000
     try:
         async with asyncio.timeout(IO_TIMEOUT):
             reader, writer = await asyncio.open_connection(host, port)
+        inputs = VncInput(writer, input_authority)
         await ws.accept(
             subprotocol="binary" if "binary" in ws.scope.get("subprotocols", []) else None
         )
@@ -42,7 +52,11 @@ async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
                 if len(data) > MAX_MESSAGE_BYTES:
                     close_code = 1009
                     return
-                writer.write(data)
+                try:
+                    inputs.forward(data)
+                except RfbInputError:
+                    close_code = 1003
+                    return
                 async with asyncio.timeout(IO_TIMEOUT):
                     await writer.drain()
 
@@ -57,6 +71,9 @@ async def proxy_vnc(ws: WebSocket, host: str, port: int = 5900) -> None:
             for task in pumps:
                 task.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)
+            if inputs is not None:
+                with contextlib.suppress(ConnectionError, OSError, TimeoutError):
+                    await inputs.release()
             if writer is not None:
                 writer.close()
                 with contextlib.suppress(OSError, TimeoutError):

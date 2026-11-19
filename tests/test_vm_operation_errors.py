@@ -13,10 +13,34 @@ from requests.exceptions import ConnectionError as DockerConnectionError
 from requests.exceptions import ReadTimeout
 
 from ai_desktop_agent.server import app as server
-from ai_desktop_agent.server.vm_control import DockerUnavailableError, VmController
+from ai_desktop_agent.server.store import TaskStore
+from ai_desktop_agent.server.vm_control import (
+    DockerUnavailableError,
+    VmController,
+    get_vm_controller,
+)
 from ai_desktop_agent.server.vm_pool import VmPool
 from tests.http import AuthenticatedClient
 from tests.test_vm_pool import _FakeContainer, _FakeDocker
+
+
+async def test_task_admission_without_any_environment_returns_conflict_without_saving_history(
+    tmp_path, monkeypatch
+):
+    client = _FakeDocker()
+    store = TaskStore(tmp_path / "data")
+    with VmPool(client=client, state_file=tmp_path / "vms.json") as pool:
+        monkeypatch.setattr(server, "_pool", pool)
+        monkeypatch.setattr(server, "_store", store)
+        monkeypatch.setattr(server, "_sessions", {})
+        monkeypatch.setattr(server, "_active_session", None)
+        async with AuthenticatedClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as api:
+            rejected = await api.post("/tasks", json={"instruction": "報告書を確認する"})
+    assert rejected.status_code == 409 and rejected.json()["detail"] == "利用可能なVMがありません"
+    assert store.list(limit=None) == [] and client.containers.runs == []
+    assert server._sessions == {} and server._active_session is None
 
 
 @pytest.fixture
@@ -172,6 +196,15 @@ def engine_endpoint(monkeypatch):
 
         def do_GET(self):
             path = urlsplit(self.path).path
+            if path == "/version":
+                self._respond(200, {"ApiVersion": "1.48", "MinAPIVersion": "1.24"})
+                return
+            if path == "/v1.48/_ping":
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
             if path == "/v1.48/containers/fixture-vm/json":
                 if state["phase"] == "lookup_close":
                     self._lose_response()
@@ -207,9 +240,13 @@ def engine_endpoint(monkeypatch):
     client = docker.DockerClient(
         base_url=f"http://127.0.0.1:{upstream.server_port}", version="1.48", timeout=0.5
     )
-    controller = VmController(container_name="fixture-vm", client=client)
-    monkeypatch.setattr(controller, "_qmp_status", lambda: None)
-    monkeypatch.setattr(server, "_get_vm_controller", lambda: controller)
+    state["base_url"] = f"http://127.0.0.1:{upstream.server_port}"
+    monkeypatch.setattr(VmController, "_qmp_status", lambda _: None)
+    monkeypatch.setattr(
+        server,
+        "_get_vm_controller",
+        lambda: VmController(container_name="fixture-vm", client=client),
+    )
     monkeypatch.setattr(server, "_sessions", {})
     monkeypatch.setattr(server, "_active_session", None)
     monkeypatch.setattr(server, "_vm_operations", server.AsyncKeyedLocks())
@@ -246,3 +283,32 @@ async def test_management_preserves_sdk_errors_over_http_and_recovers(engine_end
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["running"] is True
     assert recovered.json()["health"] == "healthy"
+
+
+@pytest.mark.parametrize("unavailable", ["missing-vm", "disabled-kvm"])
+async def test_default_controller_rejects_unavailable_restart_before_a_docker_mutation(
+    engine_endpoint, monkeypatch, unavailable
+):
+    monkeypatch.setenv("DOCKER_HOST", engine_endpoint["base_url"])
+    monkeypatch.delenv("DOCKER_TLS_VERIFY", raising=False)
+    monkeypatch.delenv("DOCKER_CERT_PATH", raising=False)
+    monkeypatch.setenv("VM_CONTAINER_NAME", "fixture-vm")
+    monkeypatch.setattr(server, "_get_vm_controller", get_vm_controller)
+    if unavailable == "missing-vm":
+        engine_endpoint["phase"] = "missing"
+    else:
+        monkeypatch.setenv("USE_KVM", "false")
+        monkeypatch.setenv("ALLOW_TCG_VM", "false")
+    async with AuthenticatedClient(
+        transport=ASGITransport(app=server.app), base_url="http://test"
+    ) as api:
+        rejected = await api.post("/vm/restart")
+        assert rejected.status_code == (503 if unavailable == "missing-vm" else 409)
+        assert rejected.json()["detail"]
+        assert engine_endpoint["restart_calls"] == 0
+        engine_endpoint["phase"] = "healthy"
+        monkeypatch.setenv("ALLOW_TCG_VM", "true")
+        accepted = await api.post("/vm/restart")
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["running"] is True and accepted.json()["health"] == "healthy"
+    assert engine_endpoint["restart_calls"] == 1

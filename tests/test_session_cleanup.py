@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+from ai_desktop_agent.agent.llm.types import ActionDecision
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
@@ -30,18 +32,23 @@ async def test_every_session_exit_closes_connections(outcome):
         )
     session = TaskSession(llm=llm, display=display)
     if outcome == "complete":
-        # Empty loop after planning represents a completed run without real GUI waits.
-        async def finish():
-            from ai_desktop_agent.agent.state import AgentState
-
-            session.loop.context.state = AgentState.COMPLETED
-
-        session._execute_phase = finish
+        llm.decide_next_action = AsyncMock(
+            side_effect=[
+                ActionDecision(Action(ActionType.MOUSE_MOVE, {"x": 7, "y": 9}), "move", 1, "move"),
+                ActionDecision(Action(ActionType.SUBTASK_COMPLETE), "done", 1, "done"),
+            ]
+        )
     await session.start_async("test")
     await asyncio.sleep(0)
     if outcome == "cancel":
         session.stop()
-    await asyncio.gather(session._task, return_exceptions=True)
+    (result,) = await asyncio.gather(session._task, return_exceptions=True)
+    if outcome == "complete":
+        assert result is True and display.mouse_moves == [(7, 9)]
+    elif outcome == "cancel":
+        assert isinstance(result, asyncio.CancelledError)
+    else:
+        assert result is False
     assert not display.is_connected
     display.disconnect.assert_called_once()
     llm.aclose.assert_awaited_once()

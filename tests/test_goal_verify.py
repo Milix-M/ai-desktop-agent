@@ -1,6 +1,9 @@
 """目標達成検証（画像つき subtask 検証）のテスト。"""
 
+from io import BytesIO
+
 import pytest
+from PIL import Image
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
@@ -125,7 +128,9 @@ class TestVerifyWithImage:
         provider._client.chat.completions.create = AsyncMock(
             return_value=MagicMock(choices=[choice])
         )
-        ss = Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+        encoded = BytesIO()
+        Image.new("RGB", (1024, 768), "white").save(encoded, format="PNG")
+        ss = Screenshot(encoded.getvalue(), 1024, 768)
         result = await provider.verify_result(
             _complete_decision(), "effect", screenshot=ss, expected_outcome="Firefoxが開く"
         )

@@ -152,10 +152,14 @@ def test_store_scrubs_old_records_atomically_and_preserves_corrupt_files(tmp_pat
     path.write_text(json.dumps(record.to_dict()))
     bad = tmp_path / "tasks" / "corrupt.json"
     bad.write_text("not json")
+    backup = tmp_path / "tasks" / "old-task.backup.json"
+    backup.write_bytes(path.read_bytes())
+    backup_bytes = backup.read_bytes()
     monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
     assert secret not in json.dumps(store.load("old-task").to_dict())
     assert store.redact_existing() == 1
     assert secret not in path.read_text() and bad.read_text() == "not json"
+    assert backup.read_bytes() == backup_bytes
     assert path.stat().st_mode & 0o777 == 0o600
     assert store.redact_existing() == 0
     store.save(record)

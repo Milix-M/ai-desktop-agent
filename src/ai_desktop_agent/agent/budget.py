@@ -6,6 +6,7 @@ import dataclasses
 import math
 import os
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 
@@ -93,8 +94,41 @@ class TaskBudget:
         self.error_message = ""
         self._started: float | None = None
         self._finished: float | None = None
+        self._subtask_id: str | None = None
+        self._subtask_deadline: float | None = None
+        self._subtask_message = ""
+        self._reschedule: Callable[[], None] | None = None
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        # This latch is independent of a provider's handling of CancelledError.
+        self._cancel_requested = True
+
+    def set_subtask(self, identifier: str | None, seconds: float = 0, description: str = ""):
+        if self._reschedule is None:
+            return
+        # Check the old deadline before accepting a completion or replacement.
+        self.check()
+        if identifier == self._subtask_id:
+            return
+        self._subtask_id = identifier
+        self._subtask_deadline = time.monotonic() + seconds if identifier is not None else None
+        self._subtask_message = (
+            f"サブタスクの実行時間の上限に到達しました: {description}（{seconds:g}秒）"
+        )
+        self._reschedule()
+
+    def _next_deadline(self) -> tuple[float, str, str]:
+        deadline = (
+            self._started + self.limits.max_seconds if self._started is not None else math.inf
+        )
+        if self._subtask_deadline is not None and self._subtask_deadline < deadline:
+            return self._subtask_deadline, "subtask_timeout", self._subtask_message
+        return deadline, "duration_limit", "タスクの実行時間の上限に到達しました"
 
     def fail(self, reason: str, message: str):
+        if self._cancel_requested:
+            raise asyncio.CancelledError
         self.stop_reason = reason
         self.error_message = message
         raise TaskLimitError(reason, message)
@@ -102,13 +136,15 @@ class TaskBudget:
     @asynccontextmanager
     async def activate(self, request_stop):
         self._started = time.monotonic()
+        self._finished = None
+        self._subtask_id = self._subtask_deadline = None
         owner = asyncio.current_task()
         cancelling = owner.cancelling()
-        expired = False
+        expired: tuple[str, str] | None = None
 
         def expire():
             nonlocal expired
-            expired = True
+            expired = self._next_deadline()[1:]
             # Signal the display thread before cancellation starts draining it.
             try:
                 request_stop()
@@ -116,16 +152,35 @@ class TaskBudget:
                 owner.cancel()
 
         token = _current.set(self)
-        timer = asyncio.get_running_loop().call_later(self.limits.max_seconds, expire)
+        loop = asyncio.get_running_loop()
+        timer = loop.call_later(self.limits.max_seconds, expire)
+
+        def reschedule():
+            nonlocal timer
+            timer.cancel()
+            remaining = max(0, self._next_deadline()[0] - time.monotonic())
+            timer = loop.call_later(remaining, expire)
+
+        self._reschedule = reschedule
         try:
             yield self
+            self.check()
         except asyncio.CancelledError:
-            if expired and owner.uncancel() <= cancelling:
-                self.fail("duration_limit", "タスクの実行時間の上限に到達しました")
+            if expired and owner.cancelling() <= cancelling + 1:
+                self.fail(*expired)
+            raise
+        except Exception:
+            if self._cancel_requested:
+                raise asyncio.CancelledError from None
             raise
         finally:
+            # Providers may suppress cancellation and then hit check(). Remove
+            # this timer's request on every exit without consuming operator stop.
+            if expired:
+                owner.uncancel()
             self._finished = time.monotonic()
             timer.cancel()
+            self._reschedule = None
             _current.reset(token)
 
     @property
@@ -139,13 +194,13 @@ class TaskBudget:
         ) / Decimal(1_000_000)
 
     def check(self):
+        if self._cancel_requested:
+            raise asyncio.CancelledError
         if self.stop_reason:
             raise TaskLimitError(self.stop_reason, self.error_message)
-        if (
-            self._started is not None
-            and time.monotonic() - self._started >= self.limits.max_seconds
-        ):
-            self.fail("duration_limit", "タスクの実行時間の上限に到達しました")
+        deadline, reason, message = self._next_deadline()
+        if time.monotonic() >= deadline:
+            self.fail(reason, message)
 
     def begin_request(self):
         self.check()
@@ -202,10 +257,32 @@ async def model_request():
         return
     budget.begin_request()
     reports = budget._usage_reports
-    timeout = asyncio.timeout(budget.limits.request_timeout_seconds)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget.limits.request_timeout_seconds
+    timeout = asyncio.timeout_at(deadline)
+    owner = asyncio.current_task()
+    cancelling = owner.cancelling()
+
+    def check_response():
+        # A provider may catch CancelledError. Keep external stop requests while
+        # letting asyncio.timeout remove its own cancellation on context exit.
+        if owner.cancelling() > cancelling + int(timeout.expired()):
+            raise asyncio.CancelledError
+        # CPU-bound response processing can finish before a due timer runs.
+        if loop.time() >= deadline:
+            budget.fail("request_timeout", "モデルの応答待ち時間の上限に到達しました")
+
     try:
         async with timeout:
-            yield budget
+            try:
+                yield budget
+            except TaskLimitError:
+                raise
+            except Exception:
+                check_response()
+                raise
+            else:
+                check_response()
     except TimeoutError:
         if timeout.expired():
             budget.fail("request_timeout", "モデルの応答待ち時間の上限に到達しました")

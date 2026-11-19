@@ -45,15 +45,16 @@ async def test_alternative_actions_are_executed_recorded_and_explained():
     assert plan.reasoning in session._pending_error.error_message
 
 
-async def test_replan_preserves_completed_work_and_runs_cleanup_actions():
+@pytest.mark.parametrize("completed_id", ["done", "replan_1_0"])
+async def test_replan_preserves_completed_work_and_runs_cleanup_actions(tmp_path, completed_id):
     plan = RecoveryPlan(
         RecoveryStrategy.REPLAN_SUBTASK,
         [Action(ActionType.KEY_PRESS, {"key": "escape"})],
         "保存先を選び直す",
         True,
     )
-    session = recovering(plan)
-    done = Subtask(id="done", description="文書を作成する")
+    session = recovering(plan, store=TaskStore(tmp_path))
+    done = Subtask(id=completed_id, description="文書を作成する")
     session.loop.context.subtasks.insert(0, done)
     session.loop.context.current_subtask_index = 1
     new_step = Subtask(id="replacement", description="別名で保存する")
@@ -64,10 +65,15 @@ async def test_replan_preserves_completed_work_and_runs_cleanup_actions():
     assert session.loop.context.current_subtask_index == 1
     assert session.loop.context.current_subtask.description == new_step.description
     assert session.loop.state == AgentState.EXECUTING
+    identifiers = [subtask.id for subtask in session.loop.context.subtasks]
+    assert len(set(identifiers)) == len(identifiers)
+    saved = TaskStore(tmp_path).load(session.id)
+    assert [subtask["id"] for subtask in saved.subtasks] == identifiers
     goal, count = session.llm.decompose_task.call_args.args
     assert count == 1
     assert any(done.description in constraint for constraint in goal.constraints)
     assert any(plan.reasoning in constraint for constraint in goal.constraints)
+    await session.aclose()
 
 
 async def test_current_verification_error_takes_precedence_over_old_failure():

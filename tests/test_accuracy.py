@@ -44,23 +44,21 @@ class TestZoomMapping:
 
 
 class TestSessionGuards:
-    @staticmethod
-    def _session():
-        from ai_desktop_agent.agent.loop import AgentLoop
+    @pytest.fixture
+    async def session(self):
+        from ai_desktop_agent.agent.llm.mock import MockLLMProvider
         from ai_desktop_agent.server.session import TaskSession
         from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
-        s = TaskSession.__new__(TaskSession)
-        s.loop = AgentLoop()
-        s.display = FakeDisplayBackend()
-        s._last_before_raw = None
+        s = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend(), decision=None)
         s.loop.start(Goal(description="t"))
         s.loop.understanding_done()
         s.loop.plan_ready([Subtask(id="s1", description="d")])
-        return s
+        yield s
+        await s.aclose()
 
-    def test_clamp_to_screen(self):
-        s = self._session()
+    def test_clamp_to_screen(self, session):
+        s = session
         d = ActionDecision(
             action=Action(action_type=ActionType.LEFT_CLICK, params={"x": 5000, "y": -5}),
             expected_effect="",
@@ -70,8 +68,8 @@ class TestSessionGuards:
         out = s._clamp_decision(d, _real_ss())
         assert out.action.params == {"x": 1023, "y": 0}
 
-    def test_repeat_click_detected(self):
-        s = self._session()
+    def test_repeat_click_detected(self, session):
+        s = session
         s.loop.record_action(
             Action(action_type=ActionType.LEFT_CLICK, params={"x": 100, "y": 100}),
             True,
@@ -90,10 +88,10 @@ class TestSessionGuards:
         )
 
     @pytest.mark.asyncio
-    async def test_verify_fails_on_no_change(self):
+    async def test_verify_fails_on_no_change(self, session):
         from ai_desktop_agent.agent.state import ActionRecord
 
-        s = self._session()
+        s = session
         raw = s.display.capture_raw()
         s._last_before_raw = raw
         # Fakeは同一画像を返すため変化なし -> False

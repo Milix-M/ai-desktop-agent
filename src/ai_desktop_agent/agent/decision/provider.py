@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from abc import ABC, abstractmethod
@@ -39,6 +40,7 @@ OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 #: 画像制約（docs/research/clef.mdより）
 MAX_IMAGES_PER_REQUEST = 4
 MAX_IMAGE_MIB = 4.0
+MAX_IMAGE_PIXELS = 16_000_000
 
 _WORD_RE = re.compile(r"[0-9A-Za-zぁ-んァ-ン一-鿿]+", re.UNICODE)
 
@@ -228,20 +230,22 @@ class WorkersAiClefProvider(DecisionProvider):
             f"【直前の操作の判断理由】\n{evidence_text}\n"
             "重要情報は前方に置く（後方切捨て仕様のため）。"
         )
-        questions: list[dict[str, Any]] = [
-            {
-                "id": "verify_achieved",
+        questions: dict[str, Any] = {
+            "verify_achieved": {
                 "type": "noul",
-                "question": "サブタスクの期待結果は達成されたか。はい/いいえで答える。",
+                "instructions": "サブタスクの期待結果は達成されたか。はい/いいえで答える。",
             },
-            {
-                "id": "verify_grade",
+            "verify_grade": {
                 "type": "score",
-                "question": "達成の度合いを順序付き基準表で採点する。",
-                "rubric": ["完全達成", "部分達成", "未達"],
+                "instructions": "達成の度合いを順序付き基準表で採点する。",
+                "criteria": ["未達", "部分達成", "完全達成"],
             },
-        ]
-        payload: dict[str, Any] = {"state": state, "questions": questions}
+        }
+        payload: dict[str, Any] = {
+            "model": self._model.rsplit("/", 1)[-1],
+            "state": state,
+            "questions": questions,
+        }
         images = _encode_images(image_bytes)
         if images:
             payload["images"] = images
@@ -261,20 +265,20 @@ class WorkersAiClefProvider(DecisionProvider):
             f"【直前の操作履歴】\n{history_text}\n"
         )
         return {
+            "model": self._model.rsplit("/", 1)[-1],
             "state": state,
-            "questions": [
-                {
-                    "id": "recover_strategy",
+            "questions": {
+                "recover_strategy": {
                     "type": "choice",
-                    "question": "次に取る回復戦略を1つ選ぶ。",
-                    "options": [
-                        "wait_and_retry",
-                        "alternative_approach",
-                        "replan_subtask",
-                        "give_up",
-                    ],
+                    "instructions": "次に取る回復戦略を1つ選ぶ。",
+                    "criteria": {
+                        "wait_and_retry": "待機して同じ操作を再試行する",
+                        "alternative_approach": "別の手段で同じ目的を達成する",
+                        "replan_subtask": "サブタスクを立て直す",
+                        "give_up": "継続不能として打ち切る",
+                    },
                 }
-            ],
+            },
         }
 
     # ── 実行 ─────────────────────────────────────
@@ -300,11 +304,11 @@ class WorkersAiClefProvider(DecisionProvider):
                 result = data.get("result", data) if isinstance(data, dict) else {}
                 budget.record_usage(result.get("usage") if isinstance(result, dict) else None)
         # Workers AIは {"result": {...}} 包みが通例。素の形も許す。
-        if isinstance(data, dict) and isinstance(data.get("result"), dict):
-            return data["result"]
-        if isinstance(data, dict):
-            return data
-        raise ValueError(f"決定モデルの応答形式が不正: {type(data)}")
+        if isinstance(data, dict) and "success" in data and data["success"] is not True:
+            raise ValueError("決定モデルAPIが失敗を返しました")
+        if isinstance(data, dict) and "result" in data:
+            data = data["result"]
+        return _answer_map(data)
 
     async def verify_completion(
         self,
@@ -422,7 +426,7 @@ class OpenRouterClefProvider(DecisionProvider):
                 "verify_grade": {
                     "type": "score",
                     "instructions": "達成の度合いを順序付き基準表で採点する。",
-                    "criteria": ["完全達成", "部分達成", "未達"],
+                    "criteria": ["未達", "部分達成", "完全達成"],
                 },
             },
         }
@@ -479,11 +483,7 @@ class OpenRouterClefProvider(DecisionProvider):
             if budget is not None:
                 budget.record_usage(data.get("usage") if isinstance(data, dict) else None)
         # Decisions APIは {"answers": {...}, "usage": {...}} を返す。answers辞書を渡す。
-        if isinstance(data, dict) and isinstance(data.get("answers"), dict):
-            return data["answers"]
-        if isinstance(data, dict):
-            return data
-        raise ValueError(f"決定モデルの応答形式が不正: {type(data)}")
+        return _answer_map(data)
 
     async def verify_completion(
         self,
@@ -535,48 +535,54 @@ class OpenRouterClefProvider(DecisionProvider):
 # ── 応答解釈（形式差の吸収） ────────────────────────
 
 
+def _answer_map(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("決定モデルの応答はオブジェクトである必要があります")
+    if "answers" in data:
+        if not isinstance(data["answers"], dict):
+            raise ValueError("決定モデルのanswersはオブジェクトである必要があります")
+        return data["answers"]
+    return data
+
+
 def _probability(value: Any) -> float:
     if not routing.is_probability(value):
         raise ValueError("決定モデルの確率は0〜1の有限の数値である必要があります")
     return float(value)
 
 
+def _noul_probability(node: Any) -> float:
+    if not isinstance(node, dict):
+        return _probability(node)
+    if "type" in node:
+        if node["type"] != "noul":
+            raise ValueError("達成可否の回答型はnoulである必要があります")
+        return _probability(node.get("noul"))
+    for key in ("prob_true", "p_yes", "noul", "probability", "prob", "score"):
+        if key in node:
+            return _probability(node[key])
+    raise ValueError("達成確率を応答から解釈できません")
+
+
 def _extract_prob(result: dict[str, Any], keys: tuple[str, ...]) -> float:
     """noul相当の達成確率を探す。見つからなければ例外（LLM退避用）。"""
-    # 1. 質問ID直下の数値
     for key in keys:
-        node = result.get(key)
-        if isinstance(node, (int, float)):
-            return _probability(node)
-        if isinstance(node, dict):
-            for sub in ("prob_true", "p_yes", "noul", "probability", "prob", "score"):
-                if isinstance(node.get(sub), (int, float)):
-                    return _probability(node[sub])
-    # 2. questions配列形式
+        if key in result:
+            return _noul_probability(result[key])
+    # Legacy gateways may return a questions array instead of an answers map.
     questions = result.get("questions")
     if isinstance(questions, list):
         for q in questions:
             if isinstance(q, dict) and q.get("id") in keys:
-                for sub in ("prob_true", "p_yes", "noul", "probability", "prob"):
-                    if isinstance(q.get(sub), (int, float)):
-                        return _probability(q[sub])
-    # 3. answers配列形式
-    answers = result.get("answers")
-    if isinstance(answers, list):
-        for a in answers:
-            if isinstance(a, dict) and a.get("id") in keys:
-                for sub in ("prob_true", "p_yes", "noul", "probability", "prob"):
-                    if isinstance(a.get(sub), (int, float)):
-                        return _probability(a[sub])
+                return _noul_probability(q)
     raise ValueError("達成確率を応答から解釈できません")
 
 
 def _numeric_dist(dist: dict[Any, Any]) -> dict[str, float]:
-    """分布辞書から数値のみを抜く（文字列混入でのfloat変換死を防ぐ）。"""
-    out: dict[str, float] = {}
-    for k, v in dist.items():
-        if isinstance(v, (int, float)):
-            out[str(k)] = _probability(v)
+    """Validate the whole distribution; dropping invalid options can change its winner."""
+    out = {str(k): _probability(v) for k, v in dist.items()}
+    if out and not math.isclose(sum(out.values()), 1.0, rel_tol=0, abs_tol=1e-6):
+        raise ValueError("決定モデルの確率分布の合計は1である必要があります")
     return out
 
 
@@ -584,7 +590,8 @@ def _best_key(dist: dict[Any, Any]) -> str | None:
     nums = _numeric_dist(dist)
     if not nums:
         return None
-    return max(nums.items(), key=lambda kv: kv[1])[0]
+    best, probability = max(nums.items(), key=lambda kv: kv[1])
+    return best if sum(value == probability for value in nums.values()) == 1 else None
 
 
 def _grade_from_node(node: Any) -> str | None:
@@ -592,24 +599,27 @@ def _grade_from_node(node: Any) -> str | None:
     if isinstance(node, str):
         return _grade_from_text(node)
     if isinstance(node, dict):
+        if "type" in node and node["type"] != "score":
+            raise ValueError("達成度の回答型はscoreである必要があります")
+        if node.get("type") == "score" and "probabilities" not in node:
+            return None
+        legend = node.get("legend")
+        for dist_key in ("probabilities", "probs", "scores"):
+            if dist_key not in node:
+                continue
+            dist = node[dist_key]
+            if not isinstance(dist, dict) or not dist:
+                raise ValueError("達成度の確率分布が不正です")
+            best = _best_key(dist)
+            if best is None:
+                return None
+            # Indexed response levels are resolved through the model's legend.
+            label = str(legend[best]) if isinstance(legend, dict) and best in legend else best
+            return _grade_from_text(label)
         for label_key in ("label", "choice", "option", "value"):
             text = node.get(label_key)
             if isinstance(text, str):
                 grade = _grade_from_text(text)
-                if grade:
-                    return grade
-        legend = node.get("legend")
-        for dist_key in ("probabilities", "probs", "scores"):
-            dist = node.get(dist_key)
-            if isinstance(dist, dict) and dist:
-                best = _best_key(dist)
-                if best is None:
-                    continue
-                # 連番keyの場合はlegendで見出しに戻す（実応答: {"0":完全達成,...}）
-                label = best
-                if isinstance(legend, dict) and str(best) in legend:
-                    label = str(legend[str(best)])
-                grade = _grade_from_text(label)
                 if grade:
                     return grade
     return None
@@ -620,11 +630,14 @@ def _extract_grade(result: dict[str, Any]) -> str:
         grade = _grade_from_node(result.get(key))
         if grade:
             return grade
-    # score分布から最有力を推定（数値のみ対象。回答ノード自体は上で処理済み）
+    # 旧形式の度合い→確率の辞書も検査する。
     for key in ("verify_grade", "scores", "score"):
         node = result.get(key)
         if isinstance(node, dict) and node:
-            if any(k in node for k in ("type", "probabilities", "legend")):
+            if any(
+                k in node
+                for k in ("type", "probabilities", "legend", "label", "choice", "option", "value")
+            ):
                 continue
             best = _best_key(node)
             if best is None:
@@ -637,11 +650,12 @@ def _extract_grade(result: dict[str, Any]) -> str:
 
 
 def _grade_from_text(text: str):
-    if any(k in text for k in ("完全", "full", "達成済")):
+    label = text.strip().lower()
+    if label in {"完全", "完全達成", "full", "達成済"}:
         return "full"
-    if any(k in text for k in ("部分", "partial")):
+    if label in {"部分", "部分達成", "partial"}:
         return "partial"
-    if any(k in text for k in ("未達", "none", "未達成", "失敗")):
+    if label in {"未達", "none", "未達成", "失敗"}:
         return "none"
     return None
 
@@ -653,45 +667,78 @@ def _extract_choice(result: dict[str, Any]) -> tuple[str, float]:
         if isinstance(node, str) and node in valid:
             raise ValueError("回復戦略の確率が応答にありません")
         if isinstance(node, dict):
-            label = (
-                node.get("option") or node.get("label") or node.get("value") or node.get("choice")
-            )
-            dist = node.get("probabilities") or node.get("probs")
-            prob = node.get("prob", node.get("probability", node.get("confidence", None)))
-            if prob is None and isinstance(dist, dict) and label in dist:
-                prob = dist[label]
+            if "type" in node and node["type"] != "choice":
+                raise ValueError("回復戦略の回答型はchoiceである必要があります")
+            if node.get("type") == "choice":
+                label = node.get("choice")
+                dist = node.get("probabilities")
+                if dist is None:
+                    raise ValueError("回復戦略の確率分布が応答にありません")
+                prob = None
+            else:
+                label = (
+                    node.get("option")
+                    or node.get("label")
+                    or node.get("value")
+                    or node.get("choice")
+                )
+                dist = node.get("probabilities", node.get("probs"))
+                prob = node.get("prob", node.get("probability"))
+            if dist is not None:
+                if not isinstance(dist, dict) or not dist or set(dist) - valid:
+                    raise ValueError("回復戦略の確率分布が不正です")
+                probabilities = _numeric_dist(dist)
+                if (
+                    not isinstance(label, str)
+                    or label not in probabilities
+                    or _best_key(probabilities) != label
+                ):
+                    raise ValueError("回復戦略と確率分布の最有力候補が一致しません")
+                prob = probabilities[label]
             if isinstance(label, str) and label in valid:
                 return label, _probability(prob)
     probs = result.get("probs") or result.get("probabilities") or result.get("options")
     if isinstance(probs, dict):
-        known = _numeric_dist({k: v for k, v in probs.items() if k in valid})
-        if known:
-            best = max(known.items(), key=lambda kv: kv[1])
-            return best[0], best[1]
+        if set(probs) - valid:
+            raise ValueError("回復戦略の確率分布が不正です")
+        known = _numeric_dist(probs)
+        best = _best_key(known)
+        if best is not None:
+            return best, known[best]
     raise ValueError("回復戦略を応答から解釈できません")
 
 
 def _encode_images(image_bytes: bytes | None) -> list[str]:
-    """画像をJPEG data URL化する。制限超過時は送らない（本文13MiB対策）。"""
+    """Encode valid evidence within the API's byte and pixel limits."""
     if not image_bytes:
         return []
-    if len(image_bytes) > MAX_IMAGE_MIB * 1024 * 1024:
-        logger.warning("決定モデル用の画像が大きすぎるため画像なしで送ります")
-        return []
+    limit = MAX_IMAGE_MIB * 1024 * 1024
+    if len(image_bytes) > limit:
+        raise ValueError("決定モデル用の画像は4MiB以内にしてください")
     try:
         import io
 
         from PIL import Image
 
         with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                raise ValueError("決定モデル用の画像は1600万画素以内にしてください")
+            original_format = img.format
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=80)
             raw = buf.getvalue()
-    except Exception:
+    except Exception as error:
+        raise ValueError("決定モデル用の画像を変換できません") from error
+    content_type = "image/jpeg"
+    if len(raw) > limit:
+        supported = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+        if original_format not in supported:
+            raise ValueError("変換後の決定モデル用の画像が4MiBを超えています")
         raw = image_bytes
+        content_type = supported[original_format]
     import base64 as _b64
 
-    return [f"data:image/jpeg;base64,{_b64.b64encode(raw).decode('ascii')}"]
+    return [f"data:{content_type};base64,{_b64.b64encode(raw).decode('ascii')}"]
 
 
 def create_decision_provider_from_env() -> DecisionProvider | None:
