@@ -113,4 +113,63 @@ describe("VM creation retry identities", () => {
     expect(pendingVmCreations()).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it.each(["queued", "succeeded", "failed"])(
+    "cancellation after parsing a %s acknowledgement retains the receipt for an explicit retry",
+    async state => {
+      const record = state === "succeeded" ? succeeded : state === "failed"
+        ? { ...queued, state, error: "環境を作成できません", error_status: 503 } : queued;
+      let resolveBody!: (value: unknown) => void;
+      const body = new Promise<unknown>(resolve => { resolveBody = resolve; });
+      const json = vi.fn(() => body);
+      const fetch = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({ ok: true, status: 200, json } as unknown as Response)
+        .mockResolvedValueOnce(response(state === "failed" ? record : succeeded));
+      const { createVm } = await import("./api");
+      const { pendingVmCreations } = await import("./vm-creation-retries");
+      const controller = new AbortController();
+      const outcome = createVm(vm.name, "container", controller.signal).catch(error => error);
+      try {
+        await Promise.resolve();
+        expect(json).toHaveBeenCalledOnce();
+        // The body is already parsed when cancellation reaches the caller's
+        // microtask; no in-flight HTTP request remains to reject it.
+        const cancellation = body.then(() => Promise.resolve().then(() => controller.abort()));
+        resolveBody(record);
+        await cancellation;
+        expect(await outcome).toMatchObject({ name: "AbortError" });
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(pendingVmCreations()).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(vi.getTimerCount()).toBe(0);
+
+        if (state === "failed") {
+          await expect(createVm(vm.name, "container")).rejects.toMatchObject({ status: 503 });
+        } else {
+          expect(await createVm(vm.name, "container")).toEqual(vm);
+        }
+        expect(fetch.mock.calls[1][1]?.headers).toEqual(fetch.mock.calls[0][1]?.headers);
+        expect(pendingVmCreations()).toEqual([]);
+      } finally {
+        resolveBody(record);
+        controller.abort();
+        await vi.runOnlyPendingTimersAsync();
+        await outcome;
+      }
+    },
+  );
+
+  it.each(["truncated {", "{}", "[null]", '[{"key":"invalid","name":null,"kind":"container"}]'])(
+    "damaged stored creations retain an existing retry key: %s", async stored => {
+      const { vmCreationRetry, pendingVmCreations, forgetVmCreation } = await import("./vm-creation-retries");
+      const original = vmCreationRetry("作業環境", "container");
+      sessionStorage.setItem("ai-desktop-agent-vm-creations", stored);
+      expect(vmCreationRetry("作業環境", "container")).toEqual(original);
+      const snapshot = pendingVmCreations();
+      snapshot[0].key = "modified-outside-the-store";
+      expect(pendingVmCreations()[0].key).toBe(original.key);
+      forgetVmCreation(original.key);
+      expect(pendingVmCreations()).toEqual([]);
+      expect(vmCreationRetry("作業環境", "container").key).not.toBe(original.key);
+    });
 });
