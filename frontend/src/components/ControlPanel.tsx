@@ -6,6 +6,7 @@ interface Props {
   onControl: (action: "pause" | "resume" | "stop") => Promise<void>;
   state: string;
   manualInput?: ManualInputRequest | null;
+  manualInputReady?: boolean;
   disabled?: boolean;
 }
 
@@ -18,7 +19,7 @@ const RUNNING_STATES = [
   "recovering",
 ];
 
-export default function ControlPanel({ onControl, state, manualInput, disabled = false }: Props) {
+export default function ControlPanel({ onControl, state, manualInput, manualInputReady = true, disabled = false }: Props) {
   const isRunning = RUNNING_STATES.includes(state);
   const awaitingInput = state === "awaiting_user";
 
@@ -26,7 +27,7 @@ export default function ControlPanel({ onControl, state, manualInput, disabled =
     <div className="section">
       {awaitingInput && manualInput && <div role="status" className="manual-input">
         <p>{manualInput.reason}</p>
-        <p>デスクトップで入力し、秘密情報を画面から隠してから再開してください。</p>
+        {manualInputReady && <p>デスクトップで入力し、秘密情報を画面から隠してから再開してください。</p>}
       </div>}
       <div className="controls">
         {!awaitingInput && <button
@@ -37,7 +38,7 @@ export default function ControlPanel({ onControl, state, manualInput, disabled =
         </button>}
         <button
           className={awaitingInput ? "manual-resume" : undefined}
-          disabled={disabled || (awaitingInput ? !manualInput?.id : state !== "paused")}
+          disabled={disabled || (awaitingInput ? !manualInput?.id || !manualInputReady : state !== "paused")}
           onClick={() => onControl("resume")}
         >
           {awaitingInput ? "画面を送信して再開" : "再開"}

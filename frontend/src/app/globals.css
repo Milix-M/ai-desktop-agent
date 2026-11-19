@@ -440,6 +440,18 @@ body {
   color: #fff;
 }
 
+.history-delete:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.history-error {
+  margin-top: 4px;
+  color: var(--error);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .history-row {
   display: flex;
   align-items: flex-start;

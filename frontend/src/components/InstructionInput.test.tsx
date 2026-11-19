@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import InstructionInput from "@/components/InstructionInput";
 import { ApiError } from "@/lib/api";
@@ -8,6 +8,54 @@ import type { PendingSubmission } from "@/lib/types";
 
 beforeEach(() => { sessionStorage.clear(); vi.stubGlobal("crypto", webcrypto); });
 afterEach(() => vi.unstubAllGlobals());
+
+it("a newer mounted input can take shared submission ownership while another input is hashing", async () => {
+  let finish!: (value: ArrayBuffer) => void;
+  const hashing = vi.spyOn(crypto.subtle, "digest").mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const submission = { current: null as PendingSubmission | null };
+  const first = vi.fn().mockResolvedValue(undefined);
+  const second = vi.fn().mockResolvedValue(undefined);
+  try {
+    render(<>
+      <InstructionInput onSubmit={first} disabled={false} initialValue="最初の文書を保存する" vmId="first" submission={submission} />
+      <InstructionInput onSubmit={second} disabled={false} initialValue="別の文書を保存する" vmId="second" submission={submission} />
+    </>);
+    const inputs = screen.getAllByRole("textbox");
+    const buttons = screen.getAllByRole("button", { name: "実行" });
+    fireEvent.click(buttons[0]);
+    fireEvent.click(buttons[1]);
+    await vi.waitFor(() => expect(second).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(inputs[1]).toHaveValue(""));
+    await act(async () => finish(new ArrayBuffer(32)));
+    expect(first).not.toHaveBeenCalled();
+    expect(inputs[0]).toHaveValue("最初の文書を保存する");
+    expect(inputs[0]).toBeEnabled();
+  } finally { hashing.mockRestore(); }
+});
+
+it.each(["resolve", "reject"])("unmounting during request preparation prevents a later submission: %s", async outcome => {
+  let resolve!: (value: ArrayBuffer) => void;
+  let reject!: (error: Error) => void;
+  const hashing = vi.spyOn(crypto.subtle, "digest").mockReturnValueOnce(new Promise((done, fail) => {
+    resolve = done; reject = fail;
+  }));
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  const submission = { current: null as PendingSubmission | null };
+  try {
+    const view = render(<InstructionInput onSubmit={onSubmit} disabled={false} submission={submission} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "報告書を保存する" } });
+    fireEvent.click(screen.getByRole("button", { name: "実行" }));
+    expect(hashing).toHaveBeenCalledOnce();
+    const attempt = submission.current;
+    view.unmount();
+    await act(async () => {
+      if (outcome === "resolve") resolve(new ArrayBuffer(32));
+      else reject(new Error("Web Crypto unavailable"));
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(submission.current).toBe(attempt);
+  } finally { hashing.mockRestore(); }
+});
 
 it("preserves the instruction and retry identity after task admission returns 429", async () => {
   const onSubmit = vi.fn().mockRejectedValueOnce(new ApiError(429, "60秒後にもう一度送信してください"))
@@ -55,8 +103,8 @@ describe("InstructionInput", () => {
     await userEvent.type(textarea, "テスト指示");
     await userEvent.click(screen.getByRole("button"));
 
+    await vi.waitFor(() => expect(textarea).toHaveValue(""));
     expect(onSubmit).toHaveBeenCalledWith("テスト指示", false, expect.stringMatching(/^[a-f0-9]{32}$/));
-    expect(textarea).toHaveValue("");
   });
 
   it("calls onSubmit on Enter key (without Shift)", async () => {
@@ -89,7 +137,7 @@ describe("InstructionInput", () => {
     const textarea = screen.getByPlaceholderText(/LibreOffice/);
     await userEvent.type(textarea, "テスト指示");
     await userEvent.click(screen.getByRole("button", { name: "実行" }));
-    expect(onSubmit).toHaveBeenCalledWith("テスト指示", true, expect.stringMatching(/^[a-f0-9]{32}$/));
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("テスト指示", true, expect.stringMatching(/^[a-f0-9]{32}$/)));
   });
 
   it("disables everything when disabled=true", () => {

@@ -1,4 +1,6 @@
 import type { TaskDetail, TaskHistoryItem, TaskStatus, VmInfo, VmStatus } from "./types";
+import { parseTaskStatus } from "./task-protocol";
+import { parseAcknowledgement, parseLogin, parseTaskDetail, parseTaskHistory, parseVmInfo, parseVms, parseVmStatus } from "./api-protocol";
 import { forgetVmCreation, vmCreationRetry, type CreationKind } from "./vm-creation-retries";
 
 const BACKEND_URL =
@@ -63,26 +65,52 @@ export async function confirmAuthentication(isCurrent: () => boolean = () => tru
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const callerSignal = init?.signal;
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const cancel = () => controller.abort();
+  if (callerSignal?.aborted) cancel();
+  callerSignal?.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; cancel(); }, 30000);
+  const checkCancelled = () => {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+  };
   const version = authVersion;
   const stamp = authStamp();
   const url = `${BACKEND_URL}${path}`;
-  const response = await fetch(url, { ...init, credentials: "include" });
-  if (!response.ok) {
-    if (response.status === 401 && typeof window !== "undefined" && !path.startsWith("/auth/")) {
-      await confirmAuthentication(() => version === authVersion && stamp === authStamp());
-    }
-    let detail = "";
-    try {
-      const body: unknown = await response.json();
-      if (body && typeof body === "object" && "detail" in body && typeof body.detail === "string") {
-        detail = body.detail;
+  try {
+    checkCancelled();
+    const response = await fetch(url, { ...init, signal, credentials: "include" });
+    checkCancelled();
+    if (!response.ok) {
+      if (response.status === 401 && typeof window !== "undefined" && !path.startsWith("/auth/")) {
+        await confirmAuthentication(() => !signal.aborted && version === authVersion && stamp === authStamp());
       }
-    } catch {
-      // Non-JSON responses (for example a proxy error) still have a useful status.
+      let detail = "";
+      try {
+        const body: unknown = await response.json();
+        if (body && typeof body === "object" && "detail" in body && typeof body.detail === "string") {
+          detail = body.detail;
+        }
+      } catch {
+        // Non-JSON responses (for example a proxy error) still have a useful status.
+      }
+      checkCancelled();
+      throw new ApiError(response.status, detail ? `${detail} (HTTP ${response.status})` : `HTTP ${response.status}`);
     }
-    throw new ApiError(response.status, detail ? `${detail} (HTTP ${response.status})` : `HTTP ${response.status}`);
+    const result = await response.json();
+    checkCancelled();
+    return result;
+  } catch (error) {
+    if (timedOut && !callerSignal?.aborted) {
+      throw new Error("応答を確認できません。状態を確認してからもう一度操作してください", { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", cancel);
   }
-  return response.json();
 }
 
 function post(body?: object): RequestInit {
@@ -97,22 +125,23 @@ export async function createTask(instruction: string, vmId?: string | null, allo
   const init = post({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false });
   if (requestId) init.headers = { ...init.headers, "Idempotency-Key": requestId };
   try {
-    return await request("/tasks", { ...init, signal: controller.signal });
+    return parseTaskStatus(await request<unknown>("/tasks", { ...init, signal: controller.signal }), vmId);
   } catch (error) {
     if (error instanceof ApiError || !requestId) throw error;
     throw new Error("通信エラーで受付結果を確認できません。同じ内容で再送してください", { cause: error });
   } finally { clearTimeout(timer); }
 }
 
-export function getCurrentTask(vmId?: string | null): Promise<TaskStatus> {
-  return request(`/tasks/current${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`);
+export async function getCurrentTask(vmId?: string | null): Promise<TaskStatus> {
+  return parseTaskStatus(await request<unknown>(`/tasks/current${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ""}`), vmId);
 }
 
-export function controlTask(action: "pause" | "resume" | "stop", vmId: string, sessionId: string, manualInputId?: string): Promise<{ status: string }> {
+export async function controlTask(action: "pause" | "resume" | "stop", vmId: string, sessionId: string, manualInputId?: string): Promise<{ status: string }> {
   const body = action === "resume" && manualInputId
     ? { manual_input_id: manualInputId, allow_screen_share: true }
     : undefined;
-  return request(`/tasks/current/${action}?vm_id=${encodeURIComponent(vmId)}&session_id=${encodeURIComponent(sessionId)}`, post(body));
+  return parseAcknowledgement(await request<unknown>(`/tasks/current/${action}?vm_id=${encodeURIComponent(vmId)}&session_id=${encodeURIComponent(sessionId)}`, post(body)),
+    { pause: "paused", resume: "resumed", stop: "stopped" }[action]);
 }
 
 export function getWsUrl(): string {
@@ -138,8 +167,12 @@ export async function getAuthStatus(signal?: AbortSignal): Promise<{ authenticat
       const version = authVersion;
       const stamp = authStamp();
       try {
-        const status = await request<{ authenticated: boolean }>("/auth/status", { signal: controller.signal, cache: "no-store" });
-        if (version === authVersion && stamp === authStamp()) return status;
+        const status = await request<unknown>("/auth/status", { signal: controller.signal, cache: "no-store" });
+        if (controller.signal.aborted) break;
+        if (!status || typeof status !== "object" || !("authenticated" in status) || typeof status.authenticated !== "boolean") {
+          throw new Error("認証の応答が不正です");
+        }
+        if (version === authVersion && stamp === authStamp()) return { authenticated: status.authenticated };
       } catch (error) {
         if (controller.signal.aborted || (version === authVersion && stamp === authStamp())) throw error;
       }
@@ -152,15 +185,15 @@ export async function getAuthStatus(signal?: AbortSignal): Promise<{ authenticat
 }
 
 export function login(key: string): Promise<{ authenticated: boolean }> {
-  return changeAuthentication(signal => request("/auth/login", { ...post({ key }), signal }));
+  return changeAuthentication(async signal => parseLogin(await request<unknown>("/auth/login", { ...post({ key }), signal })));
 }
 
 export function logout(): Promise<{ status: string }> {
-  return changeAuthentication(signal => request("/auth/logout", { ...post(), signal }));
+  return changeAuthentication(async signal => parseAcknowledgement(await request<unknown>("/auth/logout", { ...post(), signal }), "logged_out"));
 }
 
-export function getVms(): Promise<VmInfo[]> {
-  return request("/vms");
+export async function getVms(): Promise<VmInfo[]> {
+  return parseVms(await request<unknown>("/vms"));
 }
 
 interface VmCreation {
@@ -175,11 +208,12 @@ interface VmCreation {
 function creationResponse(value: unknown, kind: CreationKind): VmCreation {
   if (!value || typeof value !== "object") throw new Error("作成要求の応答が不正です");
   const job = value as VmCreation;
-  if (!/^creation-[0-9a-f]{64}$/.test(job.id) || typeof job.vm_id !== "string" ||
+  if (!/^creation-[0-9a-f]{64}$/.test(job.id) || typeof job.vm_id !== "string" || !job.vm_id ||
     !["queued", "running", "succeeded", "failed"].includes(job.state)) throw new Error("作成要求の応答が不正です");
-  if (job.state === "succeeded" && (!job.result || job.result.id !== job.vm_id || job.result.kind !== kind ||
-    typeof job.result.name !== "string" || typeof job.result.status !== "string" || job.result.managed !== true ||
-    typeof job.result.vnc_host !== "string")) throw new Error("作成結果が不正です");
+  if (job.state === "succeeded") {
+    const result = parseVmInfo(job.result, job.vm_id);
+    if (result.kind !== kind || result.managed !== true) throw new Error("作成結果が不正です");
+  }
   if (job.state === "failed" && (typeof job.error !== "string" || ![400, 409, 503].includes(job.error_status ?? 0))) {
     throw new Error("作成エラーの応答が不正です");
   }
@@ -224,19 +258,21 @@ export async function createVm(name?: string, kind?: string, signal?: AbortSigna
       headers: { "Content-Type": "application/json", "Idempotency-Key": retry.key },
     }, controller.signal), targetKind);
     const jobId = job.id;
+    const vmId = job.vm_id;
     while (job.state === "queued" || job.state === "running") {
       await waitForCreation(controller.signal);
       job = creationResponse(await creationRequest(`/vm-creations/${encodeURIComponent(jobId)}`, {
         cache: "no-store",
       }, controller.signal), targetKind);
-      if (job.id !== jobId) throw new Error("別の作成要求の応答を受け取りました");
+      if (job.id !== jobId || job.vm_id !== vmId) throw new Error("別の作成要求の応答を受け取りました");
     }
+    if (controller.signal.aborted) throw new DOMException("aborted", "AbortError");
     forgetVmCreation(retry.key);
     if (job.state === "failed") throw new ApiError(job.error_status!, job.error!);
     return job.result!;
   } catch (error) {
-    if (error instanceof ApiError) throw error;
     if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    if (error instanceof ApiError) throw error;
     throw new Error("作成結果を確認できません。同じ内容でもう一度操作してください", { cause: error });
   } finally {
     clearTimeout(timer);
@@ -244,34 +280,34 @@ export async function createVm(name?: string, kind?: string, signal?: AbortSigna
   }
 }
 
-export function deleteVm(vmId: string): Promise<{ status: string }> {
-  return request(`/vms/${encodeURIComponent(vmId)}`, { method: "DELETE" });
+export async function deleteVm(vmId: string): Promise<{ status: string }> {
+  return parseAcknowledgement(await request<unknown>(`/vms/${encodeURIComponent(vmId)}`, { method: "DELETE" }), "deleted");
 }
 
-export function stopVm(vmId: string): Promise<VmInfo> {
-  return request(`/vms/${encodeURIComponent(vmId)}/stop`, post());
+export async function stopVm(vmId: string): Promise<VmInfo> {
+  return parseVmInfo(await request<unknown>(`/vms/${encodeURIComponent(vmId)}/stop`, post()), vmId);
 }
 
-export function startVm(vmId: string): Promise<VmInfo> {
-  return request(`/vms/${encodeURIComponent(vmId)}/start`, post());
+export async function startVm(vmId: string): Promise<VmInfo> {
+  return parseVmInfo(await request<unknown>(`/vms/${encodeURIComponent(vmId)}/start`, post()), vmId);
 }
 
-export function getVmStatus(signal?: AbortSignal): Promise<VmStatus> {
-  return request("/vm/status", signal ? { signal } : undefined);
+export async function getVmStatus(signal?: AbortSignal): Promise<VmStatus> {
+  return parseVmStatus(await request<unknown>("/vm/status", signal ? { signal } : undefined));
 }
 
-export function restartVm(): Promise<VmStatus> {
-  return request("/vm/restart", post());
+export async function restartVm(): Promise<VmStatus> {
+  return parseVmStatus(await request<unknown>("/vm/restart", post()));
 }
 
-export function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
-  return request(`/tasks?limit=${limit}`);
+export async function getTaskHistory(limit = 20): Promise<TaskHistoryItem[]> {
+  return parseTaskHistory(await request<unknown>(`/tasks?limit=${limit}`));
 }
 
-export function getTaskDetail(taskId: string): Promise<TaskDetail> {
-  return request(`/tasks/${encodeURIComponent(taskId)}`);
+export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  return parseTaskDetail(await request<unknown>(`/tasks/${encodeURIComponent(taskId)}`), taskId);
 }
 
-export function deleteTask(taskId: string): Promise<{ status: string }> {
-  return request(`/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+export async function deleteTask(taskId: string): Promise<{ status: string }> {
+  return parseAcknowledgement(await request<unknown>(`/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" }), "deleted");
 }

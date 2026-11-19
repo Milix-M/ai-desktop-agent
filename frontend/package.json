@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -26,11 +27,12 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^6.0.2",
+    "@vitest/coverage-v8": "4.1.12",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.29",
     "jsdom": "^29.1.1",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.7"
+    "vitest": "4.1.12"
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {

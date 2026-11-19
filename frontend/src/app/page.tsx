@@ -114,8 +114,10 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   submission: { current: PendingSubmission | null };
 }) {
   const [vncConnected, setVncConnected] = useState(false);
+  const [statusSynchronized, setStatusSynchronized] = useState(false);
   const [vmResolution, setVmResolution] = useState<string | undefined>();
   const [history, setHistory] = useState<TaskHistoryItem[]>([]);
+  const [detailError, setDetailError] = useState<{ taskId: string; message: string } | null>(null);
   const [selection, setSelection] = useState<{ vmId: string | null; taskId: string | null }>(() => ({
     vmId: submission.current?.vmId ?? null, taskId: null,
   }));
@@ -139,14 +141,20 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   const initialSnapshotSeen = useRef(false);
   const latestSessionOrder = useRef(0);
   const generation = useRef(new ServerGeneration());
+  const deletedTaskIds = useRef(new Set<string>());
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const creationController = useRef<AbortController | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; creationController.current?.abort(); };
+  }, []);
 
   const updateView = useCallback(
     (vmId: string | null | undefined, patch: Partial<VmView>) => {
       latestSessionOrder.current = Math.max(latestSessionOrder.current, patch.sessionOrder ?? 0);
       const key = vmId ?? selectedVmRef.current ?? "__none__";
       setVmViews((prev) => {
+        if (patch.sessionId && deletedTaskIds.current.has(patch.sessionId)) return prev;
         const current = prev[key] ?? EMPTY_VIEW;
         if (isOlderView(current, patch)) return prev;
         const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
@@ -180,7 +188,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
 
   const selectedVm = vms.find((v) => v.id === selectedVmId) ??
     (selectedVmId === null ? vms[0] ?? null : null);
-  const liveView = (selectedVmId && vmViews[selectedVmId]) || EMPTY_VIEW;
+  const liveView = vmViews[selectedVmId ?? "__none__"] ?? EMPTY_VIEW;
   const view = selectedTaskId && historyView && (historyView.vmId === null || historyView.vmId === selectedVmId)
     ? historyView.view
     : liveView;
@@ -193,6 +201,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
       const serverVersion = generation.current.version;
       detailRequestId.current = taskId;
       const requestedVmId = selectedVmRef.current;
+      setDetailError(null);
       const relevant = () => mounted.current && requestVersion === selectionVersion.current &&
         serverVersion === generation.current.version &&
         isCurrent();
@@ -270,6 +279,8 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
         });
       } catch (error) {
         if (relevant()) {
+          setDetailError({ taskId,
+            message: `詳細を確認できません: ${error instanceof Error ? error.message : String(error)}` });
           if (error instanceof ApiError && error.status === 404) {
             detailRequestId.current = null;
             setSelection((prev) => prev.taskId === taskId ? { ...prev, taskId: null } : prev);
@@ -316,6 +327,8 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
     const previous = generation.current.version;
     const result = generation.current.accept(serverId, startedAt);
     if (result === "reset") {
+      deletedTaskIds.current.clear();
+      setStatusSynchronized(false);
       latestSessionOrder.current = 0;
       initialSnapshotSeen.current = false;
       selectionVersion.current++;
@@ -323,6 +336,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
       setVmViews({});
       setHistoryView(null);
       setHistory([]);
+      setDetailError(null);
     }
     if (generation.current.version !== previous) {
       void refreshHistory();
@@ -397,16 +411,19 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
       const previousVersion = generation.current.version;
       if (["snapshot", "state", "action", "error", "complete"].includes(data.type)) {
         if (acceptServer(data.server_id) === "ignored") return;
+        if ("session_id" in data && data.session_id && deletedTaskIds.current.has(data.session_id)) return;
         restoreVersion.current++;
       }
       const vmId =
         "vm_id" in data ? (data.vm_id ?? undefined) : undefined;
       switch (data.type) {
         case "snapshot":
+          const tasks = data.tasks.filter(task => !task.session_id || !deletedTaskIds.current.has(task.session_id));
+          setStatusSynchronized(true);
           const restoreSelection = !initialSnapshotSeen.current && navigationVersion.current === 0;
           initialSnapshotSeen.current = true;
           setVmViews((previous) => {
-            const present = new Map(data.tasks.map((task) => [task.vm_id, task]));
+            const present = new Map(tasks.map((task) => [task.vm_id, task]));
             const next = { ...previous };
             for (const [id, current] of Object.entries(previous)) {
               const task = present.get(id);
@@ -428,12 +445,12 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             }
             return next;
           });
-          for (const task of data.tasks) {
+          for (const task of tasks) {
             if (!task.vm_id) continue;
             updateView(task.vm_id, snapshotView(task));
           }
           if (restoreSelection) {
-            const latest = [...data.tasks].filter((task) => task.vm_id && task.session_id)
+            const latest = [...tasks].filter((task) => task.vm_id && task.session_id)
               .sort((a, b) => (b.session_order ?? 0) - (a.session_order ?? 0))[0];
             if (latest && (latest.session_order ?? 0) >= latestSessionOrder.current) {
               setSelection((prev) => ({ vmId: latest.vm_id!, taskId: latest.is_running ? null : prev.taskId }));
@@ -499,7 +516,8 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
     [acceptServer, addLog, refreshHistory, showTaskDetail, updateView]
   );
 
-  useWebSocket(handleWsMessage);
+  const handleStatusDisconnect = useCallback(() => setStatusSynchronized(false), []);
+  useWebSocket(handleWsMessage, handleStatusDisconnect);
 
   const handleVncChange = useCallback(
     (connected: boolean, resolution?: string) => {
@@ -520,23 +538,20 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   const isRunning = RUNNING_STATES.includes(liveView.state);
   const submitDisabled = isRunning || liveView.state === "paused" || liveView.state === "awaiting_user" || !isVmReady(selectedVm);
 
+  // Hashing may finish after navigation or a newer task notification.
+  const handleSubmitStart = useCallback((instruction: string) => {
+    detailRequestId.current = null;
+    navigationVersion.current++;
+    selectionVersion.current++;
+    setSelection((prev) => ({ ...prev, taskId: null }));
+    updateView(selectedVmId, { logs: [] });
+    addLog(instruction, "action", selectedVmId);
+  }, [addLog, selectedVmId, updateView]);
+
   const handleSubmit = useCallback(
     async (instruction: string, allowVmRestart: boolean, requestId: string) => {
       const vmId = selectedVmId;
       const serverVersion = generation.current.version;
-      detailRequestId.current = null;
-      navigationVersion.current++;
-      selectionVersion.current++;
-      setSelection((prev) => ({ ...prev, taskId: null }));
-      updateView(vmId, {
-        state: "idle",
-        manualInput: null,
-        subtaskIndex: 0,
-        subtaskCount: 0,
-        subtasks: [],
-        logs: [],
-      });
-      addLog(`${instruction}`, "action", vmId);
       try {
         const result = await createTask(instruction, vmId, allowVmRestart, requestId);
         if (acceptServer(result.server_id, serverVersion) === "ignored") {
@@ -613,23 +628,28 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   );
 
   const handleCreateVm = useCallback(async (kind: "qemu" | "container" | "android", name?: string) => {
+    if (creationController.current) return;
+    const controller = new AbortController();
+    creationController.current = controller;
     navigationVersion.current++;
     const requestVersion = ++selectionVersion.current;
     const requestedVmId = selectedVmRef.current;
     const kindLabel = kind === "container" ? "コンテナ" : kind === "android" ? "Android" : "VM";
     setCreatingVm(true);
     try {
-      const vm = await createVm(name || undefined, kind);
+      const vm = await createVm(name || undefined, kind, controller.signal);
+      if (controller.signal.aborted) return;
       addLog(`${kindLabel}作成開始: ${vm.name}`, "action", vm.id);
       await refreshVms();
-      if (requestVersion === selectionVersion.current) {
+      if (!controller.signal.aborted && requestVersion === selectionVersion.current) {
         detailRequestId.current = null;
         setSelection({ vmId: vm.id, taskId: null });
       }
     } catch (e: unknown) {
-      addLog(`${kindLabel}作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error", requestedVmId);
+      if (!controller.signal.aborted) addLog(`${kindLabel}作成失敗: ${e instanceof Error ? e.message : String(e)}`, "error", requestedVmId);
     } finally {
-      setCreatingVm(false);
+      creationController.current = null;
+      if (!controller.signal.aborted) setCreatingVm(false);
     }
   }, [addLog, refreshVms]);
 
@@ -685,7 +705,8 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
       />
       <div className="main-layout">
         {selectedVm?.status === "running" ? (
-          <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange} />
+          <VncViewer key={`${vncUrl}:${vncReset}`} wsUrl={vncUrl} onConnectionChange={handleVncChange}
+            allowInput={statusSynchronized && liveView.state === "awaiting_user" && !!liveView.manualInput?.id && !liveView.workerStopped} />
         ) : <div className="vnc-panel" />}
 
         <div
@@ -713,6 +734,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
 
           <InstructionInput
             onSubmit={handleSubmit}
+            onSubmitStart={handleSubmitStart}
             disabled={submitDisabled}
             initialValue={draft.current}
             onDraftChange={(value) => { draft.current = value; }}
@@ -728,9 +750,11 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
           />
 
           <ControlPanel onControl={handleControl} state={liveView.state} manualInput={liveView.manualInput}
+            manualInputReady={statusSynchronized}
             disabled={!selectedVmId || !liveView.sessionId} />
 
           <ConnectionPanel
+            statusConnected={statusSynchronized}
             vncConnected={vncConnected}
             vmResolution={vmResolution}
           />
@@ -744,26 +768,40 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
           <TaskHistory
             items={history}
             selectedId={selectedTaskId}
+            detailError={detailError}
             onSelect={(taskId) => { navigationVersion.current++; void showTaskDetail(taskId); }}
             onDelete={async (taskId) => {
+              const serverVersion = generation.current.version;
               navigationVersion.current++;
               restoreVersion.current++;
               historyLoadVersion.current++;
               if (detailRequestId.current === taskId) selectionVersion.current++;
               try {
                 await deleteTask(taskId);
-                historyLoadVersion.current++;
-                if (detailRequestId.current === taskId) {
-                  selectionVersion.current++;
-                  detailRequestId.current = null;
+              } catch (error) {
+                if (!mounted.current || generation.current.version !== serverVersion) return;
+                if (!(error instanceof ApiError && error.status === 404)) {
+                  throw error;
                 }
-                setHistory((prev) => prev.filter((t) => t.id !== taskId));
-                setSelection((prev) => prev.taskId === taskId ? { ...prev, taskId: null } : prev);
-                setHistoryView((current) => current?.taskId === taskId ? null : current);
-                addLog("履歴を削除", "state");
-              } catch {
-                addLog("履歴削除に失敗", "error");
               }
+              if (!mounted.current || generation.current.version !== serverVersion) return;
+              deletedTaskIds.current.add(taskId);
+              historyLoadVersion.current++;
+              if (detailRequestId.current === taskId) {
+                selectionVersion.current++;
+                detailRequestId.current = null;
+              }
+              setHistory((prev) => prev.filter((t) => t.id !== taskId));
+              setDetailError((prev) => prev?.taskId === taskId ? null : prev);
+              setSelection((prev) => prev.taskId === taskId ? { ...prev, taskId: null } : prev);
+              setHistoryView((current) => current?.taskId === taskId ? null : current);
+              setVmViews((prev) => Object.fromEntries(Object.entries(prev).map(([id, current]) => [id,
+                current.sessionId === taskId ? { ...EMPTY_VIEW, workerStopped: true,
+                  sessionOrder: current.sessionOrder,
+                  retiredSessionOrder: Math.max(current.sessionOrder ?? 0, current.retiredSessionOrder ?? 0),
+                  logs: current.logs } : current,
+              ])));
+              addLog("履歴を削除", "state");
             }}
           />
 

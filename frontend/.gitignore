@@ -5,6 +5,7 @@ node_modules/
 
 # Output
 out/
+coverage/
 
 # Env
 .env*.local

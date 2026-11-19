@@ -10,7 +10,8 @@ function pending(): Receipt[] {
   if (!storageBroken) {
     try {
       const value: unknown = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "[]");
-      if (!Array.isArray(value) || value.some(item => !item ||
+      if (!Array.isArray(value) || value.some(item => !item || typeof item !== "object" ||
+        typeof item.fingerprint !== "string" || typeof item.requestId !== "string" ||
         !/^[a-f0-9]{64}$/.test(item.fingerprint) || !/^[a-f0-9]{32}$/.test(item.requestId))) {
         throw new Error("Invalid pending submissions");
       }
@@ -36,7 +37,10 @@ export async function taskSubmissionRetry(attempt: PendingSubmission, forceNew =
     const payload = JSON.stringify([attempt.instruction, attempt.vmId, attempt.allowVmRestart]);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
     fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-  } catch { return attempt.requestId; }
+  } catch {
+    if (started !== generation) throw new DOMException("ログアウトしました", "AbortError");
+    return attempt.requestId;
+  }
   if (started !== generation) throw new DOMException("ログアウトしました", "AbortError");
   const receipts = pending();
   const existing = receipts.find(item => item.fingerprint === fingerprint);
