@@ -5,7 +5,8 @@ import { ApiError, controlTask, createTask, createVm, deleteTask, getCurrentTask
 import { vmCreationRetry } from "@/lib/vm-creation-retries";
 import type { TaskDetail, TaskHistoryItem, TaskStatus, VmInfo, WsMessage } from "@/lib/types";
 
-vi.mock("@/components/VncViewer", () => ({ default: () => null }));
+vi.mock("@/components/VncViewer", () => ({ default: ({ allowInput = false }: { allowInput?: boolean }) =>
+  <div data-testid="desktop-viewer" data-input-enabled={String(allowInput)} /> }));
 vi.mock("@/components/VMControls", () => ({ default: () => null }));
 const ws = vi.hoisted(() => ({ handler: null as null | ((message: import("@/lib/types").WsMessage) => void) }));
 const current = vi.hoisted(() => ({ running: true }));
@@ -25,10 +26,18 @@ vi.mock("@/lib/api", () => ({
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   sessionStorage.clear();
   current.running = true;
   vi.mocked(login).mockResolvedValue({ authenticated: true });
+  vi.mocked(getVms).mockResolvedValue([{ id: "desktop", name: "desktop", status: "running",
+    kind: "container", managed: false, health: null, vnc_host: "desktop", vnc_port: 5900, ws_port: 6081 }]);
+  vi.mocked(getCurrentTask).mockImplementation(async () => ({ session_id: current.running ? "running" : null,
+    vm_id: "desktop", state: current.running ? "executing" : "idle", is_running: current.running,
+    subtasks: [], current_subtask_index: 0, action_count: 0, success_count: 0, failure_count: 0 }));
+  vi.mocked(getTaskHistory).mockResolvedValue([{ id: "old", vm_id: "desktop", instruction: "old completed task",
+    state: "completed", updated_at: 0, success: true, action_count: 0, success_count: 0, failure_count: 0 }]);
+  vi.mocked(getTaskDetail).mockResolvedValue({ ...detail("old"), instruction: "old completed task" });
 });
 
 test.each(["starting", "unhealthy"])("task input waits for VM readiness: %s", async (initialHealth) => {
@@ -60,8 +69,9 @@ test.each(["starting", "unhealthy"])("task input waits for VM readiness: %s", as
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 test("a pending VM creation is restored without changing the selected environment", async () => {
@@ -150,7 +160,7 @@ test("a delayed control refresh cannot introduce an old backend that was never o
     vm_id: "desktop", state: "completed", is_running: false, action_count: 0, success_count: 0,
     failure_count: 0, subtasks: [], current_subtask_index: 0 }));
   expect(screen.getByText("新しいサーバーの入力待ち")).toBeVisible();
-  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeDisabled();
 });
 
 test("retired backend events and snapshots cannot undo current state", async () => {
@@ -254,15 +264,18 @@ test("reconnecting to the same backend keeps the task-order fence", async () => 
   expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeEnabled();
 });
 
-test("an abandoned workspace cannot start fresh requests from a late initial status", async () => {
+test.each(["success", "failure"])("an abandoned workspace ignores a late initial status %s", async outcome => {
   const response = deferred<TaskStatus>();
   vi.mocked(getCurrentTask).mockReturnValueOnce(response.promise);
   const { unmount } = render(<Home />);
   await screen.findByRole("button", { name: /desktop.*起動中/ });
   unmount();
   const calls = vi.mocked(getVms).mock.calls.length;
-  await act(async () => response.resolve({ server_id: "late", session_id: null, state: "idle", is_running: false,
-    action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 }));
+  await act(async () => {
+    if (outcome === "failure") response.reject(new Error("状態を取得できません"));
+    else response.resolve({ server_id: "late", session_id: null, state: "idle", is_running: false,
+      action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 });
+  });
   expect(getVms).toHaveBeenCalledTimes(calls);
 });
 
@@ -275,11 +288,32 @@ test("an abandoned submission cannot start fresh requests from a new backend res
   await waitFor(() => expect(input).toBeEnabled());
   fireEvent.change(input, { target: { value: "報告書を保存する" } });
   fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await waitFor(() => expect(createTask).toHaveBeenCalledOnce());
   unmount();
-  const calls = vi.mocked(getVms).mock.calls.length;
-  await act(async () => response.resolve({ server_id: "late", session_id: "task", state: "executing", is_running: true,
+  const calls = [getVms, getTaskHistory, getTaskDetail].map(fn => vi.mocked(fn).mock.calls.length);
+  await act(async () => response.resolve({ server_id: "late", session_id: "task", vm_id: "desktop", state: "executing", is_running: true,
     action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 }));
-  expect(getVms).toHaveBeenCalledTimes(calls);
+  expect([getVms, getTaskHistory, getTaskDetail].map(fn => vi.mocked(fn).mock.calls.length)).toEqual(calls);
+  expect(createTask).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("textbox", { name: "指示" })).not.toBeInTheDocument();
+});
+
+test.each(["success", "failure"])("an abandoned history deletion ignores a late %s", async outcome => {
+  const removal = deferred<{ status: string }>();
+  vi.mocked(deleteTask).mockReturnValueOnce(removal.promise);
+  const workspace = render(<Home />);
+  fireEvent.click(await screen.findByRole("button", { name: "old completed taskを削除" }));
+  await waitFor(() => expect(deleteTask).toHaveBeenCalledExactlyOnceWith("old"));
+  workspace.unmount();
+  const calls = [getVms, getTaskHistory, getTaskDetail].map(fn => vi.mocked(fn).mock.calls.length);
+  await act(async () => {
+    if (outcome === "failure") removal.reject(new ApiError(503, "保存先を確認してください"));
+    else removal.resolve({ status: "deleted" });
+  });
+  expect([getVms, getTaskHistory, getTaskDetail].map(fn => vi.mocked(fn).mock.calls.length)).toEqual(calls);
+  expect(deleteTask).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByTitle("old completed task")).not.toBeInTheDocument();
 });
 
 test.each([false, true])("VM polling preserves archived history (environment initially present: %s)", async (present) => {
@@ -374,7 +408,7 @@ test("a stale control refreshes the live task without retrying the operation", a
   fireEvent.click(screen.getByRole("button", { name: "停止" }));
   expect(await screen.findByText("新しいタスクの入力を待っています")).toBeVisible();
   expect(controlTask).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeDisabled();
 });
 
 test("a live state without a task identity cannot send a control", async () => {
@@ -418,7 +452,7 @@ test.each([null, "running"])("a late control refresh for %s preserves a newer li
     vm_id: "desktop", state: id ? "completed" : "idle", is_running: false,
     action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 }));
   expect(screen.getByText("新しいタスクの入力待ち")).toBeVisible();
-  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeDisabled();
   expect(controlTask).toHaveBeenCalledTimes(1);
 });
 
@@ -495,18 +529,21 @@ test("finishing a history deletion does not clear a newer selection", async () =
 test("manual input survives reconnect and sends consent for only the current request", async () => {
   render(<Home />);
   await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  expect(screen.getByTestId("desktop-viewer")).toHaveAttribute("data-input-enabled", "false");
   act(() => ws.handler?.({ type: "snapshot", tasks: [{
     session_id: "running", vm_id: "desktop", state: "awaiting_user", is_running: true,
     action_count: 1, success_count: 1, failure_count: 0, subtasks: [], current_subtask_index: 0,
     manual_input: { id: "current-request", reason: "ログイン情報を入力してください" },
   }] }));
   expect(await screen.findByText("ログイン情報を入力してください")).toBeVisible();
+  expect(screen.getByTestId("desktop-viewer")).toHaveAttribute("data-input-enabled", "true");
   expect(screen.getByRole("textbox")).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
   expect(controlTask).toHaveBeenCalledWith("resume", "desktop", "running", "current-request");
   act(() => ws.handler?.({ type: "state", session_id: "running", vm_id: "desktop", state: "executing", revision: 9,
     action_count: 2, subtask_index: 0, subtask_count: 1, manual_input: null }));
   await waitFor(() => expect(screen.queryByText("ログイン情報を入力してください")).not.toBeInTheDocument());
+  expect(screen.getByTestId("desktop-viewer")).toHaveAttribute("data-input-enabled", "false");
   expect(screen.getByRole("button", { name: "再開" })).toBeDisabled();
 });
 
@@ -756,14 +793,15 @@ test("reauthentication preserves an unsent instruction while explicit logout cle
   expect(await screen.findByRole("textbox", { name: "指示" })).toHaveValue("");
 });
 
-test("a replay restores manual consent from its response even without a WebSocket event", async () => {
+test("a replay restores the manual request but waits for synchronization before screen sharing", async () => {
   current.running = false;
-  vi.mocked(createTask).mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({
+  const accepted: TaskStatus = {
     session_id: "accepted", session_order: 2, revision: 8, vm_id: "desktop",
     state: "awaiting_user", is_running: true, replayed: true,
     action_count: 1, success_count: 1, failure_count: 0, current_subtask_index: 0, subtasks: [],
     manual_input: { id: "consent-id", reason: "ログインしてください" },
-  });
+  };
+  vi.mocked(createTask).mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce(accepted);
   render(<Home />);
   const input = await screen.findByRole("textbox", { name: "指示" });
   await waitFor(() => expect(input).toBeEnabled());
@@ -773,6 +811,10 @@ test("a replay restores manual consent from its response even without a WebSocke
   expect(await screen.findByText("ログインしてください")).toBeVisible();
   expect(screen.getByText("受付済みのタスクを確認しました")).toBeVisible();
   expect(createTask).toHaveBeenNthCalledWith(2, "報告書を保存する", "desktop", false, vi.mocked(createTask).mock.calls[0][3]);
+  expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
+  expect(controlTask).not.toHaveBeenCalled();
+  act(() => ws.handler?.({ type: "snapshot", tasks: [accepted] }));
   fireEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
   expect(controlTask).toHaveBeenCalledWith("resume", "desktop", "accepted", "consent-id");
 });
@@ -803,4 +845,221 @@ test("history shows the task answer above the log", async () => {
   fireEvent.click(await screen.findByTitle("old completed task"));
   expect(await screen.findByRole("heading", { name: "実行結果" })).toBeVisible();
   expect(screen.getByText("発送待ち0件")).toBeVisible();
+});
+
+test("history restores action failures, bounded reasoning and incomplete cost usage as text", async () => {
+  current.running = false;
+  const longReason = "判断の記録".repeat(40);
+  vi.mocked(getTaskDetail).mockResolvedValueOnce({
+    ...detail("old"), instruction: "", state: "custom-state", updated_at: 1,
+    subtasks: [{ id: "s1", description: "保存する", expected_outcome: "保存される" }],
+    execution_usage: { requests: 4, input_tokens: 20, output_tokens: 10,
+      usage_complete: false, estimated_cost_usd: "0.001" },
+    decision_calls: 2, decision_escalations: 1,
+    actions: [
+      { action_type: "left_click", params: {}, description: "保存ボタン", success: true,
+        error_message: "", duration_ms: 1, at: 1, reasoning: "保存ボタンを確認", confidence: 0.9 },
+      { action_type: "type", params: {}, description: "<script>bad()</script>", success: false,
+        error_message: "入力が拒否されました", duration_ms: 1, at: 1, reasoning: longReason, confidence: 0.8 },
+      { action_type: "key_press", params: {}, description: "", success: true,
+        error_message: "", duration_ms: 1, at: 0, reasoning: "", confidence: 1 },
+    ],
+  });
+  const { container } = render(<Home />);
+  fireEvent.click(await screen.findByTitle("old completed task"));
+  expect(await screen.findByText("タスク: (指示なし)（custom-state）")).toBeVisible();
+  expect(screen.getByText(/決定2件・退避1件・使用量未確認・推定\$0.001/)).toBeVisible();
+  expect(screen.getByText("left_click 保存ボタン").closest(".entry")).toHaveClass("action");
+  expect(screen.getByText("type <script>bad()</script> [入力が拒否されました]").closest(".entry")).toHaveClass("error");
+  expect(container.querySelector("script")).toBeNull();
+  expect(screen.getByText("判断: 保存ボタンを確認")).toBeVisible();
+  expect(screen.getByText(`判断: ${longReason.slice(0, 140)}...`)).toBeVisible();
+  expect(screen.queryByText(`判断: ${longReason}`)).not.toBeInTheDocument();
+  expect(screen.getByText("保存する")).toBeVisible();
+});
+
+test.each([true, false])("live action and completion messages preserve success=%s in the visible log", async success => {
+  render(<Home />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  act(() => {
+    ws.handler?.({ type: "action", session_id: "running", vm_id: "desktop",
+      action_type: "left_click", description: success ? "保存した" : "", success });
+    ws.handler?.({ type: "error", session_id: "running", vm_id: "desktop", message: "接続を確認してください" });
+    ws.handler?.({ type: "complete", session_id: "running", vm_id: "desktop", success });
+  });
+  expect(screen.getByText(success ? "left_click 保存した" : "left_click").closest(".entry")).toHaveClass(success ? "action" : "error");
+  expect(screen.getByText("接続を確認してください").closest(".entry")).toHaveClass("error");
+  expect(screen.getByText(success ? "タスク完了" : "タスク失敗").closest(".entry")).toHaveClass(success ? "complete" : "error");
+  expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeEnabled();
+});
+
+test("history lookup failure releases the selected deleted record and retains live controls", async () => {
+  render(<Home />);
+  const item = await screen.findByTitle("old completed task");
+  fireEvent.click(item);
+  await screen.findByText(/タスク: old completed task/);
+  vi.mocked(getTaskDetail).mockRejectedValueOnce(new ApiError(404, "見つかりません"));
+  fireEvent.click(item);
+  expect(await screen.findByText("タスク詳細の取得に失敗")).toBeVisible();
+  expect(screen.queryByText(/タスク: old completed task/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+});
+
+test("deleting an already missing history record completes locally and releases its archived view", async () => {
+  vi.mocked(deleteTask).mockRejectedValueOnce(new ApiError(404, "履歴はすでに削除されています"));
+  render(<Home />);
+  fireEvent.click(await screen.findByTitle("old completed task"));
+  await screen.findByText(/タスク: old completed task/);
+  fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
+  await waitFor(() => expect(screen.queryByTitle("old completed task")).not.toBeInTheDocument());
+  expect(screen.queryByText(/タスク: old completed task/)).not.toBeInTheDocument();
+  expect(deleteTask).toHaveBeenCalledExactlyOnceWith("old");
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("a history deletion failure remains visible while reading that record and can be retried", async () => {
+  vi.mocked(deleteTask).mockRejectedValueOnce(new ApiError(503, "保存先を確認してください"))
+    .mockResolvedValueOnce({ status: "deleted" });
+  render(<Home />);
+  fireEvent.click(await screen.findByTitle("old completed task"));
+  await screen.findByText(/タスク: old completed task/);
+  fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("保存先を確認してください");
+  expect(screen.getByTitle("old completed task")).toBeVisible();
+  expect(screen.getByText(/タスク: old completed task/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
+  await waitFor(() => expect(screen.queryByTitle("old completed task")).not.toBeInTheDocument());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(deleteTask).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+});
+
+test.each([undefined, 4])("deleting the running task releases its controls before completion (session order: %s)", async order => {
+  vi.mocked(deleteTask).mockResolvedValueOnce({ status: "deleted" });
+  vi.mocked(getCurrentTask).mockResolvedValue({ session_id: "old", session_order: order, vm_id: "desktop",
+    state: "executing", is_running: true, action_count: 0, success_count: 0, failure_count: 0,
+    subtasks: [], current_subtask_index: 0 });
+  render(<Home />);
+  const remove = await screen.findByRole("button", { name: "old completed taskを削除" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeDisabled();
+  fireEvent.click(remove);
+  await waitFor(() => expect(screen.queryByTitle("old completed task")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeEnabled();
+  act(() => ws.handler?.({ type: "state", session_id: "old", session_order: order, vm_id: "desktop",
+    state: "executing", action_count: 0, subtask_index: 0, subtask_count: 0 }));
+  expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeEnabled();
+});
+
+test("an initial response from an unseen retired backend cannot replace a newer snapshot", async () => {
+  const initial = deferred<TaskStatus>();
+  vi.mocked(getCurrentTask).mockReturnValueOnce(initial.promise);
+  render(<Home />);
+  await waitFor(() => expect(getCurrentTask).toHaveBeenCalledOnce());
+  act(() => ws.handler?.({ type: "snapshot", server_id: "current-server", tasks: [{
+    session_id: "current-task", vm_id: "desktop", state: "executing", is_running: true,
+    action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0,
+  }] }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  const details = vi.mocked(getTaskDetail).mock.calls.length;
+  await act(async () => initial.resolve({ server_id: "retired-server", session_id: "old", vm_id: "desktop",
+    state: "completed", is_running: false, action_count: 0, success_count: 0, failure_count: 0,
+    subtasks: [], current_subtask_index: 0 }));
+  expect(getTaskDetail).toHaveBeenCalledTimes(details);
+  expect(screen.queryByText(/タスク: old completed task/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "停止" }));
+  await waitFor(() => expect(controlTask).toHaveBeenCalledExactlyOnceWith("stop", "desktop", "current-task", undefined));
+});
+
+test("an unbound legacy snapshot task cannot replace the selected environment's task", async () => {
+  current.running = false;
+  render(<Home />);
+  await screen.findByRole("button", { name: /desktop.*起動中/ });
+  act(() => ws.handler?.({ type: "snapshot", tasks: [{
+    session_id: "legacy-unbound", vm_id: null, state: "executing", is_running: true,
+    action_count: 0, success_count: 0, failure_count: 0,
+    subtasks: [{ id: "legacy", description: "環境不明の旧タスク" }], current_subtask_index: 0,
+  }, {
+    session_id: "bound-task", vm_id: "desktop", state: "executing", is_running: true,
+    action_count: 0, success_count: 0, failure_count: 0,
+    subtasks: [{ id: "bound", description: "選択した環境のタスク" }], current_subtask_index: 0,
+  }] }));
+  expect(screen.getByText("選択した環境のタスク")).toBeVisible();
+  expect(screen.queryByText("環境不明の旧タスク")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "停止" }));
+  await waitFor(() => expect(controlTask).toHaveBeenCalledExactlyOnceWith("stop", "desktop", "bound-task", undefined));
+});
+
+test("a legacy snapshot before a replay acknowledgement reconciles a worker that already stopped", async () => {
+  current.running = false;
+  const acknowledgement = deferred<TaskStatus>();
+  vi.mocked(createTask).mockReturnValueOnce(acknowledgement.promise);
+  render(<Home />);
+  const input = await screen.findByRole("textbox", { name: "指示" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.change(input, { target: { value: "報告を保存する" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await waitFor(() => expect(createTask).toHaveBeenCalledOnce());
+  const accepted: TaskStatus = { session_id: "accepted", vm_id: "desktop", state: "executing",
+    is_running: true, action_count: 0, success_count: 0, failure_count: 0,
+    subtasks: [], current_subtask_index: 0 };
+  act(() => ws.handler?.({ type: "snapshot", tasks: [accepted] }));
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  await act(async () => acknowledgement.resolve({ ...accepted, is_running: false, replayed: true }));
+  await waitFor(() => expect(input).toHaveValue(""));
+  expect(input).toBeEnabled();
+  expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  expect(screen.getByText("受付済みのタスクを確認しました")).toBeVisible();
+  expect(controlTask).not.toHaveBeenCalled();
+});
+
+test("a failed control refresh is visible without pretending that the task has stopped", async () => {
+  render(<Home />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+  vi.mocked(controlTask).mockRejectedValueOnce(new ApiError(409, "タスクが切り替わりました"));
+  vi.mocked(getCurrentTask).mockRejectedValueOnce(new Error("offline"));
+  fireEvent.click(screen.getByRole("button", { name: "停止" }));
+  expect(await screen.findByText("最新の状態を取得できません")).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "指示" })).toBeDisabled();
+  expect(controlTask).toHaveBeenCalledExactlyOnceWith("stop", "desktop", "running", undefined);
+});
+
+test("a completed first snapshot restores history and a later initial HTTP result cannot replace it", async () => {
+  const initial = deferred<TaskStatus>();
+  vi.mocked(getCurrentTask).mockReturnValueOnce(initial.promise);
+  render(<Home />);
+  await screen.findByRole("button", { name: /desktop.*起動中/ });
+  act(() => ws.handler?.({ type: "snapshot", server_id: "current", through_session_order: 1, tasks: [{
+    session_id: "old", vm_id: "desktop", state: "completed", is_running: false, session_order: 1,
+    action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0,
+  }] }));
+  await screen.findByText("タスク: old completed task（完了）");
+  await act(async () => initial.resolve({ session_id: null, server_id: "current", state: "idle", is_running: false,
+    action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 }));
+  expect(screen.getByText("タスク: old completed task（完了）")).toBeVisible();
+  expect(screen.getByTitle("old completed task").closest(".history-item")).toHaveClass("selected");
+});
+
+test.each([false, true])("the first snapshot chooses the latest task independently of legacy record order: %s", async reverse => {
+  vi.mocked(getCurrentTask).mockReturnValueOnce(new Promise(() => {}));
+  const first = { id: "desktop", name: "desktop", status: "running", kind: "container", managed: false,
+    health: "healthy", vnc_host: "desktop", vnc_port: 5900, ws_port: 0 };
+  vi.mocked(getVms).mockResolvedValue([first, { ...first, id: "second", name: "second" }]);
+  render(<Home />);
+  await screen.findByText("second", { selector: ".vm-tab-name" });
+  const legacy: TaskStatus = { session_id: "legacy", vm_id: "desktop", state: "completed", is_running: false,
+    action_count: 0, success_count: 0, failure_count: 0, subtasks: [], current_subtask_index: 0 };
+  const latest: TaskStatus = { ...legacy, session_id: "latest", session_order: 8, vm_id: "second",
+    state: "executing", is_running: true };
+  act(() => ws.handler?.({ type: "snapshot", server_id: "current", through_session_order: 8,
+    tasks: reverse ? [latest, legacy] : [legacy, latest] }));
+  await waitFor(() => expect(screen.getByText("second", { selector: ".vm-tab-name" }).closest(".vm-tab")).toHaveClass("selected"));
+  expect(getTaskDetail).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "停止" }));
+  await waitFor(() => expect(controlTask).toHaveBeenCalledExactlyOnceWith("stop", "second", "latest", undefined));
 });

@@ -3,10 +3,12 @@
 import { useEffect, useRef } from "react";
 import type RFB from "@novnc/novnc";
 import { getVncWsUrl } from "@/lib/api";
+import { trackVncInput } from "@/lib/vnc-input";
 
 interface Props {
   onConnectionChange?: (connected: boolean, resolution?: string) => void;
   wsUrl?: string;
+  allowInput?: boolean;
 }
 
 let rfbModule: Promise<typeof import("@novnc/novnc")> | undefined;
@@ -17,10 +19,21 @@ function loadRfb() {
   });
 }
 
-export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
+export default function VncViewer({ onConnectionChange, wsUrl, allowInput = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const connectionRef = useRef<RFB | null>(null);
+  const inputRef = useRef<ReturnType<typeof trackVncInput> | null>(null);
+  const allowInputRef = useRef(allowInput);
+  allowInputRef.current = allowInput;
   const onChangeRef = useRef(onConnectionChange);
   onChangeRef.current = onConnectionChange;
+
+  useEffect(() => {
+    if (connectionRef.current) {
+      if (!allowInput) inputRef.current?.release();
+      connectionRef.current.viewOnly = !allowInput;
+    }
+  }, [allowInput]);
 
   useEffect(() => {
     let disposed = false;
@@ -41,9 +54,11 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
           wsProtocols: ["binary"],
         });
         rfb = connection;
-        connection.viewOnly = true;
+        connectionRef.current = connection;
+        connection.viewOnly = !allowInputRef.current;
         connection.scaleViewport = true;
         connection.resizeSession = false;
+        inputRef.current = trackVncInput(target, connection);
 
         connection.addEventListener("connect", () => {
           if (disposed || rfb !== connection) return;
@@ -55,7 +70,10 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
         });
         connection.addEventListener("disconnect", () => {
           if (disposed || rfb !== connection) return;
+          inputRef.current?.dispose();
+          inputRef.current = null;
           rfb = null;
+          connectionRef.current = null;
           onChangeRef.current?.(false);
           // A server shutdown may be reported as a clean disconnect too.
           timer = setTimeout(connect, 3000);
@@ -72,7 +90,10 @@ export default function VncViewer({ onConnectionChange, wsUrl }: Props) {
     return () => {
       disposed = true;
       clearTimeout(timer);
+      inputRef.current?.dispose();
+      inputRef.current = null;
       rfb?.disconnect();
+      connectionRef.current = null;
       rfb = null;
     };
   }, [wsUrl]);

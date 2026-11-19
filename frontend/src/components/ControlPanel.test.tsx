@@ -20,6 +20,21 @@ describe("ControlPanel", () => {
     expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
   });
 
+  it("keeps stop available but suspends manual instructions and screen sharing until the request is synchronized", async () => {
+    const onControl = vi.fn();
+    const props = { onControl, state: "awaiting_user", manualInput: { id: "request-1", reason: "接続先を確認してください" } };
+    const { rerender } = render(<ControlPanel {...props} manualInputReady={false} />);
+    expect(screen.getByText(props.manualInput.reason)).toBeVisible();
+    expect(screen.queryByText(/秘密情報を画面から隠して/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "画面を送信して再開" }));
+    expect(onControl).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(onControl).toHaveBeenCalledExactlyOnceWith("stop");
+    rerender(<ControlPanel {...props} manualInputReady />);
+    expect(screen.getByText(/秘密情報を画面から隠して/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "画面を送信して再開" })).toBeEnabled();
+  });
+
   it("disables pause and resume when idle", () => {
     render(<ControlPanel onControl={vi.fn()} state="idle" />);
 

@@ -16,6 +16,7 @@ export default function AuthGate({ children, onLogout }: {
   const mounted = useRef(true);
 
   useEffect(() => {
+    window.dispatchEvent(new Event("ai-desktop-agent-ready"));
     mounted.current = true;
     let disposed = false;
     const controller = new AbortController();

@@ -10,6 +10,13 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
     maxWorkers: 2,
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**", "src/**/*.d.ts"],
+      reporter: ["text", "json", "json-summary", "lcov"],
+      thresholds: { lines: 100, functions: 100 },
+    },
   },
   resolve: {
     alias: {

@@ -15,7 +15,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 describe("VMControls", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.mocked(api.getVmStatus).mockResolvedValue({
       running: true,
       status: "running",
@@ -214,5 +214,42 @@ describe("VMControls", () => {
     await act(async () => { resolveRestart(healthy); resolvePoll(healthy); });
     expect(screen.getByTestId("vm-status")).toHaveTextContent("再起動中");
     expect(screen.getByRole("button", { name: "VM再起動" })).toBeDisabled();
+  });
+
+  it.each([new Error("Docker unavailable"), "Docker unavailable"])("reports restart request failures and allows retry: %s", async error => {
+    vi.mocked(api.restartVm).mockRejectedValueOnce(error);
+    const log = vi.fn();
+    render(<VMControls onLog={log} pollIntervalMs={60000} />);
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
+    await waitFor(() => expect(log).toHaveBeenCalledWith("VM再起動失敗: Docker unavailable", "error"));
+    expect(screen.getByRole("button", { name: "VM再起動" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
+    await waitFor(() => expect(api.restartVm).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(log).toHaveBeenCalledWith("VM再起動指示OK: vm-1", "state"));
+  });
+
+  it.each(["unmount", "deadline"])("a late restart failure cannot change the result after %s", async retiredBy => {
+    let reject!: (error: Error) => void;
+    vi.mocked(api.restartVm).mockReturnValueOnce(new Promise((_, fail) => { reject = fail; }));
+    const log = vi.fn();
+    const { unmount } = render(<VMControls onLog={log} pollIntervalMs={60000} restartTimeoutMs={30} />);
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
+    if (retiredBy === "unmount") unmount();
+    else await waitFor(() => expect(log).toHaveBeenCalledWith(expect.stringContaining("完了を確認できません"), "error"));
+    const count = log.mock.calls.length;
+    await act(async () => reject(new Error("late failure")));
+    expect(log).toHaveBeenCalledTimes(count);
+  });
+
+  it("records the returned status when the restarted VM has no name", async () => {
+    vi.mocked(api.restartVm).mockResolvedValueOnce({ running: true, status: "restarting", health: null, name: null });
+    const log = vi.fn();
+    render(<VMControls onLog={log} pollIntervalMs={60000} />);
+    await userEvent.click(screen.getByRole("button", { name: "VM再起動" }));
+    await userEvent.click(screen.getByRole("button", { name: "再起動する" }));
+    await waitFor(() => expect(log).toHaveBeenCalledWith("VM再起動指示OK: restarting", "state"));
   });
 });

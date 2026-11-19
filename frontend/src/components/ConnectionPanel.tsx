@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 interface Props {
+  statusConnected: boolean;
   vncConnected: boolean;
   vmResolution?: string;
 }
@@ -10,27 +11,39 @@ interface Props {
 function useBackendHealth(): boolean {
   const [alive, setAlive] = useState(false);
   useEffect(() => {
+    let disposed = false;
+    let request: AbortController | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const check = async () => {
+      const controller = new AbortController();
+      request = controller;
+      timeout = setTimeout(() => controller.abort(), 3000);
       try {
-        const BACKEND_URL =
-          typeof window !== "undefined"
-            ? `${window.location.protocol}//${window.location.hostname}:8081`
-            : "http://localhost:8081";
-        const resp = await fetch(`${BACKEND_URL}/health`);
-        setAlive(resp.ok);
+        const backendUrl = `${window.location.protocol}//${window.location.hostname}:8081`;
+        const resp = await fetch(`${backendUrl}/health`, { signal: controller.signal, cache: "no-store" });
+        if (!disposed) setAlive(resp.ok);
       } catch {
-        setAlive(false);
+        if (!disposed) setAlive(false);
+      } finally {
+        clearTimeout(timeout);
+        if (!disposed) retry = setTimeout(check, 5000);
       }
     };
-    check();
-    const id = setInterval(check, 5000);
-    return () => clearInterval(id);
+    void check();
+    return () => {
+      disposed = true;
+      clearTimeout(retry);
+      clearTimeout(timeout);
+      request?.abort();
+    };
   }, []);
   return alive;
 }
 
-export default function ConnectionPanel({ vncConnected, vmResolution }: Props) {
+export default function ConnectionPanel({ statusConnected, vncConnected, vmResolution }: Props) {
   const backendAlive = useBackendHealth();
+  const connected = backendAlive && statusConnected;
 
   const vmLabel = !vncConnected
     ? "未接続"
@@ -43,8 +56,8 @@ export default function ConnectionPanel({ vncConnected, vmResolution }: Props) {
       <h2>接続</h2>
       <div className="conn-list">
         <div className="sb-item">
-          <span className={`sb-dot ${backendAlive ? "green" : "red"}`} />
-          <span>バックエンド {backendAlive ? "接続中" : "未接続"}</span>
+          <span className={`sb-dot ${connected ? "green" : "red"}`} />
+          <span>バックエンド {connected ? "接続中" : "未接続"}</span>
         </div>
         <div className="sb-item">
           <span className={`sb-dot ${vncConnected ? "green" : "red"}`} />

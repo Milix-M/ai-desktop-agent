@@ -9,10 +9,12 @@ const STORAGE_KEY = "sidebar-width";
 
 function loadWidth(): number {
   if (typeof window === "undefined") return DEFAULT_WIDTH;
-  const v = Number(window.localStorage.getItem(STORAGE_KEY));
-  if (Number.isFinite(v) && v >= SIDEBAR_MIN_WIDTH && v <= SIDEBAR_MAX_WIDTH) {
-    return v;
-  }
+  try {
+    const v = Number(window.localStorage.getItem(STORAGE_KEY));
+    if (Number.isFinite(v) && v >= SIDEBAR_MIN_WIDTH && v <= SIDEBAR_MAX_WIDTH) {
+      return v;
+    }
+  } catch { /* Use the default width when browser storage is blocked. */ }
   return DEFAULT_WIDTH;
 }
 
