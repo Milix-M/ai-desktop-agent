@@ -2,16 +2,44 @@
 
 import fcntl
 import json
+import math
 import os
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TextIO
+
+from ai_desktop_agent.validation import validate_text
 
 
 class StorageError(RuntimeError):
     """A durable write or a trustworthy metadata read could not complete."""
+
+
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate keys and values that cannot survive a durable JSON write."""
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("保存データのJSONに重複キーがあります")
+        validate_text(key, "保存データのキー")
+        _check_json_value(item)
+        value[key] = item
+    return value
+
+
+def _check_json_value(value: object) -> None:
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            validate_text(item, "保存データの値")
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ValueError("保存データの数値は有限である必要があります")
+        elif isinstance(item, list):
+            pending.extend(item)
+        # Nested objects have already passed this object_pairs_hook during decoding.
 
 
 class DeletionError(StorageError):
@@ -69,9 +97,15 @@ def _atomic_write(path: Path, write: Callable[[TextIO], object]) -> None:
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        with ExitStack() as stack:
+            descriptor, name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+            )
+            stack.callback(os.close, descriptor)
+            temporary = Path(name)
+            output = stack.enter_context(
+                os.fdopen(descriptor, "w", encoding="utf-8", closefd=False)
+            )
             write(output)
             output.flush()
             os.fsync(output.fileno())
@@ -93,13 +127,14 @@ def _atomic_write(path: Path, write: Callable[[TextIO], object]) -> None:
 
 @contextmanager
 def metadata_lock(path: Path) -> Iterator[None]:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(path.with_suffix(path.suffix + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError as error:
-        raise StorageError(f"保存先をロックできません: {path}") from error
-    with os.fdopen(descriptor, "a") as lock:
+    with ExitStack() as stack:
         try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            descriptor = os.open(
+                path.with_suffix(path.suffix + ".lock"), os.O_CREAT | os.O_RDWR, 0o600
+            )
+            stack.callback(os.close, descriptor)
+            lock = stack.enter_context(os.fdopen(descriptor, "a", closefd=False))
             fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError as error:
             raise StorageError(f"保存先をロックできません: {path}") from error

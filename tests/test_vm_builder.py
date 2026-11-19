@@ -126,8 +126,10 @@ else:raise RuntimeError('unexpected test command: '+name)
     }
 
     def run(**extra):
+        # Many Python command stubs start under subprocess coverage. Allow CPU
+        # contention without turning artifact/rollback checks into a speed test.
         result = subprocess.run(
-            ["bash", str(script)], env={**env, **extra}, capture_output=True, text=True, timeout=10
+            ["bash", str(script)], env={**env, **extra}, capture_output=True, text=True, timeout=30
         )
         events = (
             [json.loads(line) for line in (tmp_path / "events").read_text().splitlines()]

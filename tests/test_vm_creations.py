@@ -211,7 +211,8 @@ async def test_close_finishes_active_creation_and_stops_unstarted_jobs(managed, 
     service, pool, client = managed
     entered, release = threading.Event(), threading.Event()
 
-    def copy(vm_id):
+    def copy(vm_id, *, image=None):
+        assert image is not None
         entered.set()
         assert release.wait(5)
         return "/host/vm/overlays/" + vm_id + "/disk.qcow2"
@@ -236,7 +237,8 @@ async def test_queue_limit_counts_only_new_receipts(managed, monkeypatch):
     service, pool, _ = managed
     entered, release = threading.Event(), threading.Event()
 
-    def copy(vm_id):
+    def copy(vm_id, *, image=None):
+        assert image is not None
         entered.set()
         assert release.wait(5)
         return "/host/vm/overlays/" + vm_id + "/disk.qcow2"
@@ -311,7 +313,8 @@ async def test_cancelled_shutdown_still_drains_the_worker_and_releases_ownership
     service, pool, client = managed
     entered, release = threading.Event(), threading.Event()
 
-    def copy(vm_id):
+    def copy(vm_id, *, image=None):
+        assert image is not None
         entered.set()
         assert release.wait(5)
         return "/host/vm/overlays/" + vm_id + "/disk.qcow2"

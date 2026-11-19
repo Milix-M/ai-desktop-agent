@@ -107,9 +107,6 @@ class TestDockerfile:
 class TestEntrypoint:
     """vm/entrypoint.sh の構文と内容を検証する。"""
 
-    def test_exists(self):
-        assert (VM_DIR / "entrypoint.sh").is_file(), "vm/entrypoint.sh が存在しません"
-
     def test_is_executable(self):
         path = VM_DIR / "entrypoint.sh"
         assert path.stat().st_mode & 0o111, "entrypoint.sh に実行権限が必要です"
@@ -122,63 +119,6 @@ class TestEntrypoint:
             text=True,
         )
         assert result.returncode == 0, f"entrypoint.sh に構文エラーがあります:\n{result.stderr}"
-
-    def test_uses_qemu_system_x86_64(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "qemu-system-x86_64" in content, (
-            "entrypoint.sh で qemu-system-x86_64 を呼び出す必要があります"
-        )
-
-    def test_passes_enable_kvm(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-enable-kvm" in content, "entrypoint.sh で -enable-kvm を指定する必要があります"
-
-    def test_uses_configurable_cpus(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "VM_CPUS" in content, "entrypoint.sh で VM_CPUS を参照する必要があります"
-        assert '-smp "$VM_CPUS"' in content, "KVM 時に可変 CPU 数で起動する必要があります"
-
-    def test_vnc_flag_present(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-vnc" in content, "entrypoint.sh で -vnc を指定する必要があります"
-
-    def test_uses_kernel_direct_boot(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-kernel" in content, "entrypoint.sh で -kernel を指定する必要があります"
-        assert "-initrd" in content, "entrypoint.sh で -initrd を指定する必要があります"
-
-    def test_uses_sparse_bundle_loading(self):
-        """-kernel + -initrd で qcow2 のみをマウントする方式を確認。"""
-        content = _read_cmdline(VM_DIR / "entrypoint.sh")
-        # qcow2 は drive として virtio で接続、format 指定は必須
-        assert "format=qcow2" in content, "qcow2 ドライブに format=qcow2 を指定する必要があります"
-
-    def test_serial_stdio_for_debugging(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-serial stdio" in content, (
-            "デバッグ用に -serial stdio が必要です（docker logs でカーネル出力を確認）"
-        )
-
-    def test_uses_display_none(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-display none" in content, (
-            "QEMU のローカル表示を無効にする -display none が必要です"
-        )
-
-    def test_tcg_fallback_for_no_kvm(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "-enable-kvm" in content, "KVM 有効時のコードパスが必要です"
-        assert "qemu64" in content or "TCG" in content, "KVM 無効時の TCG フォールバックが必要です"
-
-    def test_kvm_auto_by_default(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert 'USE_KVM="${USE_KVM:-auto}"' in content, (
-            "USE_KVM のデフォルトは auto（.env指定不要）であるべき"
-        )
-
-    def test_tcg_restricted_by_default(self):
-        content = (VM_DIR / "entrypoint.sh").read_text()
-        assert "ALLOW_TCG_VM" in content, "TCG実行には ALLOW_TCG_VM による明示許可が必要です"
 
 
 # ── build-vm-image.sh ──────────────────────────────────

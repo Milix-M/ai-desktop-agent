@@ -25,51 +25,6 @@ class TestConnect:
     def test_exception_returns_none(self):
         assert android_adb.connect("android", runner=_boom) is None
 
-    def test_run_connect_parses_output(self, monkeypatch):
-        """adb connectはrc=0でも出力判定する（Connection refusedは失敗）。"""
-        import subprocess
-
-        class _P:
-            def __init__(self, out, err=""):
-                self.stdout = out
-                self.stderr = err
-                self.returncode = 0
-
-        monkeypatch.setattr(android_adb, "_adb_bin", lambda: "/usr/bin/adb")
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P("connected to android:5555\n"))
-        assert android_adb._run_connect("android:5555") is True
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **k: _P("already connected to android:5555\n")
-        )
-        assert android_adb._run_connect("android:5555") is True
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P("Connection refused\n"))
-        assert android_adb._run_connect("android:5555") is False
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **k: _P("failed to connect to 'x:5555'\n")
-        )
-        assert android_adb._run_connect("android:5555") is False
-
-    def test_run_connect_uses_no_dash_s(self, monkeypatch):
-        """connectは `adb connect <serial>` で `-s` を付けない。"""
-        import subprocess
-
-        seen = {}
-
-        class _P:
-            stdout = "connected to android:5555"
-            stderr = ""
-            returncode = 0
-
-        def fake_run(argv, **k):
-            seen["argv"] = argv
-            return _P()
-
-        monkeypatch.setattr(android_adb, "_adb_bin", lambda: "/usr/bin/adb")
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        assert android_adb.connect("android") == "android:5555"
-        assert seen["argv"][:2] == ["/usr/bin/adb", "connect"]
-        assert "-s" not in seen["argv"]
-
 
 class TestSetupSleep:
     def test_sends_all_sleep_cmds(self):

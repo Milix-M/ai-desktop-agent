@@ -54,6 +54,29 @@ class TestTaskStore:
         ids = [r.id for r in store.list()]
         assert ids == ["new", "old"]
 
+    def test_unbound_history_remains_browsable_without_becoming_current_vm_state(self, tmp_path):
+        store = TaskStore(tmp_path)
+        for task_id, vm_id, order in [
+            ("older", "desktop", 1),
+            ("another-vm", "vm", 2),
+            ("current", "desktop", 3),
+            ("legacy-unbound", None, 4),
+        ]:
+            record = _record(task_id)
+            record.vm_id = vm_id
+            record.session_order = order
+            store.save(record)
+        reopened = TaskStore(tmp_path)
+        expected = ["legacy-unbound", "current", "another-vm", "older"]
+        assert [record.id for record in reopened.list(limit=None)] == expected
+        assert [record.id for record in reopened.list(limit=2)] == expected[:2]
+        assert [item["id"] for item in reopened.summaries()] == expected
+        assert [(item["vm_id"], item["id"]) for item in reopened.latest_per_vm()] == [
+            ("desktop", "current"),
+            ("vm", "another-vm"),
+        ]
+        assert reopened.load("legacy-unbound").actions[0].params == {"x": 1, "y": 2}
+
     def test_mark_interrupted(self, store):
         rec = _record("run1")
         rec.state = "executing"

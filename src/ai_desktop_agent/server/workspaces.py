@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -19,13 +20,14 @@ from docker.types import Mount
 
 from ai_desktop_agent.server.docker_discovery import container_labels, refresh_existing
 from ai_desktop_agent.server.networks import LABEL_PROJECT, LABEL_VM_ID
-from ai_desktop_agent.server.persistence import StorageError, atomic_json
+from ai_desktop_agent.server.persistence import StorageError, atomic_json, unique_json_object
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
 
 HOME = "/home/agent"
 LABEL_HOME = "ai-desktop-agent.workspace"
 LABEL_SEED = "ai-desktop-agent.seed-source"
 LABEL_HELPER = "ai-desktop-agent.workspace-helper"
+IDENTIFIER_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
 
 
 def workspace_operation(function):
@@ -44,7 +46,7 @@ def workspace_operation(function):
 
 
 def identifier(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
+    if not re.fullmatch(IDENTIFIER_PATTERN, value):
         raise ValueError("保存先の識別子が不正です")
     return value
 
@@ -193,10 +195,32 @@ class WorkspaceVolumes:
                 "ai-desktop-agent.helper-owner": socket.gethostname(),
             },
         )
+        failure = None
         try:
             yield helper
+        except BaseException as error:
+            failure = error
+            raise
         finally:
-            helper.remove(force=True)
+            try:
+                try:
+                    helper.remove(force=True)
+                except Exception:
+                    try:
+                        self.client.containers.get(helper.id)
+                    except NotFound:
+                        pass
+                    else:
+                        raise
+            except BaseException as error:
+                error.add_note(
+                    f"補助コンテナの削除を確認できません: {helper.id} (保存先: {volume.name})"
+                )
+                if failure is not None:
+                    raise BaseExceptionGroup(
+                        "ホーム操作と補助コンテナの削除に失敗しました", [failure, error]
+                    ) from None
+                raise
 
 
 class _Chunks(io.RawIOBase):
@@ -361,10 +385,36 @@ class HomeBackups:
             raise ValueError("バックアップの識別子が不正です")
         path = self.root / f"{name}.tar"
         try:
-            metadata = json.loads(path.with_suffix(".json").read_text())
-            if metadata.get("format") != 1 or metadata.get("project") != self.project:
+            metadata = json.loads(
+                path.with_suffix(".json").read_text(), object_pairs_hook=unique_json_object
+            )
+            if (
+                not isinstance(metadata, dict)
+                or type(metadata.get("format")) is not int
+                or metadata["format"] != 1
+                or metadata.get("project") != self.project
+            ):
                 raise StorageError("バックアップの所属または形式が一致しません")
-            identifier(metadata["vm_id"])
+            vm_id = identifier(metadata["vm_id"])
+            if name.rsplit("-", 1)[0] != vm_id:
+                raise StorageError("バックアップの識別子と対象環境が一致しません")
+            if not isinstance(metadata.get("source_id"), str) or not metadata["source_id"]:
+                raise StorageError("バックアップ元の識別子が不正です")
+            for field, limit in (("bytes", self.max_bytes), ("entries", self.max_files)):
+                count = metadata[field]
+                if type(count) is not int or not 0 < count <= limit:
+                    raise StorageError("バックアップの容量または項目数が不正です")
+            if not isinstance(metadata.get("sha256"), str) or not re.fullmatch(
+                r"[0-9a-f]{64}", metadata["sha256"]
+            ):
+                raise StorageError("バックアップのハッシュが不正です")
+            created_at = metadata["created_at"]
+            if (
+                type(created_at) not in (int, float)
+                or not math.isfinite(created_at)
+                or created_at < 0
+            ):
+                raise StorageError("バックアップの保存時刻が不正です")
             digest, size = hashlib.sha256(), 0
             with path.open("rb") as source:
                 while chunk := source.read(64 * 1024):
@@ -374,8 +424,19 @@ class HomeBackups:
                     digest.update(chunk)
             if size != metadata["bytes"] or digest.hexdigest() != metadata["sha256"]:
                 raise StorageError("バックアップが破損しています。元の環境を削除しないでください")
-            return path, metadata, self.manifest(path)
-        except (OSError, ValueError, KeyError, TypeError, tarfile.TarError) as error:
+            manifest = self.manifest(path)
+            if len(manifest) != metadata["entries"]:
+                raise StorageError("バックアップの項目数が一致しません")
+            return path, metadata, manifest
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            OverflowError,
+            RecursionError,
+            tarfile.TarError,
+        ) as error:
             raise StorageError("バックアップを検証できません") from error
 
     def seed(self, volumes: WorkspaceVolumes, volume, name):

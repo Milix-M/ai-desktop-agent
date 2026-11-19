@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from ai_desktop_agent.server.adb_process import AdbRunner
-from ai_desktop_agent.server.persistence import StorageError, atomic_json, metadata_lock
+from ai_desktop_agent.server.persistence import (
+    StorageError,
+    atomic_json,
+    metadata_lock,
+    unique_json_object,
+)
+from ai_desktop_agent.server.workspaces import identifier
+from ai_desktop_agent.validation import validate_text
 from ai_desktop_agent.vm.async_io import run_display_call, vm_call
 
 logger = logging.getLogger(__name__)
@@ -76,6 +83,7 @@ class AndroidProvisioner:
         adb_port: int = ADB_PORT,
     ) -> None:
         self._pool = pool
+        self._owns_pool = pool is None
         base = os.environ.get("DATA_DIR", "./data")
         self._state_file = Path(state_file or Path(base) / "android-provision.json")
         self._is_running_check = is_running_check
@@ -97,7 +105,13 @@ class AndroidProvisioner:
         async with self._lifecycle_lock:
             if os.environ.get("ANDROID_PROVISION", "1").lower() in ("0", "false", "no", ""):
                 return
-            if not math.isfinite(interval) or interval <= 0:
+            try:
+                valid_interval = (
+                    type(interval) in (int, float) and math.isfinite(interval) and interval > 0
+                )
+            except OverflowError:
+                valid_interval = False
+            if not valid_interval:
                 raise ValueError("provisioning interval must be finite and positive")
             if self._running:
                 return
@@ -130,6 +144,18 @@ class AndroidProvisioner:
             for attempt in attempts:
                 try:
                     await run_display_call(attempt.done.wait)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if self._owns_pool and self._pool is not None:
+
+                def close_pool():
+                    # An explicit ensure() may still be discovering targets before registration.
+                    with self._ensure_lock:
+                        self._pool.close()
+                        self._pool = None
+
+                try:
+                    await run_display_call(close_pool)
                 except asyncio.CancelledError:
                     cancelled = True
             if cancelled:
@@ -238,12 +264,16 @@ class AndroidProvisioner:
                         # https://www.kernel.org/doc/html/v7.0/filesystems/ext4/super.html
                         file.seek(1024)
                         block = file.read(0x78)
-                    if block[0x38:0x3A] == b"\x53\xef" and len(block) == 0x78:
-                        volume_uuid = block[0x68:0x78]
-                        if any(volume_uuid):
-                            return "ext4:" + str(uuid.UUID(bytes=volume_uuid))
-                except OSError:
+                except FileNotFoundError:
                     continue
+                except OSError as error:
+                    raise StorageError("Androidの保存領域を読み込めません") from error
+                if len(block) != 0x78 or block[0x38:0x3A] != b"\x53\xef":
+                    raise StorageError("Androidの保存領域のext4ヘッダーが不正です")
+                volume_uuid = block[0x68:0x78]
+                if not any(volume_uuid):
+                    raise StorageError("Androidの保存領域のUUIDが不正です")
+                return "ext4:" + str(uuid.UUID(bytes=volume_uuid))
         identity = (
             container_id
             if container_id is not None
@@ -253,35 +283,71 @@ class AndroidProvisioner:
 
     def _load_state(self) -> dict:
         try:
-            state = json.loads(self._state_file.read_text(encoding="utf-8"))
+            state = json.loads(
+                self._state_file.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object
+            )
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise StorageError("Android初期設定の記録を読み込めません") from error
-        if not isinstance(state, dict) or any(
-            not isinstance(record, dict)
-            or not isinstance(record.get("done"), bool)
-            or not isinstance(record.get("data_id"), str)
-            for record in state.values()
-        ):
-            raise StorageError("Android初期設定の記録の形式が不正です")
+        try:
+            if not isinstance(state, dict):
+                raise ValueError("記録はオブジェクトである必要があります")
+            for vm_id, record in state.items():
+                self._validate_vm_id(vm_id)
+                if not isinstance(record, dict) or type(record.get("done")) is not bool:
+                    raise ValueError("完了状態が不正です")
+                self._validate_identity(record.get("data_id"))
+                if "at" in record:
+                    timestamp = record["at"]
+                    if (
+                        type(timestamp) not in (int, float)
+                        or not math.isfinite(timestamp)
+                        or timestamp < 0
+                    ):
+                        raise ValueError("完了日時が不正です")
+        except (ValueError, OverflowError) as error:
+            raise StorageError("Android初期設定の記録の形式が不正です") from error
         return state
 
+    @staticmethod
+    def _validate_vm_id(vm_id: str) -> None:
+        validate_text(vm_id, "vm_id")
+        identifier(vm_id)
+
+    @staticmethod
+    def _validate_identity(data_id: str) -> None:
+        validate_text(data_id, "data_id")
+        if not data_id.strip():
+            raise ValueError("保存領域の識別子は空にできません")
+
     def needs(self, vm_id: str) -> bool:
+        self._validate_vm_id(vm_id)
         record = self._load_state().get(vm_id)
         return not record or not record["done"] or record["data_id"] != self._data_id(vm_id)
 
     def mark_done(self, vm_id: str, *, data_id: str | None = None) -> None:
-        identity = data_id or self._data_id(vm_id)
+        self._validate_vm_id(vm_id)
+        if data_id is not None:
+            self._validate_identity(data_id)
+        self._load_state()
+        identity = data_id if data_id is not None else self._data_id(vm_id)
         if identity is None:
             raise StorageError("Androidの保存領域を識別できません")
         with metadata_lock(self._state_file):
             state = self._load_state()
-            state[vm_id] = {"done": True, "data_id": identity, "at": time.time()}
+            state[vm_id] = {
+                **state.get(vm_id, {}),
+                "done": True,
+                "data_id": identity,
+                "at": time.time(),
+            }
             atomic_json(self._state_file, state)
 
     def ensure(self) -> None:
         with self._ensure_lock:
+            if self._stop_requested.is_set():
+                return
             for vm_id, _host in vm_call(self._targets):
                 if self._stop_requested.is_set():
                     return
