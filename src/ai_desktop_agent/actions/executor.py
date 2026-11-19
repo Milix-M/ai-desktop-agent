@@ -13,6 +13,7 @@ from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.privacy import install_log_redaction, redact
 from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +65,9 @@ class ActionExecutor:
             except Exception:
                 logger.exception("中断した長押しキーの解放に失敗")
 
-    async def wait_for_still(self, timeout: float = 5.0) -> None:
+    async def wait_for_still(self, timeout: float = 5.0) -> Screenshot | None:
         """画面変化が収まるまで待機する（公開API）。"""
-        await self._wait_for_still(timeout)
+        return await self._wait_for_still(timeout)
 
     async def _dispatch(self, action: Action) -> None:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
@@ -142,7 +143,7 @@ class ActionExecutor:
 
     # ── 待機ロジック ───────────────────────────────────
 
-    async def _wait_for_still(self, timeout: float) -> None:
+    async def _wait_for_still(self, timeout: float) -> Screenshot | None:
         """画面変化が収まるまで待機する。
 
         連続するスクリーンショットの画像ハッシュを比較し、
@@ -157,14 +158,14 @@ class ActionExecutor:
         elapsed = 0.0
 
         while elapsed < timeout:
-            ss = await run_display_call(self._capture_stable)
+            ss, raw = await run_display_call(self._capture_stable)
             current_hash = self._image_hash(ss.image_bytes)
 
             if prev_hash and current_hash == prev_hash:
                 stable_count += 1
                 if stable_count >= min_stable_frames:
                     logger.debug("画面が安定 (wait_for_still: %.1fs)", elapsed)
-                    return
+                    return ss if raw else None
             else:
                 stable_count = 0
 
@@ -181,10 +182,10 @@ class ActionExecutor:
         capture_raw = getattr(self._backend, "capture_raw", None)
         if callable(capture_raw):
             try:
-                return capture_raw()
+                return capture_raw(), True
             except Exception:
                 pass
-        return self._backend.capture_screen()
+        return self._backend.capture_screen(), False
 
     def locate(self, template_png: bytes, threshold: float = 0.9) -> tuple[int, int] | None:
         """画面上からテンプレート画像の位置を探す。
@@ -194,7 +195,7 @@ class ActionExecutor:
         """
         from ai_desktop_agent.vm.matcher import find_template
 
-        ss = self._capture_stable()
+        ss, _ = self._capture_stable()
         found = find_template(ss.image_bytes, template_png, threshold=threshold)
         if found is None:
             return None
