@@ -9,6 +9,7 @@ import pytest
 
 from ai_desktop_agent.server import __main__ as entrypoint
 from ai_desktop_agent.server import app as server
+from ai_desktop_agent.server import vm_pool, workspace_migration
 from ai_desktop_agent.server.android_provision import AndroidProvisioner
 from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
@@ -72,6 +73,48 @@ def test_container_bootstrap_closes_discovery_before_starting_the_server(connect
     monkeypatch.setattr(entrypoint, "run_server", run)
     entrypoint.main()
     run.assert_called_once()
+
+
+@pytest.mark.parametrize("provided", [False, True])
+async def test_standalone_android_provisioner_releases_only_its_own_pool(
+    connection, monkeypatch, provided
+):
+    pool, client = connection
+    monkeypatch.setattr(vm_pool, "VmPool", lambda: pool)
+    provisioner = AndroidProvisioner(pool=pool if provided else None)
+    assert provisioner._pool_or_create()._docker() is client
+    await provisioner.stop()
+    await provisioner.stop()
+    assert client.close.call_count == (0 if provided else 1)
+
+
+@pytest.mark.parametrize("provided", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_workspace_transaction_keeps_its_connection_through_rollback_then_closes_owned_pool(
+    connection, tmp_path, monkeypatch, provided, fails
+):
+    pool, client = connection
+    monkeypatch.setattr(workspace_migration, "VmPool", lambda: pool)
+    upgrade = workspace_migration.WorkspaceUpgrade(pool if provided else None, tmp_path)
+    rollback = Mock(side_effect=lambda: client.close.assert_not_called())
+    monkeypatch.setattr(upgrade, "_rollback", rollback)
+    if fails:
+        with pytest.raises(RuntimeError, match="compose failed"), upgrade.transaction():
+            raise RuntimeError("compose failed")
+        rollback.assert_called_once()
+    else:
+        with upgrade.transaction():
+            client.close.assert_not_called()
+    assert client.close.call_count == (0 if provided else 1)
+
+
+def test_workspace_constructor_failure_closes_its_new_pool(connection, tmp_path, monkeypatch):
+    pool, client = connection
+    monkeypatch.setattr(workspace_migration, "VmPool", lambda: pool)
+    monkeypatch.setattr(pool, "_project_name", Mock(side_effect=RuntimeError("inspect failed")))
+    with pytest.raises(RuntimeError, match="inspect failed"):
+        workspace_migration.WorkspaceUpgrade(root=tmp_path)
+    client.close.assert_called_once()
 
 
 async def test_cancelled_shutdown_finishes_a_running_creation_before_closing_its_connection(
