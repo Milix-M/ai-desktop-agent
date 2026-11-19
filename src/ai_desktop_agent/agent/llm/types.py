@@ -62,6 +62,8 @@ class ActionDecision:
 
     repeats: int = 1  # 同じ方向キーを続けて押す回数
 
+    working_note: str = ""  # 空文字なら既存のメモを維持する
+
     def __post_init__(self) -> None:
         if type(self.repeats) is not int or not 1 <= self.repeats <= 5:
             raise ValueError("方向キーの回数は1〜5回です")

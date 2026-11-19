@@ -921,6 +921,8 @@ class TaskSession:
                 zoom_scale=total_scale,
                 platform=self._platform(),
             )
+            if zoom_decision.working_note and self.loop.context.goal:
+                self.loop.context.goal.working_note = zoom_decision.working_note
             pending = zoom_decision
         else:
             logger.warning("region_select の最大深度に達しました。フォールバックします。")
@@ -1453,6 +1455,8 @@ class TaskSession:
                     error_context=error_context,
                     platform=self._platform(),
                 )
+                if decision.working_note and self.loop.context.goal:
+                    self.loop.context.goal.working_note = decision.working_note
                 self._consec_empty_decides = 0
                 return decision
             except ValueError as e:

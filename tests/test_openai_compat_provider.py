@@ -192,6 +192,36 @@ class TestOpenAICompatProvider:
         )
         assert result.action.action_type == ActionType.SUBTASK_COMPLETE
 
+    async def test_observation_survives_switching_subtasks(self, provider):
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        response = {"action_type": "key_press", "params": {"key": "tab"}}
+        note = "依頼書の受付番号は A-007"
+        provider._call = AsyncMock(
+            side_effect=[
+                {**response, "working_note": note},
+                response,
+                response,
+                response,
+            ]
+        )
+        session = TaskSession(llm=provider, display=FakeDisplayBackend())
+        session.loop.start(Goal("転記する"))
+        read = Subtask("read", "依頼書を読む")
+        write = Subtask("write", "報告に転記")
+        screen = self._fake_screenshot()
+        await session._decide_action(read, screen)
+        await session._decide_action(write, screen)
+        await session._decide_action(write, screen)
+        for call in provider._call.await_args_list[1:]:
+            assert note in call.args[0]
+
+        other = TaskSession(llm=provider, display=FakeDisplayBackend())
+        other.loop.start(Goal("別の依頼書を読む"))
+        await other._decide_action(read, screen)
+        assert note not in provider._call.await_args.args[0]
+
     @pytest.mark.asyncio
     async def test_decide_next_action_with_error(self, provider):
         from ai_desktop_agent.agent.llm.types import ErrorContext

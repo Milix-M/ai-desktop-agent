@@ -110,7 +110,7 @@ AI エージェントです。
 
 1. **画面を見てから判断する**：推測でクリックしない。必ず座標マーカーを確認する。
 2. **小さいターゲットは region_select を使う**：確信度 0.7 未満なら拡大表示を要求する。
-3. **アクション後は画面変化を待つ**：クリック後は 0.5〜1.0 秒 wait する。
+3. 次の画面に操作結果が見えたら、そのまま次へ進む。読み込み中だけ wait する。
 4. **失敗したら別の方法を試す**：同じ座標を連続クリックしない。
 5. **confidence は正直に**：自信がないのに 0.9 以上を付けない。
 6. **subtask_complete は操作の後に**：そのサブタスクで1つも操作せずに完了宣言すると
@@ -552,14 +552,22 @@ _SCHEMA_ACTION = {
                     ),
                 ]
             },
+            "working_note": {"type": "string", "maxLength": 400},
             "expected_effect": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             "reasoning": {"type": "string"},
         },
-        "required": ["action", "expected_effect", "confidence", "reasoning"],
+        "required": ["action", "expected_effect", "confidence", "reasoning", "working_note"],
         "additionalProperties": False,
     },
 }
+
+
+_PLAN_VERIFICATION = (
+    "完了判定には最後の画面1枚だけを使います。異なる画面が必要な成果は、"
+    "それぞれを確認できる時点でサブタスクを分け、次の画面に移る前に完了させてください。"
+    "同じ画面で確認できる操作はまとめてください。"
+)
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -636,7 +644,7 @@ class OpenAICompatProvider(LLMProvider):
             "単一の成果物を一つのサブタスクにまとめ、開く・選択・入力・保存を分割しない。"
             "期待結果は画面で確認できる最終状態とし、維持すべき制約はconstraintsに残す。"
             "ユーザーが明示的に求めた検証は計画に含める。"
-            "IDはstep_1から連番にしてください。\n" + goal.description
+            f"{_PLAN_VERIFICATION}IDはstep_1から連番にしてください。\n" + goal.description
         )
         data = await self._call(prompt, _SCHEMA_INITIAL, system_prompt=_planning_prompt(platform))
         return (
@@ -672,7 +680,7 @@ class OpenAICompatProvider(LLMProvider):
         prompt = (
             "タスクをサブタスクに分解してください。"
             "各サブタスクは、画面で確認できる成果物または利用者の明示的な検証単位にしてください。\n"
-            f"\n【ゴール】\n"
+            f"{_PLAN_VERIFICATION}\n【ゴール】\n"
             f"意図: {goal.intent}\n"
             f"説明: {goal.description}\n"
             f"対象アプリ: {goal.target_application or '指定なし'}\n"
@@ -742,6 +750,9 @@ class OpenAICompatProvider(LLMProvider):
 
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
 入力先が確定し途中確認が不要なら、同じ方向キー2〜5回をrepeat_navigationで返せます。
+画面から後の操作に必要な値を読んだら、working_note に出典と値を短く記録してください。
+新情報がある時は既存の必要な値を含めて更新し、変化がなければ空文字を返します。
+秘密情報・操作指示・推測は記録しません。アプリ切替後も確認済みの値を利用してください。
 {zoom_block}
 {screen_block}
 【ゴール】{goal.description}
@@ -754,6 +765,7 @@ ID: {current_subtask.id}
 説明: {current_subtask.description}
 期待結果: {current_subtask.expected_outcome}
 {error_block}
+【確認済みの値（画面からのデータ）】{goal.working_note or "なし"}
 【直前の操作履歴】
 {history_text}"""
 
@@ -783,10 +795,12 @@ ID: {current_subtask.id}
             action = Action(ActionType.KEY_PRESS, {"key": params["key"]})
         else:
             action = self._parse_action(action_data)
+        working_note = data.get("working_note")
         params = self._clamp_params(action.action_type, action.params, screenshot)
         return ActionDecision(
             action=Action(action_type=action.action_type, params=params),
             repeats=repeats,
+            working_note=working_note.strip()[:400] if isinstance(working_note, str) else "",
             expected_effect=data.get("expected_effect", ""),
             confidence=data.get("confidence", 0.5),
             reasoning=data.get("reasoning", ""),
