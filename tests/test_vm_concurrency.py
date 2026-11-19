@@ -22,6 +22,7 @@ def slow_creation(tmp_path, monkeypatch):
     monkeypatch.setenv("USE_KVM", "true")
     monkeypatch.setenv("ALLOW_TCG_VM", "false")
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "ai-desktop-agent")
+    monkeypatch.setenv("VM_HOST_DIR", str(tmp_path))
     monkeypatch.delenv("VM_CONTAINER_NAME", raising=False)
     client = _FakeDocker()
     for service in ("vm", "desktop"):
@@ -34,11 +35,11 @@ def slow_creation(tmp_path, monkeypatch):
     pool = VmPool(client=client, state_file=tmp_path / "vms.json", overlays_dir=str(tmp_path))
     controller = VmController(client=client)
     monkeypatch.setattr(controller, "_qmp_status", lambda: None)
-    monkeypatch.setattr(pool, "_host_repo_dir", lambda: str(tmp_path))
     entered, release = threading.Event(), threading.Event()
     identifiers = []
 
-    def copy(vm_id):
+    def copy(vm_id, *, image=None):
+        assert image is not None
         identifiers.append(vm_id)
         entered.set()
         assert release.wait(10), "test did not release the controlled disk copy"
@@ -113,8 +114,8 @@ async def test_delete_waits_for_creation_or_its_cleanup(slow_creation, monkeypat
     if copy_fails:
         original = pool._create_overlay
 
-        def fail(vm_id):
-            original(vm_id)
+        def fail(vm_id, *, image=None):
+            original(vm_id, image=image)
             raise RuntimeError("controlled copy failure")
 
         monkeypatch.setattr(pool, "_create_overlay", fail)

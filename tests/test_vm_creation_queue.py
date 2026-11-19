@@ -114,7 +114,8 @@ async def test_a_failed_creation_does_not_consume_its_slot(slow_creation, monkey
     monkeypatch.setattr(async_io, "_VM_CREATION_SLOTS", threading.BoundedSemaphore(1))
     original = pool._create_overlay
 
-    def fail(_vm_id):
+    def fail(_vm_id, *, image=None):
+        assert image is not None
         raise DockerUnavailableError("controlled copy failure")
 
     monkeypatch.setattr(pool, "_create_overlay", fail)
@@ -182,3 +183,28 @@ async def test_a_full_legacy_backlog_rejects_new_receipts_before_persisting(slow
         finally:
             release.set()
             await asyncio.gather(*requests)
+
+
+async def test_released_reservation_cannot_run_work_or_release_another_creators_capacity(
+    monkeypatch,
+):
+    monkeypatch.setattr(async_io, "_VM_CREATION_SLOTS", threading.BoundedSemaphore(1))
+    old = async_io.reserve_vm_creation_slot()
+    old.release()
+    current = async_io.reserve_vm_creation_slot()
+    calls = []
+    try:
+        old.release()  # A repeated cleanup must not return current's capacity.
+        with pytest.raises(async_io.VmCreationBusyError):
+            async_io.reserve_vm_creation_slot()
+        with pytest.raises(RuntimeError, match="already released"):
+            await async_io.run_reserved_vm_creation(old, calls.append, "stale allocation")
+        assert calls == []
+        await async_io.run_reserved_vm_creation(current, calls.append, "current allocation")
+        assert calls == ["current allocation"]
+        with pytest.raises(async_io.VmCreationBusyError):
+            async_io.reserve_vm_creation_slot()
+    finally:
+        current.release()
+    replacement = async_io.reserve_vm_creation_slot()
+    replacement.release()

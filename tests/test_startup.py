@@ -310,3 +310,32 @@ def test_invalid_guest_files_fail_before_qemu_runs(tmp_path):
     assert result.returncode != 0
     assert "missing or invalid VM file" in result.stdout
     assert not Path(env["QEMU_RECORD"]).exists()
+
+
+def test_guest_command_uses_the_requested_display_memory_boot_and_monitors(tmp_path):
+    env = {**guest_env(tmp_path), "VM_MEMORY": "768", "VM_VNC_PORT": "5917"}
+    result = boot(env)
+    assert result.returncode == 0, result.stderr
+    args = json.loads(Path(env["QEMU_RECORD"]).read_text())
+    options = dict(zip(args[::2], args[1::2], strict=True))
+    assert options["-m"] == "768"
+    assert options["-vnc"] == "0.0.0.0:17"
+    assert options["-cpu"] == "qemu64"
+    assert options["-smp"] == "1"
+    assert options["-kernel"] == env["VM_KERNEL"]
+    assert options["-initrd"] == env["VM_INITRD"]
+    assert options["-append"] == "prepared"
+    assert options["-drive"] == f"file={env['VM_IMAGE']},if=virtio,format=qcow2"
+    assert options["-serial"] == "stdio" and options["-display"] == "none"
+    assert options["-mon"] == "chardev=qmp0,mode=control"
+    assert f"socket,path={env['QMP_SOCK']},server=on,wait=off,id=qmp0" in args
+    assert f"socket,path={env['QGA_SOCK']},server=on,wait=off,id=qga0" in args
+    assert "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0" in args
+
+
+def test_guest_never_launches_software_emulation_without_explicit_permission(tmp_path):
+    env = {**guest_env(tmp_path), "ALLOW_TCG_VM": "false"}
+    result = boot(env)
+    assert result.returncode != 0
+    assert not Path(env["QEMU_RECORD"]).exists()
+    assert not Path(env["VM_IMAGE"]).exists()

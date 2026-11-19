@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ from ai_desktop_agent.server.desktop_resources import (  # noqa: E402
     DesktopResources,
     desktop_runtime_from_env,
 )
+from ai_desktop_agent.server.docker_client import DockerClientOwner, docker_operation  # noqa: E402
 from ai_desktop_agent.server.docker_discovery import (  # noqa: E402
     container_labels,
     refresh_existing,
@@ -42,6 +44,7 @@ from ai_desktop_agent.server.persistence import (  # noqa: E402
     StorageError,
     atomic_json,
     metadata_lock,
+    unique_json_object,
 )
 from ai_desktop_agent.server.readiness import is_ready  # noqa: E402
 from ai_desktop_agent.server.vm_control import DockerUnavailableError  # noqa: E402
@@ -50,7 +53,8 @@ from ai_desktop_agent.server.vm_locks import (  # noqa: E402
     serialize_creation,
     serialize_environment,
 )
-from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes  # noqa: E402
+from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes, identifier  # noqa: E402
+from ai_desktop_agent.validation import validate_text  # noqa: E402
 
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
 LABEL_DISK_COPY = "ai-desktop-agent.disk-copy-for"
@@ -77,6 +81,10 @@ FIXED_RELAY_SERVICE = {
 OVERLAYS_DIR = "/vm/overlays"  # backendコンテナ内のマウント先
 BASE_IMAGE_IN_VM = "/vm/desktop.qcow2"  # vmコンテナ内から見たbase
 MAX_VMS = 8
+
+
+class _MissingResourceMountError(DockerUnavailableError):
+    """No bind was configured; optional Android media can be genuinely absent."""
 
 
 def _discovery_operation(function):
@@ -119,7 +127,7 @@ class VmInstance:
     container_id: str
 
 
-class VmPool:
+class VmPool(DockerClientOwner):
     """VMコンテナ群のライフサイクル管理。
 
     Args:
@@ -134,18 +142,20 @@ class VmPool:
         state_file: str | Path | None = None,
         overlays_dir: str = OVERLAYS_DIR,
     ) -> None:
-        self._client = client
+        super().__init__(client)
         base = os.environ.get("DATA_DIR", "./data")
         self._state_file = Path(state_file or Path(base) / "vms.json")
         self._overlays_dir = overlays_dir
 
     # ── 一覧・取得 ──────────────────────────────────
 
+    @docker_operation
     def instance_id(self, vm_id: str) -> str | None:
         """Identify the current primary container, including replacement under the same VM ID."""
         target = self._primary_container(vm_id, self._docker())
         return target.id if target is not None else None
 
+    @docker_operation
     @serialize_environment
     def get_instance(self, vm_id: str) -> VmInstance | None:
         """Bind the connection information and physical ID to one inspected container."""
@@ -164,21 +174,24 @@ class VmPool:
             raise DockerUnavailableError("環境の識別子を確認できません")
         return VmInstance(info=info, container_id=target.id)
 
+    @docker_operation
     def isolate_environments(self) -> None:
         # Snapshot discovery before detaching old shared networks used for legacy adoption.
         environments = self.list_vms()
         for vm in environments:
             self.prepare_vm(vm.id)
 
+    @docker_operation
     @serialize_environment
     def prepare_vm(self, vm_id: str) -> None:
+        identifier(vm_id)
+        state = self._load_state(vm_id) or {}
         docker = self._docker()
         networks = EnvironmentNetworks(docker, self._project_name(docker))
         target = self._primary_container(vm_id, docker)
         if target is None:
             return
         network = networks.ensure(vm_id, target)
-        state = self._load_state(vm_id) or {}
         if state.get("isolated_network") != network.name:
             # Keep legacy environments discoverable even if a later migration step fails.
             self._save_state(vm_id, {**state, "isolated_network": network.name})
@@ -192,6 +205,7 @@ class VmPool:
             raise DockerUnavailableError(f"同じ環境IDの本体が複数あります: {vm_id}")
         return targets[0] if targets else None
 
+    @docker_operation
     def retire_legacy_relays(self) -> None:
         """Remove this project's unauthenticated relays before exposing the authenticated API."""
         docker = self._docker()
@@ -294,6 +308,7 @@ class VmPool:
                     return c
         return candidates[0]
 
+    @docker_operation
     def list_vms(self) -> list[VmInfo]:
         """実行中・停止中の全VMを返す（compose既定VM・desktopを含む）。"""
         docker = self._docker()
@@ -325,6 +340,7 @@ class VmPool:
 
         return [found[k] for k in sorted(found)]
 
+    @docker_operation
     def get_vm(self, vm_id: str) -> VmInfo | None:
         """1台取得。なければ None。"""
         for vm in self.list_vms():
@@ -332,6 +348,7 @@ class VmPool:
                 return vm
         return None
 
+    @docker_operation
     def default_vm(self) -> VmInfo | None:
         """タスク投入先の既定VM（稼働中の最初の1台）。なければ None。
 
@@ -345,6 +362,7 @@ class VmPool:
 
     # ── 作成・削除 ──────────────────────────────────
 
+    @docker_operation
     @serialize_creation
     def create_vm(
         self, name: str | None = None, kind: str = KIND_QEMU, *, vm_id: str | None = None
@@ -363,6 +381,10 @@ class VmPool:
             resolve_use_kvm,
         )
 
+        if name is not None:
+            validate_text(name, "環境名")
+            if len(name) > 128:
+                raise ValueError("環境名は128文字以内で指定してください")
         if kind not in (KIND_QEMU, KIND_CONTAINER, KIND_ANDROID):
             raise ValueError(f"kind は qemu/container/android のいずれか: {kind}")
 
@@ -472,17 +494,19 @@ class VmPool:
                 )
 
             if kind == KIND_QEMU:
-                overlay_host = self._create_overlay(vm_id)
                 image = self._vm_image_ref(docker)
+                overlay_host = self._create_overlay(vm_id, image=image)
                 # 未設定時は entrypoint 側で /dev/kvm の有無から自動切替する
                 use_kvm = resolve_use_kvm()
                 memory = os.environ.get("VM_MEMORY", "4096")
                 cpus = os.environ.get("VM_CPUS", "4")
 
-                host_repo = self._host_repo_dir()
                 volumes = {
                     str(Path(overlay_host).parent): {"bind": "/vm/instance", "mode": "rw"},
-                    f"{host_repo}/vm/sockets": {"bind": "/vm/sockets", "mode": "rw"},
+                    self._host_path("vm/sockets", "/vm/sockets", shared=True): {
+                        "bind": "/vm/sockets",
+                        "mode": "rw",
+                    },
                 }
                 docker.containers.run(
                     image,
@@ -552,6 +576,7 @@ class VmPool:
             kind=kind,
         )
 
+    @docker_operation
     @serialize_environment
     def restart_vm(self, vm_id: str, timeout: int = 30) -> VmInfo:
         """VMコンテナを再起動する（ゲストOSを含む再起動）。中継は触らない。
@@ -560,6 +585,8 @@ class VmPool:
         再起動を制限する（`KvmUnavailableError`）。
         コンテナ環境の再起動はどこでもできる。
         """
+        identifier(vm_id)
+        self._load_all_states()
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
             is_kvm_available,
@@ -571,7 +598,7 @@ class VmPool:
         if not targets:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         if (
-            self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
+            self._target_kind(vm_id, targets) in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
             and not is_kvm_available(docker)
         ):
@@ -589,12 +616,15 @@ class VmPool:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         return info
 
+    @docker_operation
     @serialize_environment
     def stop_vm(self, vm_id: str, timeout: int = 10) -> VmInfo:
         """VM/コンテナを停止する（固定・動的とも可）。中継も連動して止める。
 
         停止済みの場合は何もせず現在情報を返す。存在しなければ ValueError。
         """
+        identifier(vm_id)
+        self._load_all_states()
         docker = self._docker()
         targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
         if not targets:
@@ -610,6 +640,7 @@ class VmPool:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         return info
 
+    @docker_operation
     @serialize_environment
     def start_vm(self, vm_id: str) -> VmInfo:
         """VM/コンテナを起動する（固定・動的とも可）。中継も連動して起動する。
@@ -618,6 +649,8 @@ class VmPool:
         起動を制限する（`KvmUnavailableError`）。
         存在しなければ ValueError。
         """
+        identifier(vm_id)
+        self._load_all_states()
         from ai_desktop_agent.server.kvm import (
             KvmUnavailableError,
             is_kvm_available,
@@ -629,7 +662,7 @@ class VmPool:
         if not targets:
             raise ValueError(f"VMが見つかりません: {vm_id}")
         if (
-            self._target_kind(vm_id, docker) in (KIND_QEMU, KIND_ANDROID)
+            self._target_kind(vm_id, targets) in (KIND_QEMU, KIND_ANDROID)
             and not is_tcg_allowed()
             and not is_kvm_available(docker)
         ):
@@ -661,15 +694,16 @@ class VmPool:
             if relay_service:
                 relays = self._fixed_containers(docker, relay_service)
             return [*list(mains), *list(relays)]
-        all_targets = self._dynamic_containers(docker, vm_id)
+        all_targets = [
+            c
+            for c in self._dynamic_containers(docker, vm_id)
+            if LABEL_DISK_COPY not in self._labels(c)
+        ]
         if include_relay:
             return list(all_targets)
-        return [
-            c
-            for c in all_targets
-            if LABEL_WS_FOR not in self._labels(c) and LABEL_DISK_COPY not in self._labels(c)
-        ]
+        return [c for c in all_targets if LABEL_WS_FOR not in self._labels(c)]
 
+    @docker_operation
     @serialize_environment
     def remove_vm(self, vm_id: str) -> bool:
         """VM/コンテナを削除する（固定・動的とも可）。
@@ -681,6 +715,8 @@ class VmPool:
         動的VMは従来通りディスク・状態ファイルも消す。
         対象がなければ False。
         """
+        identifier(vm_id)
+        self._load_all_states()
         docker = self._docker()
         if vm_id in (BASE_VM_SERVICE, DESKTOP_SERVICE, ANDROID_SERVICE):
             targets = self._lifecycle_targets(vm_id, docker, include_relay=True)
@@ -715,8 +751,6 @@ class VmPool:
                 c.remove(force=True)
             except Exception as e:
                 raise DockerUnavailableError(f"環境の削除に失敗しました: {c.name}") from e
-        if Path(vm_id).name != vm_id or vm_id in {".", ".."}:
-            raise ValueError("環境IDが不正です")
         EnvironmentNetworks(docker, self._project_name(docker)).remove(vm_id)
         WorkspaceVolumes(docker, self._project_name(docker)).remove(vm_id)
         # This path is mounted into the backend; host paths belong to the Docker daemon.
@@ -737,21 +771,6 @@ class VmPool:
             raise DockerUnavailableError(
                 "DESKTOP_RUNTIME=runsc を使うにはDockerにrunscを登録してください"
             )
-
-    def _docker(self) -> Any:
-        if self._client is not None:
-            return self._client
-        try:
-            import docker
-        except ImportError as e:
-            raise DockerUnavailableError("docker パッケージが利用できません") from e
-        try:
-            client = docker.from_env()
-            client.ping()
-        except Exception as e:
-            raise DockerUnavailableError("Docker ソケットに接続できません") from e
-        self._client = client
-        return client
 
     @staticmethod
     def _labels(container: Any) -> dict:
@@ -792,19 +811,22 @@ class VmPool:
             adb_port=adb_port,
         )
 
-    def _create_overlay(self, vm_id: str) -> str:
+    def _create_overlay(self, vm_id: str, *, image: str | None = None) -> str:
         """baseのフルコピーを作り、ホスト側パスを返す。
 
         読み取り専用テンプレートから独立したディスクを複製する。
         backing参照を使わず、テンプレートへの依存を残さない。
         """
         docker = self._docker()
-        overlay_host_dir = f"{self._host_repo_dir()}/vm/overlays"
-        Path(self._overlays_dir).mkdir(parents=True, exist_ok=True)
-        instance_dir = Path(self._overlays_dir) / vm_id
+        overlay_host_dir = self._host_path("vm/overlays", self._overlays_dir, shared=True)
+        base_host = self._host_path("vm/desktop.qcow2", BASE_IMAGE_IN_VM)
+        directory = self._overlay_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        instance_dir = directory / vm_id
         instance_dir.mkdir(mode=0o700)
-        overlay_host = str(Path(overlay_host_dir).resolve() / vm_id / "disk.qcow2")
-        image = self._vm_image_ref(docker)
+        overlay_host = str(Path(overlay_host_dir) / vm_id / "disk.qcow2")
+        if image is None:
+            image = self._vm_image_ref(docker)
         logger.info("VMディスク複製: %s", overlay_host)
         try:
             docker.containers.run(
@@ -818,10 +840,7 @@ class VmPool:
                 ],
                 volumes={
                     str(Path(overlay_host).parent): {"bind": "/vm/instance", "mode": "rw"},
-                    f"{self._host_repo_dir()}/vm/desktop.qcow2": {
-                        "bind": BASE_IMAGE_IN_VM,
-                        "mode": "ro",
-                    },
+                    base_host: {"bind": BASE_IMAGE_IN_VM, "mode": "ro"},
                 },
                 labels={
                     LABEL_VM_ID: vm_id,
@@ -829,6 +848,7 @@ class VmPool:
                     LABEL_DISK_COPY: vm_id,
                 },
                 cap_drop=["ALL"],
+                user=f"{os.getuid()}:{os.getgid()}",
                 remove=True,
             )
         except Exception as error:
@@ -843,40 +863,49 @@ class VmPool:
             ) from error
         return overlay_host
 
-    def _target_kind(self, vm_id: str, docker: Any) -> str:
-        """再起動・削除対象の種別を返す。不明時は qemu 扱い（従来動作）。"""
-        if vm_id == DESKTOP_SERVICE:
-            return KIND_CONTAINER
-        if vm_id == BASE_VM_SERVICE:
-            return KIND_QEMU
-        if vm_id == ANDROID_SERVICE:
-            return KIND_ANDROID
-        try:
-            targets = self._dynamic_containers(docker, vm_id)
-        except Exception:
-            return KIND_QEMU
-        for c in targets:
-            if LABEL_WS_FOR not in self._labels(c):
-                return self._labels(c).get(LABEL_KIND, KIND_QEMU)
-        return KIND_QEMU
+    def _target_kind(self, vm_id: str, targets: list[Any]) -> str:
+        """Check the inspected targets before issuing a start or restart command."""
+        kind = {
+            DESKTOP_SERVICE: KIND_CONTAINER,
+            BASE_VM_SERVICE: KIND_QEMU,
+            ANDROID_SERVICE: KIND_ANDROID,
+        }.get(vm_id)
+        if kind is not None:
+            mains = [c for c in targets if self._labels(c).get(COMPOSE_SERVICE_LABEL) == vm_id]
+        else:
+            mains = [c for c in targets if LABEL_WS_FOR not in self._labels(c)]
+            if len(mains) > 1:
+                raise DockerUnavailableError(f"同じ環境IDの本体が複数あります: {vm_id}")
+        if not mains:
+            raise ValueError(f"VMが見つかりません: {vm_id}")
+        if kind is None:
+            # Legacy dynamic guests without a kind label are QEMU environments.
+            kind = self._labels(mains[0]).get(LABEL_KIND, KIND_QEMU)
+        if kind not in ID_PREFIX:
+            raise DockerUnavailableError(f"環境の種別を確認できません: {vm_id}")
+        return kind
+
+    def _runtime_image_ref(self, docker: Any, service: str, variable: str, fallback: str) -> str:
+        explicit = os.environ.get(variable)
+        if explicit:
+            return explicit
+        source = self._pick_fixed(self._fixed_containers(docker, service), service)
+        if source is None:
+            return fallback
+        # Tags can move between discovery and creation. Match the visible primary
+        # and use its immutable image ID without another image-inspection request.
+        image = source.attrs.get("Image")
+        if not isinstance(image, str) or not image.strip():
+            raise DockerUnavailableError(
+                "既定環境の実行イメージを確認できません。環境の状態を確認してください"
+            )
+        return image
 
     def _android_image_ref(self, docker: Any) -> str:
         """Android実行イメージの参照。環境変数優先、なければ既定から検出。"""
-        if os.environ.get("ANDROID_IMAGE_REF"):
-            return os.environ["ANDROID_IMAGE_REF"]
-        try:
-            candidates = self._fixed_containers(docker, ANDROID_SERVICE)
-            if candidates:
-                tags = (
-                    (candidates[0].image.attrs.get("RepoTags") or [])
-                    if hasattr(candidates[0], "image")
-                    else []
-                )
-                image = candidates[0].attrs.get("Image", "")
-                return tags[0] if tags else image
-        except Exception:
-            logger.debug("androidイメージ検出に失敗", exc_info=True)
-        return "ai-desktop-agent-android:latest"
+        return self._runtime_image_ref(
+            docker, ANDROID_SERVICE, "ANDROID_IMAGE_REF", "ai-desktop-agent-android:latest"
+        )
 
     def _android_iso_host(self) -> str | None:
         """ホスト側のAndroid ISOパスを返す。なければ None。
@@ -888,12 +917,31 @@ class VmPool:
         """
         explicit = os.environ.get("ANDROID_ISO_HOST")
         if explicit:
-            return explicit if Path(explicit).is_file() else None
-        host_path = Path(f"{self._host_repo_dir()}/android/android-x86_64.iso")
-        if host_path.is_file():
-            return str(host_path.resolve())
-        # backendコンテナ内からはホストパスが見えないため、マウント経由で確認する
+            host_path = Path(explicit)
+            if not host_path.is_absolute():
+                raise DockerUnavailableError(
+                    "ANDROID_ISO_HOSTにはホスト側の絶対パスを指定してください"
+                )
+            if host_path.is_file():
+                return str(host_path)
+            container_path = Path("/app/android-host") / host_path.name
+            if container_path.is_file() and self._host_path(
+                f"android/{host_path.name}", str(container_path), shared=True
+            ) == str(host_path):
+                return str(host_path)
+            return None
         container_path = Path("/app/android-host/android-x86_64.iso")
+        try:
+            host_path = Path(
+                self._host_path("android/android-x86_64.iso", str(container_path), shared=True)
+            )
+        except _MissingResourceMountError:
+            if not container_path.is_file():
+                return None
+            raise
+        if host_path.is_file():
+            return str(host_path)
+        # backendコンテナ内からはホストパスが見えないため、マウント経由で確認する
         if container_path.is_file():
             return str(host_path)
         return None
@@ -906,7 +954,10 @@ class VmPool:
         しまうため、事前に存在確認する。backendコンテナ内からはホストパスが
         見えないため、`/app/android-host` マウント経由でも確認する。
         """
-        host_dir = f"{self._host_repo_dir()}/android"
+        try:
+            host_dir = self._host_path("android", "/app/android-host", shared=True)
+        except _MissingResourceMountError:
+            return {}
         mounts: dict = {}
         for fname, guest in (
             ("kernel", "/android/kernel"),
@@ -919,71 +970,103 @@ class VmPool:
 
     def _desktop_image_ref(self, docker: Any) -> str:
         """軽量デスクトップ実行イメージの参照。環境変数優先、なければ既定から検出。"""
-        if os.environ.get("DESKTOP_IMAGE_REF"):
-            return os.environ["DESKTOP_IMAGE_REF"]
-        try:
-            candidates = self._fixed_containers(docker, DESKTOP_SERVICE)
-            if candidates:
-                tags = (
-                    (candidates[0].image.attrs.get("RepoTags") or [])
-                    if hasattr(candidates[0], "image")
-                    else []
-                )
-                image = candidates[0].attrs.get("Image", "")
-                return tags[0] if tags else image
-        except Exception:
-            logger.debug("desktopイメージ検出に失敗", exc_info=True)
-        return "ai-desktop-agent-desktop:latest"
+        return self._runtime_image_ref(
+            docker, DESKTOP_SERVICE, "DESKTOP_IMAGE_REF", "ai-desktop-agent-desktop:latest"
+        )
 
     def _vm_image_ref(self, docker: Any) -> str:
         """QEMU実行イメージの参照。環境変数優先、なければ既定VMから検出。"""
-        if os.environ.get("VM_IMAGE_REF"):
-            return os.environ["VM_IMAGE_REF"]
-        try:
-            legacy = self._fixed_containers(docker, BASE_VM_SERVICE)
-            if legacy:
-                tags = (
-                    (legacy[0].image.attrs.get("RepoTags") or [])
-                    if hasattr(legacy[0], "image")
-                    else []
-                )
-                image = legacy[0].attrs.get("Image", "")
-                return tags[0] if tags else image
-        except Exception:
-            logger.debug("VMイメージ検出に失敗", exc_info=True)
-        return "ai-desktop-agent-vm:latest"
+        return self._runtime_image_ref(
+            docker, BASE_VM_SERVICE, "VM_IMAGE_REF", "ai-desktop-agent-vm:latest"
+        )
 
     def _remove_disk(self, vm_id: str) -> None:
         """Remove this VM's files through the backend mount, including legacy disks."""
         if not vm_id or Path(vm_id).name != vm_id or vm_id in {".", ".."}:
             raise ValueError("環境IDが不正です")
-        directory = Path(self._overlays_dir) / vm_id
+        directory = self._overlay_directory() / vm_id
         if directory.exists() or directory.is_symlink():
             shutil.rmtree(directory)
-        (Path(self._overlays_dir) / f"{vm_id}.qcow2").unlink(missing_ok=True)
+        (self._overlay_directory() / f"{vm_id}.qcow2").unlink(missing_ok=True)
+
+    def _backend_mounts(self) -> list[dict] | None:
+        """None means a host process; inspection failures must not become guessed paths."""
+        from docker.errors import NotFound
+
+        try:
+            backend = self._docker().containers.get(socket.gethostname())
+        except NotFound:
+            return None
+        except Exception as error:
+            raise DockerUnavailableError(
+                "保存先を確認できません。Dockerの状態を確認してください"
+            ) from error
+        return backend.attrs.get("Mounts") or []
+
+    def _overlay_directory(self) -> Path:
+        if self._overlays_dir == OVERLAYS_DIR and self._backend_mounts() is None:
+            return Path(self._host_repo_dir()) / "vm/overlays"
+        return Path(self._overlays_dir)
+
+    def _host_path(self, relative: str, destination: str, *, shared: bool = False) -> str:
+        """Translate a backend-visible resource into the daemon's absolute bind source."""
+        if os.environ.get("VM_HOST_DIR"):
+            return str(Path(self._host_repo_dir()) / relative)
+        mounts = self._backend_mounts()
+        if mounts is None:
+            if relative == "vm/overlays" and self._overlays_dir != OVERLAYS_DIR:
+                return str(Path(self._overlays_dir).resolve())
+            return str(Path.cwd() / relative)
+        target = Path(destination)
+        candidates = [m for m in mounts if target.is_relative_to(m.get("Destination", "\0"))]
+        if candidates:
+            selected = max(candidates, key=lambda m: len(Path(m["Destination"]).parts))
+            source = Path(selected.get("Source", ""))
+            if selected.get("Type") != "bind" or not source.is_absolute():
+                raise DockerUnavailableError(
+                    "VM・Androidの保存先には絶対パスのbindマウントを指定してください"
+                )
+            return str(source / target.relative_to(selected["Destination"]))
+        if shared:
+            raise _MissingResourceMountError("VM・Androidの保存先マウントを確認できません")
+        return str(Path(self._host_repo_dir()) / relative)
 
     def _host_repo_dir(self) -> str:
         """ホスト側のリポジトリパスを特定する。
 
-        backend自身の /app/data マウント元から逆算する。
-        明示指定（VM_HOST_DIR）があれば優先。ホスト直実行時はカレント。
+        明示指定を優先し、標準配置のbindマウントからのみ逆算する。
+        個別のリソースでは _host_path を使い、実際のマウント元を優先する。
         """
         explicit = os.environ.get("VM_HOST_DIR")
         if explicit:
-            return explicit.rstrip("/")
-        try:
-            docker = self._docker()
-            me = docker.containers.get(socket.gethostname())
-            for m in me.attrs.get("Mounts", []) or []:
-                if m.get("Destination") == "/app/data":
-                    src = m.get("Source", "")
-                    if src.endswith("/data"):
-                        return src[: -len("/data")]
-                    if src:
-                        return str(Path(src).parent)
-        except Exception:
-            logger.debug("ホストパスの逆算に失敗", exc_info=True)
-        return "."
+            if not Path(explicit).is_absolute():
+                raise DockerUnavailableError("VM_HOST_DIRにはホスト側の絶対パスを指定してください")
+            return str(Path(explicit))
+        mounts = self._backend_mounts()
+        if mounts is None:
+            return str(Path.cwd())
+        for destination, suffix in (
+            ("/vm", "vm"),
+            ("/vm/overlays", "vm/overlays"),
+            ("/vm/sockets", "vm/sockets"),
+            ("/app/android-host", "android"),
+            ("/app/data", "data"),
+            ("/app", ""),
+        ):
+            for mount in mounts:
+                source = Path(mount.get("Source", ""))
+                if (
+                    mount.get("Destination") == destination
+                    and mount.get("Type") == "bind"
+                    and source.is_absolute()
+                    and (
+                        not suffix or source.parts[-len(Path(suffix).parts) :] == Path(suffix).parts
+                    )
+                ):
+                    return str(source.parents[len(Path(suffix).parts) - 1] if suffix else source)
+        raise DockerUnavailableError(
+            "ホスト側のVM保存先を確認できません。マウント設定を確認してください"
+        )
 
     def _backend_network(self, docker: Any) -> str | None:
         """backend自身が属するネットワーク名。なければ None。"""
@@ -1002,13 +1085,6 @@ class VmPool:
             logger.debug("所属ネットワーク検出に失敗", exc_info=True)
         return os.environ.get("BACKEND_NETWORK")
 
-    def _vnc_reachable(self, host: str, port: int = 5900, timeout: float = 3.0) -> bool:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                return True
-        except OSError:
-            return False
-
     # ── 状態ファイル ────────────────────────────────
 
     def _state_path(self) -> Path:
@@ -1017,18 +1093,50 @@ class VmPool:
     def _load_all_states(self) -> dict:
         path = self._state_path()
         try:
-            states = json.loads(path.read_text(encoding="utf-8"))
+            states = json.loads(
+                path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object
+            )
         except FileNotFoundError:
             return {}
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise StorageError(
                 f"VM情報を読み込めません: {path}。バックアップから復元してください"
             ) from error
-        if not isinstance(states, dict) or any(
-            not isinstance(value, dict) for value in states.values()
-        ):
-            raise StorageError(f"VM情報の形式が不正です: {path}")
+        self._validate_states(states)
         return states
+
+    def _validate_states(self, states: dict) -> None:
+        try:
+            if not isinstance(states, dict):
+                raise ValueError("環境情報はオブジェクトで指定してください")
+            for vm_id, state in states.items():
+                identifier(vm_id)
+                if not isinstance(state, dict):
+                    raise ValueError("環境ごとの情報はオブジェクトで指定してください")
+                if "name" in state:
+                    validate_text(state["name"], "環境名")
+                    if len(state["name"]) > 128:
+                        raise ValueError("環境名が長すぎます")
+                for key in ("vnc_port", "ws_port", "adb_port"):
+                    if key in state and (
+                        type(state[key]) is not int or not 0 <= state[key] <= 65535
+                    ):
+                        raise ValueError("保存されたポートが不正です")
+                if "updated_at" in state:
+                    timestamp = state["updated_at"]
+                    if (
+                        type(timestamp) not in (int, float)
+                        or not math.isfinite(timestamp)
+                        or timestamp < 0
+                    ):
+                        raise ValueError("保存時刻が不正です")
+                for key in ("isolated_network", "home_volume"):
+                    if key in state:
+                        validate_text(state[key], "保存先")
+                        if not state[key]:
+                            raise ValueError("保存先が空です")
+        except (ValueError, TypeError, OverflowError) as error:
+            raise StorageError(f"VM情報の形式が不正です: {self._state_path()}") from error
 
     def _load_state(self, vm_id: str) -> dict | None:
         return self._load_all_states().get(vm_id)
@@ -1038,6 +1146,7 @@ class VmPool:
         with metadata_lock(path):
             states = self._load_all_states()
             states[vm_id] = {**states.get(vm_id, {}), **info, "updated_at": time.time()}
+            self._validate_states(states)
             atomic_json(path, states)
 
     def _drop_state(self, vm_id: str) -> None:
@@ -1053,7 +1162,7 @@ class VmPool:
         self._save_state(vm_id, allocation)
         try:
             yield
-        except Exception:
+        except Exception as failure:
             removed = True
             try:
                 project = self._project_name(docker)
@@ -1084,4 +1193,10 @@ class VmPool:
                     self._drop_state(vm_id)
             except Exception:
                 logger.exception("作成失敗後のリソースを回収できませんでした: %s", vm_id)
+            from docker.errors import DockerException
+
+            if isinstance(failure, (DockerException, OSError)):
+                raise DockerUnavailableError(
+                    "作業環境を作成できません。Dockerと保存先の状態を確認してください"
+                ) from failure
             raise

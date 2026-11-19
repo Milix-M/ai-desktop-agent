@@ -111,3 +111,15 @@ def test_large_output_is_reported_explicitly(guest_agent):
         assert failure.value.stderr == ""
         assert failure.value.exitcode == 0
         assert agent.ping()
+
+
+def test_shell_command_preserves_quoted_paths_unicode_and_failed_exit_status(guest_agent):
+    path, root = guest_agent
+    command = (
+        "printf '%s' '四半期報告' > '/qga/四半期 報告.txt'; "
+        "cat '/qga/四半期 報告.txt'; printf warning >&2; exit 7"
+    )
+    with QgaClient(path, timeout=2) as agent:
+        assert agent.run(command) == (7, "四半期報告", "warning")
+        assert (root / "四半期 報告.txt").read_text() == "四半期報告"
+        assert agent.ping()

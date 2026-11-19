@@ -13,6 +13,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from ai_desktop_agent.server.docker_client import DockerClientOwner, docker_operation
+from ai_desktop_agent.server.docker_client import DockerUnavailableError as DockerUnavailableError
 from ai_desktop_agent.server.vm_locks import environment_lock
 
 logger = logging.getLogger(__name__)
@@ -20,10 +22,6 @@ logger = logging.getLogger(__name__)
 SERVICE_LABEL = "com.docker.compose.service"
 PROJECT_LABEL = "com.docker.compose.project"
 VM_SERVICE = "vm"
-
-
-class DockerUnavailableError(RuntimeError):
-    """Dockerへの接続・環境の照会・操作に失敗した場合のエラー。"""
 
 
 @dataclass
@@ -37,7 +35,7 @@ class VmStatusInfo:
     qmp_status: str | None = None  # QMP query-status の status（inmigrate等もあり得る）
 
 
-class VmController:
+class VmController(DockerClientOwner):
     """`vm` サービスコンテナの状態取得・再起動を行う。
 
     Args:
@@ -46,16 +44,21 @@ class VmController:
         client: テスト用の差し替え可能な Docker クライアント。
     """
 
+    _connection_error = (
+        "Docker ソケットに接続できません。/var/run/docker.sock のマウントを確認してください"
+    )
+
     def __init__(
         self,
         container_name: str | None = None,
         client: Any | None = None,
     ) -> None:
         self._container_name = container_name or os.environ.get("VM_CONTAINER_NAME")
-        self._client = client
+        super().__init__(client)
 
     # ── 公開 API ──────────────────────────────────────
 
+    @docker_operation
     def status(self) -> VmStatusInfo:
         """VMコンテナの現在の状態を返す。QMPが生きていればゲスト状態も付与。"""
         container = self._find_container()
@@ -84,6 +87,7 @@ class VmController:
         info.qmp_status = self._qmp_status()
         return info
 
+    @docker_operation
     def target_vm_id(self) -> str:
         container = self._find_container()
         if container is None:
@@ -100,6 +104,7 @@ class VmController:
             else labels.get("ai-desktop-agent.vm-id") or VM_SERVICE
         )
 
+    @docker_operation
     def restart(self, timeout: int = 30, *, expected_vm_id: str | None = None) -> VmStatusInfo:
         """VMコンテナを再起動する（ゲストOSを含む再起動）。
 
@@ -148,24 +153,6 @@ class VmController:
         except Exception:
             logger.debug("QMP照会に失敗", exc_info=True)
             return None
-
-    def _docker(self) -> Any:
-        if self._client is not None:
-            return self._client
-        try:
-            import docker
-        except ImportError as e:
-            raise DockerUnavailableError("docker パッケージが利用できません") from e
-        try:
-            client = docker.from_env()
-            # 接続確認（ソケット未マウント時はここで失敗する）
-            client.ping()
-        except Exception as e:
-            raise DockerUnavailableError(
-                "Docker ソケットに接続できません。/var/run/docker.sock のマウントを確認してください"
-            ) from e
-        self._client = client
-        return client
 
     def _find_container(self) -> Any | None:
         client = self._docker()

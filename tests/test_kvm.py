@@ -1,6 +1,7 @@
 """KVM利用可否判定のテスト。"""
 
 import os
+from unittest.mock import Mock
 
 import pytest
 
@@ -112,3 +113,54 @@ def test_tcg_override(monkeypatch):
 def test_error_message_mentions_desktop():
     with pytest.raises(KvmUnavailableError, match="desktop"):
         raise KvmUnavailableError()
+
+
+@pytest.mark.parametrize("fault", [None, "ping", "discovery", "close"])
+def test_automatic_discovery_closes_only_the_docker_client_it_created(monkeypatch, fault):
+    import docker
+
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    client = _FakeDocker([_FakeContainer()])
+    client.close = Mock(side_effect=OSError("cleanup failed") if fault == "close" else None)
+    if fault == "ping":
+        client.ping = Mock(side_effect=OSError("daemon unavailable"))
+    if fault == "discovery":
+        client.containers.list = Mock(side_effect=OSError("discovery unavailable"))
+    monkeypatch.setattr(docker, "from_env", lambda: client)
+    assert is_kvm_available() is (fault in {None, "close"})
+    client.close.assert_called_once()
+
+
+def test_a_borrowed_docker_client_remains_usable_after_discovery(monkeypatch):
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    client = _FakeDocker([_FakeContainer()])
+    client.close = Mock()
+    assert is_kvm_available(client)
+    client.close.assert_not_called()
+
+
+def test_automatic_discovery_tolerates_a_missing_sdk(monkeypatch):
+    import builtins
+
+    original = builtins.__import__
+
+    def missing_docker(name, *args, **kwargs):
+        if name == "docker":
+            raise ImportError("SDK unavailable")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    monkeypatch.setattr(builtins, "__import__", missing_docker)
+    assert not is_kvm_available()
+
+
+def test_an_unavailable_docker_endpoint_is_not_treated_as_available_kvm(monkeypatch):
+    import docker
+
+    monkeypatch.setenv("USE_KVM", "auto")
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    monkeypatch.setattr(docker, "from_env", Mock(side_effect=OSError("endpoint unavailable")))
+    assert not is_kvm_available()

@@ -60,7 +60,6 @@ def test_android_target_remains_reachable_and_tracks_only_primary_replacement(wi
     labels = {LABEL_PROJECT: project, "com.docker.compose.project": project}
     image = os.environ.get("BACKEND_SMOKE_IMAGE", "ai-desktop-agent-backend-smoke")
     control = client.networks.create(project + "_default", driver="bridge", labels=labels)
-    created = []
 
     def guest(name, marker):
         container = client.containers.run(
@@ -73,7 +72,6 @@ def test_android_target_remains_reachable_and_tracks_only_primary_replacement(wi
             cap_drop=["ALL"],
             labels={**labels, "com.docker.compose.service": "android"},
         )
-        created.append(container)
         return container
 
     def probe(mode, marker):
@@ -97,7 +95,6 @@ def test_android_target_remains_reachable_and_tracks_only_primary_replacement(wi
             environment={"COMPOSE_PROJECT_NAME": project, "VM_HOST_DIR": "/tmp/no-android-data"},
             volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}},
         )
-        created.append(backend)
         first = probe("initial", "primary-v1")
         assert first["host"] == primary.name and first["instance_id"] == primary.id
         assert first["data_id"] == "container:" + primary.id
@@ -118,7 +115,11 @@ def test_android_target_remains_reachable_and_tracks_only_primary_replacement(wi
         assert after["instance_id"] == primary.id and primary.id != previous_id
         assert after["data_id"] == "container:" + primary.id
     finally:
-        for container in reversed(created):
+        # A create response can time out after Docker has allocated the container.
+        # Discover this test's resources even if `run` never returned a handle.
+        for container in client.containers.list(
+            all=True, filters={"label": f"{LABEL_PROJECT}={project}"}
+        ):
             with suppress(NotFound):
                 container.remove(force=True)
         for network in client.networks.list(filters={"label": f"{LABEL_PROJECT}={project}"}):

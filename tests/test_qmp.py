@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -271,3 +272,50 @@ def test_error_response_does_not_poison_the_next_command():
 def test_timeout_must_be_finite_and_positive(timeout):
     with pytest.raises(ValueError):
         QmpClient("unused.sock", timeout=timeout)
+
+
+def test_expired_command_deadline_closes_before_a_send(monkeypatch):
+    from ai_desktop_agent.vm import qmp
+
+    with Monitor(lambda request, *_: response(request)) as monitor:
+        client = QmpClient(monitor.path, timeout=1)
+        client.connect()
+        ticks = iter([0.0, 2.0])
+        # Model a thread being descheduled after setting the command deadline.
+        monkeypatch.setattr(qmp, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+        with pytest.raises(QmpError, match="上限"):
+            client.query_status()
+        assert monitor.disconnected.wait(1)
+        assert [request["execute"] for request in monitor.requests] == ["qmp_capabilities"]
+        with pytest.raises(QmpError, match="未接続"):
+            client.query_status()
+
+
+def test_ambiguous_command_response_closes_the_connection():
+    def handle(request, *_):
+        result = response(request)
+        if request["execute"] != "qmp_capabilities":
+            result["error"] = {"class": "GenericError", "desc": "contradictory result"}
+        return result
+
+    with Monitor(handle) as monitor, QmpClient(monitor.path) as client:
+        with pytest.raises(QmpError, match="returnまたはerror"):
+            client.query_status()
+        assert monitor.disconnected.wait(1)
+
+
+def test_query_error_is_reported_without_losing_the_next_valid_status():
+    queries = []
+
+    def handle(request, *_):
+        if request["execute"] == "query-status":
+            queries.append(request)
+            if len(queries) == 1:
+                return {"id": request["id"], "error": {"class": "GenericError", "desc": "busy"}}
+        return response(request, {"status": "running"})
+
+    with Monitor(handle) as monitor, QmpClient(monitor.path) as client:
+        with pytest.raises(QmpError, match="query-status失敗"):
+            client.query_status()
+        assert client.query_status() == {"status": "running"}
+        assert len(queries) == 2

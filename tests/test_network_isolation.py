@@ -219,8 +219,9 @@ def test_container_listener_never_falls_back_to_wildcard_or_loopback(value):
         EnvironmentNetworks(docker, "ai-desktop-agent").management_address()
 
 
+@pytest.mark.parametrize("module_entry", [False, True])
 def test_container_entrypoint_binds_only_management_ip_and_disables_forwarded_headers(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, module_entry
 ):
     pool, docker = pool_for(tmp_path)
     monkeypatch.setenv("AGENT_MANAGEMENT_CIDRS", "127.0.0.0/8,::1/128")
@@ -228,7 +229,13 @@ def test_container_entrypoint_binds_only_management_ip_and_disables_forwarded_he
     monkeypatch.setattr(entrypoint, "VmPool", lambda: pool)
     run = Mock()
     monkeypatch.setattr(entrypoint.uvicorn, "run", run)
-    entrypoint.main()
+    if module_entry:
+        import runpy
+
+        monkeypatch.setattr("ai_desktop_agent.server.vm_pool.VmPool", lambda: pool)
+        runpy.run_path(entrypoint.__file__, run_name="__main__")
+    else:
+        entrypoint.main()
     assert run.call_args.kwargs["host"] == "172.30.0.2"
     assert run.call_args.kwargs["proxy_headers"] is False
     assert run.call_args.kwargs["workers"] == 1

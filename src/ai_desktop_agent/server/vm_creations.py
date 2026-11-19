@@ -16,9 +16,15 @@ from typing import BinaryIO, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, model_validator
 
 from ai_desktop_agent.server.kvm import KvmUnavailableError
-from ai_desktop_agent.server.persistence import StorageError, atomic_json, metadata_lock
+from ai_desktop_agent.server.persistence import (
+    StorageError,
+    atomic_json,
+    metadata_lock,
+    unique_json_object,
+)
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
 from ai_desktop_agent.server.vm_pool import ID_PREFIX, VmInfo, VmPool
+from ai_desktop_agent.validation import validate_text
 from ai_desktop_agent.vm.async_io import (
     MAX_PENDING_VM_CREATIONS,
     VmCreationBusyError,
@@ -145,6 +151,9 @@ class CreationStore:
             if len(payload) > 64 * 1024:
                 raise ValueError("receipt is too large")
             record = CreationRecord.model_validate_json(payload)
+            # Keep Pydantic's strict JSON schema and recursion bound, then reject
+            # repeated fields that its JSON decoder otherwise resolves by order.
+            json.loads(payload, object_pairs_hook=unique_json_object)
             if record.id != job_id:
                 raise ValueError("receipt filename mismatch")
             return record
@@ -298,6 +307,8 @@ class VmCreationService:
         return await asyncio.shield(task)
 
     async def _submit(self, key: str, name: str | None, kind: str) -> CreationRecord:
+        if name is not None:
+            validate_text(name, "環境名")
         if (
             not _KEY.fullmatch(key)
             or kind not in ID_PREFIX
@@ -361,6 +372,12 @@ class VmCreationService:
 
     @staticmethod
     def _failed(record: CreationRecord, message: str, status: int) -> CreationRecord:
+        message = message.encode("utf-8", errors="replace").decode("utf-8")
+        message = (
+            message[:2048]
+            if message.strip()
+            else "環境を作成できません。環境の状態を確認してください"
+        )
         return record.updated(state="failed", error=message, error_status=status)
 
     async def _one(self, record: CreationRecord) -> None:
