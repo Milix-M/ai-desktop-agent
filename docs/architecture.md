@@ -294,8 +294,8 @@ sequenceDiagram
         BE->>VM: スクリーンショット取得
         VM-->>BE: 生画像
         BE->>BE: グリッド重畳＋黒画面ウェイク
-        BE->>LLM: decide_next_action()（画像＋履歴＋エラー情報）
-        LLM-->>BE: Action＋期待効果＋確信度
+        BE->>LLM: decide_next_action()（最新の画像＋直近の操作履歴＋作業メモ＋エラー情報）
+        LLM-->>BE: Action＋期待効果＋確信度＋メモの更新
         alt vm_restart要求
             BE->>BE: allow_vm_restart判定（未許可は却下して回復へ）
             BE->>VM: VM再起動＋60秒待機（許可時のみ）
@@ -343,6 +343,25 @@ agent/llm配下に置く。factory.pyのcreate_llm_providerが全提供元をOpe
 openai_compat_provider.pyの仕様は次の通りとする。画像は同一解像度JPEGのq80とdetail highで送る。座標系を保ちつつ軽くするためである。出力形式はStructured Outputのresponse_format json_schemaで強制する。非対応モデルでは通常JSONモードへ自動切替する。_structured_output退避で行う。不正な引数は_sanitize_paramsで整え、画面内収めは_clamp_paramsで行う。必須項目の欠落はActionの検証で誤りとする。OpenCode系にはUser-Agentのai-desktop-agent/0.1.0を付け、タスクIDをx-opencode-sessionで送る。session_idに対応する。呼出ごとのトークン使用量は_record_usageで累積し、タスク記録に保存する。max_tokensは1500に絞る。出力は小さいJSONのみのためである。
 
 システムプロンプト方針は座標グリッドの読み方、2段階クリック、アプリ起動はキーボード優先、不足アプリは端末で導入、subtask_completeは操作後のみとする。画面文字はLLMが画像から直接読む。
+
+### 画面をまたぐ作業メモ
+
+たとえば依頼書から「ペンの訂正額は950円」と読み取ってCalcに転記するとき、画面を切り替えると依頼書は見えなくなる。そのため、エージェントは読み取った値と出典をタスク専用のメモ（`Goal.working_note`）に入れ、Calcの画面と一緒に次の操作判断へ渡す。アプリを切り替えても操作を決めるモデルは同じである。
+
+```mermaid
+sequenceDiagram
+    participant S as タスクセッション
+    participant M as 操作を決めるモデル
+    S->>M: 依頼書の画面・指示・現在のサブタスク・直近の操作
+    M-->>S: Calcへ切り替える操作と「依頼書：ペンは950円」のメモ
+    S->>S: メモを保持して画面を切り替える
+    S->>M: Calcの画面・指示・現在のサブタスク・直近の操作・メモ
+    M-->>S: 金額を入力する操作
+```
+
+`OpenAICompatProvider.decide_next_action` は毎回、最新の画像、ゴールと制約、現在のサブタスク、直近10件までの操作履歴、現在のメモを組み合わせる。履歴には操作の種類・引数・成否が入り、メモには次の画面でも使う値が入る。過去の画像や会話全文を毎回送ると操作が続くほど入力が増えるため、引き継ぐ情報をこの範囲に絞っている。
+
+モデルは操作とメモを同じ応答で返す。通常画面でも拡大画面でも、`TaskSession` は空のメモを受け取ると前の内容を保ち、値があればメモ全体を置き換える。最大400文字で、更新時には引き続き必要な値も含めるようモデルに指示する。新しいタスクは空のメモから始まる。読み取りを誤ったり値を残し損ねたりした場合は、元の画面で再確認する必要がある。
 
 ### 決定モデルの組込
 

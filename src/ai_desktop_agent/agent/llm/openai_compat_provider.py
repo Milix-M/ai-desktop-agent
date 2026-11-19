@@ -55,10 +55,17 @@ PLATFORM_LINUX = "linux"
 PLATFORM_ANDROID = "android"
 
 
+def _planning_prompt(platform: str) -> str:
+    return (
+        f"{platform}のGUI操作を計画します。"
+        "秘密情報は利用者の手動入力とし、VM再起動は許可が必要です。"
+    )
+
+
 def _system_prompt(platform: str = PLATFORM_LINUX) -> str:
     """プラットフォーム別のシステムプロンプトを返す。"""
     if platform == PLATFORM_ANDROID:
-        return _SYSTEM_PROMPT + _ANDROID_PROMPT
+        return _COMMON_ACTION_PROMPT + _ANDROID_PROMPT
     return _SYSTEM_PROMPT
 
 
@@ -66,42 +73,13 @@ def _system_prompt(platform: str = PLATFORM_LINUX) -> str:
 # システムプロンプト — 画面の見方と操作のルール
 # ========================================================================
 
-_SYSTEM_PROMPT = """あなたは Linux デスクトップ（KDE Plasma, 1024x768）を遠隔操作する
+_COMMON_ACTION_PROMPT = """あなたは画面を遠隔操作する
 AI エージェントです。
 ユーザーの指示に従い、GUI 操作を自律実行します。
 
-# 画面の見方
-
-スクリーンショットには以下の視覚的補助が描画されています：
-- **赤いグリッド線**: 50px 間隔の細線（100px ごとにやや太い線）
-- **座標マーカー**: 上端に X 座標、左端に Y 座標の数字（100px 間隔）
-  - 例: 上端に「300」、左端に「200」とあれば、その交点付近が (300, 200)
-- **緑の十字**: 現在のマウスカーソル位置
-- **赤枠**: 画面の外周
-
-# 座標の読み取り方
-
-1. まず画面上端の数字を見て、ターゲットの X 座標を読む
-2. 左端の数字を見て、ターゲットの Y 座標を読む
-3. グリッド線を基準に、マーカーの間を比例補間する
-4. 精度を上げたい場合は region_select で拡大表示を要求する
-
-座標は左上が (0, 0)、右方向が +x、下方向が +y です。
-
-# 2段階精密クリック戦略（重要）
-
-ボタンや小さな UI をクリックする際は、以下の 2 段階を使い分けてください：
-
-**【直接クリック】（確信度 0.8 以上の場合のみ）**
-- 大きなボタン、ウィンドウタイトルバー、デスクトップアイコンなど
-- 座標マーカーから自信を持って位置が特定できる場合
-- 例: 上端「400」付近、左端「300」付近のボタン → left_click {x: 400, y: 300}
-
-**【region_select → 精密クリック】（確信度が低い場合）**
-- 小さいボタン、テキスト入力欄、チェックボックス、メニュー項目
-- 座標マーカーだけでは自信がない場合
-- ターゲット周辺を含む領域（100〜300px 四方）を region_select で要求
-- 返される拡大画像で正確な座標を読んでから left_click する
+画面左上を原点とし、上端のX座標・左端のY座標とグリッド線から位置を読み取ってください。
+緑の十字はカーソルです。確信度0.8以上なら直接クリックできます。
+小さい対象や位置が不確かな対象は周囲100〜300pxをregion_selectし、拡大画面で選んでください。
 
 # 操作可能なアクション
 
@@ -135,12 +113,18 @@ AI エージェントです。
 
 1. **画面を見てから判断する**：推測でクリックしない。必ず座標マーカーを確認する。
 2. **小さいターゲットは region_select を使う**：確信度 0.7 未満なら拡大表示を要求する。
-3. **アクション後は画面変化を待つ**：クリック後は 0.5〜1.0 秒 wait する。
+3. 次の画面に操作結果が見えたら、そのまま次へ進む。読み込み中だけ wait する。
 4. **失敗したら別の方法を試す**：同じ座標を連続クリックしない。
 5. **confidence は正直に**：自信がないのに 0.9 以上を付けない。
 6. **subtask_complete は操作の後に**：そのサブタスクで1つも操作せずに完了宣言すると
    システムに却下される。まずクリック・入力・キー操作・待機のいずれかを実行し、
    期待結果が画面に現れたことを確認してから完了を宣言する。
+"""
+
+_SYSTEM_PROMPT = (
+    _COMMON_ACTION_PROMPT
+    + """
+Linux デスクトップの操作
 7. **アプリ起動はキーボード優先**：タスクバーの小さいアイコンへの直接クリックは
    誤爆しやすいため最後の手段にする。第一選択は Alt+F2（ランナー）→
    アプリ名を type → Enter。ランナーが使えない場合のみアイコンを使う。
@@ -152,12 +136,13 @@ AI エージェントです。
    完了を宣言する（推測での完了宣言はしない）。
 
 画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
+)
 
 _ANDROID_PROMPT = """
 # 操作対象: Android 端末（Android 9, x86 タブレット, 1024x768）
 
 このタスクの操作対象は Linux ではなく **Android 端末** です。
-上記の Linux デスクトップ向けルールのうち、以下は Android では使えません：
+Android では以下の操作を使えません：
 
 - 禁止: 端末アプリ・KRunner・Alt+F2・Ctrl+Alt+T・`which`・`apt`・`snap`
   （Android に端末・パッケージ管理・ランナーはありません）
@@ -199,258 +184,13 @@ _ACTION_TYPES = [
     "type",
     "request_user_input",
     "key_press",
+    "repeat_navigation",
     "key_combo",
     "wait",
     "region_select",
     "vm_restart",
     "subtask_complete",
 ]
-
-_SCHEMA_ACTION = {
-    "name": "action_decision",
-    "schema": {
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "left_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "right_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "double_click"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "mouse_move"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
-                        "required": ["x", "y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "drag"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "start_x": {"type": "integer"},
-                            "start_y": {"type": "integer"},
-                            "end_x": {"type": "integer"},
-                            "end_y": {"type": "integer"},
-                        },
-                        "required": ["start_x", "start_y", "end_x", "end_y"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "scroll"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "direction": {"type": "string", "enum": ["up", "down"]},
-                            "amount": {"type": "integer"},
-                        },
-                        "required": ["direction", "amount"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "type"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "key_press"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"key": {"type": "string"}},
-                        "required": ["key"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "key_combo"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
-                        "required": ["keys"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "wait"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"seconds": {"type": "number"}},
-                        "required": ["seconds"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "region_select"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "x": {"type": "integer"},
-                            "y": {"type": "integer"},
-                            "width": {"type": "integer"},
-                            "height": {"type": "integer"},
-                        },
-                        "required": ["x", "y", "width", "height"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "vm_restart"},
-                    "params": {
-                        "type": "object",
-                        "properties": {"reason": {"type": "string"}},
-                        "required": ["reason"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "action_type": {"const": "subtask_complete"},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "summary": {"type": "string"},
-                            "data_json": {"type": "string"},
-                        },
-                        "required": ["summary", "data_json"],
-                        "additionalProperties": False,
-                    },
-                    "expected_effect": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["action_type", "params", "expected_effect", "confidence", "reasoning"],
-                "additionalProperties": False,
-            },
-        ]
-    },
-}
-
 
 _SCHEMA_UNDERSTAND = {
     "name": "understand_instruction",
@@ -511,6 +251,19 @@ _SCHEMA_DECOMPOSE = {
     },
 }
 
+_SCHEMA_INITIAL = {
+    "name": "initial_plan",
+    "strict": True,
+    "schema": {
+        **_SCHEMA_UNDERSTAND["schema"],
+        "properties": {
+            **_SCHEMA_UNDERSTAND["schema"]["properties"],
+            "subtasks": _SCHEMA_DECOMPOSE["schema"]["properties"]["subtasks"],
+        },
+        "required": [*_SCHEMA_UNDERSTAND["schema"]["required"], "subtasks"],
+    },
+}
+
 _SCHEMA_VERIFY = {
     "name": "verify_result",
     "strict": True,
@@ -538,11 +291,11 @@ _SCHEMA_RECOVER = {
             "actions": {
                 "type": "array",
                 "items": {
-                    "oneOf": [
+                    "anyOf": [
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "left_click"},
+                                "action_type": {"type": "string", "const": "left_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -559,7 +312,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "right_click"},
+                                "action_type": {"type": "string", "const": "right_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -576,7 +329,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "double_click"},
+                                "action_type": {"type": "string", "const": "double_click"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -593,7 +346,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "mouse_move"},
+                                "action_type": {"type": "string", "const": "mouse_move"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -610,7 +363,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "drag"},
+                                "action_type": {"type": "string", "const": "drag"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -629,7 +382,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "scroll"},
+                                "action_type": {"type": "string", "const": "scroll"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -646,7 +399,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "type"},
+                                "action_type": {"type": "string", "const": "type"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string"}},
@@ -660,7 +413,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "key_press"},
+                                "action_type": {"type": "string", "const": "key_press"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"key": {"type": "string"}},
@@ -674,7 +427,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "key_combo"},
+                                "action_type": {"type": "string", "const": "key_combo"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -690,7 +443,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "wait"},
+                                "action_type": {"type": "string", "const": "wait"},
                                 "params": {
                                     "type": "object",
                                     "properties": {"seconds": {"type": "number"}},
@@ -704,7 +457,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "region_select"},
+                                "action_type": {"type": "string", "const": "region_select"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -723,7 +476,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "vm_restart"},
+                                "action_type": {"type": "string", "const": "vm_restart"},
                                 "params": {
                                     "type": "object",
                                     "properties": {
@@ -739,7 +492,7 @@ _SCHEMA_RECOVER = {
                         {
                             "type": "object",
                             "properties": {
-                                "action_type": {"const": "subtask_complete"},
+                                "action_type": {"type": "string", "const": "subtask_complete"},
                                 "params": {
                                     "type": "object",
                                     "properties": {},
@@ -762,33 +515,69 @@ _SCHEMA_RECOVER = {
 }
 
 
-def _manual_input_schema(decision: bool) -> dict:
-    properties = {
-        "action_type": {"const": "request_user_input"},
-        "params": {
-            "type": "object",
-            "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
-    }
-    if decision:
-        properties.update(
-            expected_effect={"type": "string"},
-            confidence={"type": "number", "minimum": 0.0, "maximum": 1.0},
-            reasoning={"type": "string"},
-        )
+def _action_variant(name: str, params: dict) -> dict:
     return {
         "type": "object",
-        "properties": properties,
-        "required": list(properties),
+        "properties": {
+            "action_type": {"type": "string", "const": name},
+            "params": {
+                "type": "object",
+                "properties": params,
+                "required": list(params),
+                "additionalProperties": False,
+            },
+        },
+        "required": ["action_type", "params"],
         "additionalProperties": False,
     }
 
 
-_SCHEMA_ACTION["schema"]["oneOf"].append(_manual_input_schema(True))
-_SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["oneOf"].append(
-    _manual_input_schema(False)
+_recovery_variants = _SCHEMA_RECOVER["schema"]["properties"]["actions"]["items"]["anyOf"]
+_recovery_variants.append(
+    _action_variant(
+        "request_user_input", {"reason": {"type": "string", "minLength": 1, "maxLength": 1000}}
+    )
+)
+_SCHEMA_ACTION = {
+    "name": "action_decision",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "anyOf": [
+                    *(
+                        variant
+                        for variant in _recovery_variants
+                        if variant["properties"]["action_type"]["const"] != "subtask_complete"
+                    ),
+                    _action_variant(
+                        "subtask_complete",
+                        {"summary": {"type": "string"}, "data_json": {"type": "string"}},
+                    ),
+                    _action_variant(
+                        "repeat_navigation",
+                        {
+                            "key": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                            "count": {"type": "integer", "minimum": 2, "maximum": 5},
+                        },
+                    ),
+                ]
+            },
+            "working_note": {"type": "string", "maxLength": 400},
+            "expected_effect": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reasoning": {"type": "string"},
+        },
+        "required": ["action", "expected_effect", "confidence", "reasoning", "working_note"],
+        "additionalProperties": False,
+    },
+}
+
+
+_PLAN_VERIFICATION = (
+    "完了判定には最後の画面1枚だけを使います。異なる画面が必要な成果は、"
+    "それぞれを確認できる時点でサブタスクを分け、次の画面に移る前に完了させてください。"
+    "同じ画面で確認できる操作はまとめてください。"
 )
 
 
@@ -841,6 +630,9 @@ class OpenAICompatProvider(LLMProvider):
         # structured output (response_format) が使えるかどうか。
         # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
         self._structured_output = True
+        self._completion_limit_only = (
+            self._client.base_url.host == "api.openai.com" and model.startswith("gpt-6.")
+        )
 
     @property
     def provider_name(self) -> str:
@@ -855,6 +647,24 @@ class OpenAICompatProvider(LLMProvider):
     async def aclose(self) -> None:
         await self._client.close()
 
+    async def initial_plan(
+        self, goal: Goal, platform: str
+    ) -> tuple[UnderstandingResult, DecompositionResult]:
+        prompt = (
+            "指示の意図・対象アプリ・制約と、期待結果つきの操作計画を返してください。"
+            "単一の成果物を一つのサブタスクにまとめ、開く・選択・入力・保存を分割しない。"
+            "期待結果は画面で確認できる最終状態とし、維持すべき制約はconstraintsに残す。"
+            "ユーザーが明示的に求めた検証は計画に含める。"
+            f"{_PLAN_VERIFICATION}IDはstep_1から連番にしてください。\n" + goal.description
+        )
+        data = await self._call(prompt, _SCHEMA_INITIAL, system_prompt=_planning_prompt(platform))
+        return (
+            UnderstandingResult(
+                data["intent"], data["target_application"], data["constraints"], data["reasoning"]
+            ),
+            self._decomposition(data, 0),
+        )
+
     async def understand_instruction(
         self, goal: Goal, platform: str = PLATFORM_LINUX
     ) -> UnderstandingResult:
@@ -862,7 +672,9 @@ class OpenAICompatProvider(LLMProvider):
 
 【ユーザー指示】
 {goal.description}"""
-        data = await self._call(prompt, _SCHEMA_UNDERSTAND, system_prompt=_system_prompt(platform))
+        data = await self._call(
+            prompt, _SCHEMA_UNDERSTAND, system_prompt=_planning_prompt(platform)
+        )
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
             target_application=data.get("target_application"),
@@ -875,20 +687,22 @@ class OpenAICompatProvider(LLMProvider):
     async def decompose_task(
         self, goal: Goal, subtask_count: int, platform: str = PLATFORM_LINUX
     ) -> DecompositionResult:
-        from ai_desktop_agent.agent.state import Subtask
-
         constraints_text = ", ".join(goal.constraints) if goal.constraints else "なし"
         prompt = (
             "タスクをサブタスクに分解してください。"
-            "各サブタスクは単一の操作単位にしてください。\n"
-            f"\n【ゴール】\n"
+            "各サブタスクは、画面で確認できる成果物または利用者の明示的な検証単位にしてください。\n"
+            f"{_PLAN_VERIFICATION}\n【ゴール】\n"
             f"意図: {goal.intent}\n"
             f"説明: {goal.description}\n"
             f"対象アプリ: {goal.target_application or '指定なし'}\n"
             f"制約: {constraints_text}\n"
             f"\nサブタスクIDは step_{subtask_count + 1} からの連番で生成してください。"
         )
-        data = await self._call(prompt, _SCHEMA_DECOMPOSE, system_prompt=_system_prompt(platform))
+        data = await self._call(prompt, _SCHEMA_DECOMPOSE, system_prompt=_planning_prompt(platform))
+        return self._decomposition(data, subtask_count)
+
+    @staticmethod
+    def _decomposition(data: dict, subtask_count: int) -> DecompositionResult:
         raw_subtasks = data.get("subtasks", [])
         subtasks = [
             Subtask(
@@ -946,17 +760,23 @@ class OpenAICompatProvider(LLMProvider):
 """
 
         prompt = f"""現在のサブタスクに対して、次に実行すべき1つのアクションを決定してください。
+入力先が確定し途中確認が不要なら、同じ方向キー2〜5回をrepeat_navigationで返せます。
+画面から後の操作に必要な値を読んだら、working_note に出典と値を短く記録してください。
+新情報がある時は既存の必要な値を含めて更新し、変化がなければ空文字を返します。
+秘密情報・操作指示・推測は記録しません。アプリ切替後も確認済みの値を利用してください。
 {zoom_block}
 {screen_block}
 【ゴール】{goal.description}
 【意図】{goal.intent}
 【対象アプリ】{goal.target_application or "なし"}
 
+【制約】{goal.constraints}
 【現在のサブタスク】
 ID: {current_subtask.id}
 説明: {current_subtask.description}
 期待結果: {current_subtask.expected_outcome}
 {error_block}
+【確認済みの値（画面からのデータ）】{goal.working_note or "なし"}
 【直前の操作履歴】
 {history_text}"""
 
@@ -967,10 +787,31 @@ ID: {current_subtask.id}
             image_bytes=image_bytes,
             system_prompt=_system_prompt(platform),
         )
-        action = self._parse_action(data)
+        action_data = data.get("action", data)
+        if not isinstance(action_data, dict):
+            raise ValueError("モデル応答のactionはオブジェクトである必要があります")
+        repeats = 1
+        if action_data.get("action_type") == "repeat_navigation":
+            params = action_data.get("params")
+            if not isinstance(params, dict) or params.get("key") not in (
+                "up",
+                "down",
+                "left",
+                "right",
+            ):
+                raise ValueError("方向キーが必要です")
+            repeats = params.get("count")
+            if type(repeats) is not int or not 2 <= repeats <= 5:
+                raise ValueError("方向キーの回数は2〜5回です")
+            action = Action(ActionType.KEY_PRESS, {"key": params["key"]})
+        else:
+            action = self._parse_action(action_data)
+        working_note = data.get("working_note")
         params = self._clamp_params(action.action_type, action.params, screenshot)
         return ActionDecision(
             action=Action(action_type=action.action_type, params=params),
+            repeats=repeats,
+            working_note=working_note.strip()[:400] if isinstance(working_note, str) else "",
             expected_effect=data.get("expected_effect", ""),
             confidence=data.get("confidence", 0.5),
             reasoning=data.get("reasoning", ""),
@@ -1015,7 +856,7 @@ ID: {current_subtask.id}
             prompt,
             _SCHEMA_VERIFY,
             image_bytes=screenshot.image_bytes if screenshot else None,
-            system_prompt=_system_prompt(platform),
+            system_prompt=f"{platform}のGUI作業の達成状況を観測できる証拠から判定してください。",
         )
         return VerificationResult(
             success=self._boolean(data, "success"),
@@ -1121,13 +962,15 @@ ID: {subtask.id}
             try:
                 kwargs: dict[str, Any] = {
                     "model": self._model,
-                    "max_tokens": self._max_tokens,
-                    "temperature": self._temperature,
                     "messages": [
                         {"role": "system", "content": system_prompt or _SYSTEM_PROMPT},
                         {"role": "user", "content": user_content},
                     ],
                 }
+                if self._completion_limit_only:
+                    kwargs["max_completion_tokens"] = self._max_tokens
+                else:
+                    kwargs.update(max_tokens=self._max_tokens, temperature=self._temperature)
                 if use_schema:
                     kwargs["response_format"] = {
                         "type": "json_schema",
@@ -1394,9 +1237,10 @@ ID: {subtask.id}
         lines = []
         for i, record in enumerate(history, 1):
             status = "✓" if record.success else "✗"
-            lines.append(
-                f"{i}. [{status}] {record.action.action_type.value} {record.action.params}"
-            )
+            params = record.action.params
+            if record.action.action_type == ActionType.TYPE and len(params["text"]) > 80:
+                params = {"text": f"（{len(params['text'])}文字）"}
+            lines.append(f"{i}. [{status}] {record.action.action_type.value} {params}")
             if record.error_message:
                 lines.append(f"   エラー: {record.error_message}")
         return "\n".join(lines)

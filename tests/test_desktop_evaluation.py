@@ -88,6 +88,13 @@ def test_unicode_replacement_with_the_original_text_left_over_is_rejected():
     assert not check_case(case, {case.filename: (case.expected + case.initial).encode()})[0]
 
 
+def test_append_requires_original_lines_and_final_newline():
+    case = next(case for case in CASES if case.id == "text-append")
+    for invalid in (case.initial, case.expected.removeprefix(case.initial), case.expected.rstrip()):
+        assert not check_case(case, {case.filename: invalid.encode()})[0]
+    assert check_case(case, {case.filename: case.expected.encode()})[0]
+
+
 @pytest.mark.parametrize("link", [False, True])
 def test_artifact_reader_never_extracts_guest_paths_or_accepts_links(link, tmp_path):
     container = Mock()
