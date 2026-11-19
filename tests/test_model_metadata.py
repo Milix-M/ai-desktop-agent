@@ -45,6 +45,7 @@ CORRUPTIONS = {
     "action.expected_effect": None,
     "action.reasoning": ["inspect"],
     "action.reasoning-unicode": "unpaired \ud800",
+    "action.working_note-unicode": "unpaired \ud800",
     "action.text-unicode": "unpaired \ud800",
     "action.keys-unicode": ["ctrl", "unpaired \ud800"],
     "verify.reasoning": ["visible"],
@@ -80,6 +81,7 @@ def metadata_reply(stage, case, text="forbidden input", *, action_number=1):
             "reasoning": "inspect again",
         },
     }
+    values["initial_plan"] = values["understand_instruction"] | values["decompose_task"]
     group, field = case.split(".")
     if group in {"understand", "plan", "action"} and action_number == 1:
         values["action_decision"].update(action_type="type", params={"text": text})
@@ -93,7 +95,10 @@ def metadata_reply(stage, case, text="forbidden input", *, action_number=1):
         "verify": "verify_result",
         "recover": "recover_from_error",
     }[group]
-    if stage == target_stage and case in CORRUPTIONS:
+    matches_stage = stage == target_stage or (
+        stage == "initial_plan" and group in {"understand", "plan"}
+    )
+    if matches_stage and case in CORRUPTIONS:
         bad = CORRUPTIONS[case]
         if group == "action" and field == "text-unicode":
             value["params"]["text"] = bad
@@ -181,7 +186,7 @@ async def test_valid_unicode_and_legacy_defaults_remain_usable(
                 "confidence",
             ):
                 data.pop(field, None)
-            if stage == "decompose_task":
+            if stage == "initial_plan":
                 data["subtasks"] = [{"description": "inspect"}]
         return completion(json.dumps(data))
 

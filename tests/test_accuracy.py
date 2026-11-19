@@ -100,3 +100,44 @@ class TestSessionGuards:
             success=True,
         )
         assert await s._verify_click_effect(rec) is False
+
+    @pytest.mark.asyncio
+    async def test_verify_uses_changed_settled_frame(self, session):
+        from unittest.mock import Mock
+
+        from ai_desktop_agent.agent.state import ActionRecord
+
+        s = session
+        s._last_before_raw = s.display.capture_raw()
+        s._settled_click = _real_ss()
+        s.display.capture_raw = Mock(side_effect=AssertionError("unexpected capture"))
+        rec = ActionRecord(Action(ActionType.LEFT_CLICK, {"x": 1, "y": 1}), True)
+        assert await s._verify_click_effect(rec)
+        s.display.capture_raw.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_navigation_stops_and_records_the_failed_key(tmp_path):
+    from unittest.mock import AsyncMock, Mock
+
+    from ai_desktop_agent.agent.llm.mock import MockLLMProvider
+    from ai_desktop_agent.server.session import TaskSession
+    from ai_desktop_agent.server.store import TaskStore
+    from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+    display = FakeDisplayBackend()
+    display.key_press = Mock(side_effect=[None, RuntimeError("input failed")])
+    session = TaskSession(llm=MockLLMProvider(), display=display, store=TaskStore(tmp_path))
+    session.loop.start(Goal(description="move"))
+    session.loop.understanding_done()
+    session.loop.plan_ready([Subtask(id="s", description="move")])
+    session._capture_screenshot = AsyncMock(return_value=_real_ss())
+    session._decide_action = AsyncMock(
+        return_value=ActionDecision(
+            Action(ActionType.KEY_PRESS, {"key": "down"}), "move", 1.0, "test", repeats=3
+        )
+    )
+    session.executor.wait_for_still = AsyncMock(return_value=None)
+    await session._execute_phase()
+    assert display.key_press.call_count == 2
+    assert [r.success for r in session.loop.context.action_history] == [True, False]

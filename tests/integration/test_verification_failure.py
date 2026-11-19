@@ -63,15 +63,11 @@ async def test_completion_service_failure_stops_before_another_gui_action_and_ke
     async def respond(body: dict):
         requests.append(body)
         stage = body["response_format"]["json_schema"]["name"]
-        if stage == "understand_instruction":
+        if stage == "initial_plan":
             data = {
                 "intent": "inspect",
                 "target_application": None,
                 "constraints": [],
-                "reasoning": "inspect",
-            }
-        elif stage == "decompose_task":
-            data = {
                 "subtasks": [
                     {
                         "id": "s1",
@@ -158,7 +154,7 @@ async def test_completion_service_failure_stops_before_another_gui_action_and_ke
         assert not exists
         assert len(verification_requests) == expected_verifications
         assert len(actions) == 3
-        assert provider.call_count == len(requests) == 5 + expected_verifications
+        assert provider.call_count == len(requests) == 4 + expected_verifications
         assert record.state == "failed" and record.stop_reason == "execution_error"
         assert record.error_message and "completion-local-test-key" not in record.error_message
         assert len(record.actions) == 1 and record.actions[0].action_type == "subtask_complete"
