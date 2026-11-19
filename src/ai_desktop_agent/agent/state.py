@@ -130,6 +130,7 @@ class Goal:
     target_application: str | None = None
     constraints: list[str] = field(default_factory=list)
     expected_output: str = ""
+    working_note: str = ""  # このタスクの画面で読み取り、後続操作で使う値
 
 
 @dataclass
