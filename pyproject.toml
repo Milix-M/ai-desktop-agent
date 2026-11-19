@@ -67,10 +67,13 @@ addopts = ["-v", "--tb=short"]
 markers = ["desktop_integration: real Docker desktop and browser checks"]
 
 [tool.coverage.run]
+branch = true
+patch = ["subprocess"]
 source = ["src/ai_desktop_agent"]
 omit = ["*/__pycache__/*", "*/tests/*"]
 
 [tool.coverage.report]
+precision = 2
 exclude_also = [
     "if TYPE_CHECKING:",
     "class .*\\bProtocol\\):",

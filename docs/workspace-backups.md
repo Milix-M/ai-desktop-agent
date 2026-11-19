@@ -23,6 +23,8 @@ docker compose run --rm -T --no-deps --entrypoint /app/.venv/bin/python backend 
 
 成功するとバックアップIDを表示する。tarとJSONを一組で保管する。
 
+保存後の再開に失敗した場合も、表示された「保存済みバックアップ」のIDとtar・JSONを保管する。一時停止したままのコンテナは名前を指定して `docker unpause` で再開する。
+
 ## 固定desktopを復元する
 
 対象は `./scripts/up.sh` でホームを移行済みの固定desktopとする。`.env` の `USE_KVM=false` を確認する。復元はホームの現在の内容を置き換える。タスクを止め、アプリ内の作業を保存してから、復元前のバックアップを作る。

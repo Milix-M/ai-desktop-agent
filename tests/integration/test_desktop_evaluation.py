@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -61,7 +62,12 @@ def test_scripted_evaluation_checks_three_fresh_desktops_and_cleans_up(tmp_path)
         client.close()
 
 
-def test_interrupting_evaluation_records_the_stop_and_removes_owned_resources(tmp_path):
+@pytest.mark.parametrize(
+    "interrupt_signal", [signal.SIGTERM, signal.SIGINT], ids=["sigterm", "sigint"]
+)
+def test_interrupting_evaluation_records_the_stop_and_removes_owned_resources(
+    tmp_path, interrupt_signal
+):
     image = os.environ.get("DESKTOP_SMOKE_IMAGE", "ai-desktop-agent-desktop-smoke")
     output = Path(os.environ.get("DESKTOP_EVAL_RESULTS_DIR", str(tmp_path))) / (
         "interrupted-" + uuid.uuid4().hex[:8]
@@ -101,7 +107,7 @@ def test_interrupting_evaluation_records_the_stop_and_removes_owned_resources(tm
                 time.sleep(0.05)
             else:
                 pytest.fail("Evaluation did not allocate a desktop: " + log_path.read_text())
-            process.terminate()
+            process.send_signal(interrupt_signal)
             assert process.wait(timeout=30) == 130, log_path.read_text()
             report = json.loads((output / "report.json").read_text())
             assert report["status"] == "interrupted"

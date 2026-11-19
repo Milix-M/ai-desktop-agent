@@ -90,7 +90,7 @@ jobs:
         run: uv sync --frozen --extra mcp
 
       - name: Run tests with coverage
-        run: uv run --frozen --extra mcp pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-report=xml --cov-report=term-missing tests/
+        run: uv run --frozen --extra mcp pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-branch --cov-report=xml --cov-report=term-missing tests/
 
       - name: Upload coverage to artifact
         uses: actions/upload-artifact@v4
@@ -136,12 +136,19 @@ jobs:
         if: needs.changes.outputs.full == 'true'
       - run: npm run typecheck
         if: needs.changes.outputs.full == 'true'
-      - run: npm test
+      - run: npm run test:coverage
         if: needs.changes.outputs.full == 'true'
       - run: npm run build
         if: needs.changes.outputs.full == 'true'
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+      - name: Upload frontend coverage
+        if: always() && needs.changes.outputs.full == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          retention-days: 7
 
   desktop:
     name: Desktop (Firefox, VNC, QMP, and guest agent)
@@ -232,11 +239,35 @@ jobs:
           printf '%s  %s\n' "$digest" "$COMPOSE_TEST_DIR/cli-plugins/docker-compose" | sha256sum --check --status
           chmod +x "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
           DOCKER_CONFIG="$COMPOSE_TEST_DIR" docker compose version
-      - run: uv run pytest -m desktop_integration tests/integration/
+      - name: Check browser availability
+        run: google-chrome --version
+      - run: uv run --frozen pytest -m desktop_integration tests/integration/ --cov=ai_desktop_agent --cov-branch --cov-report=
         env:
           RUN_DESKTOP_SMOKE: "1"
           DOCKER_CONFIG: ${{ runner.temp }}/agent-compose
           DESKTOP_EVAL_RESULTS_DIR: ${{ runner.temp }}/agent-evaluations
+          COVERAGE_FILE: ${{ runner.temp }}/agent-desktop-host.coverage
+          DESKTOP_CONTAINER_COVERAGE_DIR: ${{ runner.temp }}/agent-container-coverage
+      - name: Combine host and container coverage
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/agent-container-coverage/desktop.coverage
+        run: |
+          uv run --frozen coverage combine --keep "$RUNNER_TEMP/agent-desktop-host.coverage" "$RUNNER_TEMP/agent-container-coverage/container.coverage"
+          uv run --frozen coverage xml -o "$RUNNER_TEMP/agent-container-coverage/desktop-coverage.xml"
+          uv run --frozen coverage json -o "$RUNNER_TEMP/agent-container-coverage/desktop-coverage.json"
+      - name: Upload desktop coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-coverage
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/agent-desktop-host.coverage
+            ${{ runner.temp }}/agent-container-coverage/*.json
+            ${{ runner.temp }}/agent-container-coverage/*.coverage
+            ${{ runner.temp }}/agent-container-coverage/*.xml
+            ${{ runner.temp }}/agent-container-coverage/raw/
+          retention-days: 7
       - name: Install pinned Trivy
         run: |
           curl -fLSs --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz -o "$RUNNER_TEMP/trivy.tar.gz"
