@@ -127,14 +127,11 @@ class ActionExecutor:
 
             # ── ズーム要求 ──
             case ActionType.REGION_SELECT:
-                # 本来は TaskSession が横取りして拡大→再判断する。
-                # 直接 executor に来た場合は何もしない（誤って成功扱いしないよう明示）。
-                logger.warning("REGION_SELECT が executor に到達（sessionで処理されるべき）")
+                raise RuntimeError("領域拡大はタスクセッションで処理してください")
 
             # ── VM操作（ユーザー許可制） ──
             case ActionType.VM_RESTART:
-                # 本来は TaskSession が横取りして許可確認の上で実行する。
-                logger.warning("VM_RESTART が executor に到達（sessionで処理されるべき）")
+                raise RuntimeError("VM再起動はタスクセッションで処理してください")
 
             # ── メタ ──
             case ActionType.SUBTASK_COMPLETE:

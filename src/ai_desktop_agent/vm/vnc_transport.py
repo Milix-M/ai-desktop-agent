@@ -34,6 +34,10 @@ class ContainerHostnameEndpoint(HostnameEndpoint):
 
 
 class ManagedVNCProtocol(ClipboardClient):
+    def capture_region_png(self, output, x, y, width, height):
+        # Upstream captureRegion omits the format required for an in-memory file.
+        return self._capture(output, False, x, y, x + width, y + height, format="png")
+
     def connectionMade(self):  # noqa: N802
         super().connectionMade()
         self.factory.owner.transport_connected(self)
@@ -136,6 +140,7 @@ class ManagedVNCProxy(ThreadedVNCClientProxy):
             if connection is not None:
                 connection.cancel()
             if protocol is not None:
+                protocol.cancel_clipboard("VNC接続が切断されました")
                 protocol.transport.abortConnection()
                 if protocol.deferred in pending:
                     protocol.deferred = None

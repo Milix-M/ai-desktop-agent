@@ -12,6 +12,16 @@ from PIL import Image
 
 
 @dataclasses.dataclass(frozen=True)
+class CropGeometry:
+    """切り出し原点と、整数丸めを含む縦横それぞれの実倍率。"""
+
+    origin_x: int
+    origin_y: int
+    scale_x: float
+    scale_y: float
+
+
+@dataclasses.dataclass(frozen=True)
 class Screenshot:
     """単一の画面キャプチャ。"""
 
@@ -67,11 +77,12 @@ class Screenshot:
         scale: float = 2.0,
         max_dim: int = 1024,
     ) -> tuple[Screenshot, tuple[int, int, float]]:
-        """領域切り出し＋実倍率つきで返す。
+        """領域切り出し＋横方向の実倍率つきで返す。
 
         Returns:
-            (拡大後Screenshot, (実際に使われたx, y, 実倍率)) のタプル。
+            (拡大後Screenshot, (実際に使われたx, y, 横方向の実倍率)) のタプル。
             x, y は画面内にクリップされた値。
+            両軸の逆変換には crop_with_geometry を使う。
         """
         from ai_desktop_agent.vm.overlay import crop_region_with_meta
 
@@ -92,6 +103,30 @@ class Screenshot:
         cx = max(0, min(x, img_w - 1))
         cy = max(0, min(y, img_h - 1))
         return zoomed, (cx, cy, actual_scale)
+
+    def crop_with_geometry(
+        self,
+        x: int,
+        y: int,
+        region_w: int,
+        region_h: int,
+        *,
+        scale: float = 2.0,
+        max_dim: int = 1024,
+    ) -> tuple[Screenshot, CropGeometry]:
+        """切り出し画像と、両軸の座標を元画像へ戻すための情報を返す。"""
+        # Keep adapters overriding the established crop method in the dispatch path.
+        zoomed, (origin_x, origin_y, scale_x) = self.crop_with_meta(
+            x, y, region_w, region_h, scale=scale, max_dim=max_dim
+        )
+        with self.to_pil() as original:
+            source_height = max(1, min(region_h, original.height - origin_y))
+        return zoomed, CropGeometry(
+            origin_x=origin_x,
+            origin_y=origin_y,
+            scale_x=scale_x,
+            scale_y=zoomed.height / source_height,
+        )
 
     def to_pil(self) -> Image.Image:
         """PIL Image に変換する。"""

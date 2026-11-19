@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 
 from PIL import Image
 
@@ -30,11 +31,22 @@ def find_template(
         screen_bytes: 画面全体のPNG。
         template_bytes: 探したい部品のPNG。
         threshold: 採用する最低スコア（0.0〜1.0）。
-        max_stride: 走査の間引き幅（大きいほど高速・粗い）。
+        max_stride: 正の整数で指定する走査の間引き幅（大きいほど高速・粗い）。
 
     Returns:
         (中心x, 中心y, スコア) または見つからなければ None。
     """
+    try:
+        valid_threshold = (
+            type(threshold) in (int, float) and math.isfinite(threshold) and 0 <= threshold <= 1
+        )
+    except OverflowError:
+        valid_threshold = False
+    if not valid_threshold:
+        raise ValueError("thresholdは0〜1の有限の数で指定してください")
+    if type(max_stride) is not int or max_stride <= 0:
+        raise ValueError("max_strideは正の整数で指定してください")
+
     screen = Image.open(io.BytesIO(screen_bytes)).convert("L")
     template = Image.open(io.BytesIO(template_bytes)).convert("L")
     sw, sh = screen.size
@@ -64,20 +76,21 @@ def find_template(
                 cross += s * t
                 sad += abs(s - t)
                 n += 1
-        if n == 0:
-            return None
+        # Decoded images have positive dimensions; a positive stride samples (0, 0).
         s_mean = s_sum / n
         t_mean = t_sum / n
-        denom = ((s_sq - n * s_mean * s_mean) * (t_sq - n * t_mean * t_mean)) ** 0.5
-        if denom <= 0:
-            # 単色領域の比較：平均差分で評価する。除数は厳しめにし、
-            # 平坦な背景が文字テンプレート等に誤マッチしないようにする。
-            # 完全一致は 1.0 のまま（既存の単色照合テストを維持）。
+        s_variance = max(0.0, s_sq - n * s_mean * s_mean)
+        t_variance = max(0.0, t_sq - n * t_mean * t_mean)
+        if s_variance == 0 or t_variance == 0:
+            # A flat image cannot establish correlation with a pattern. Preserve
+            # the absolute-difference comparison only when both images are flat.
+            if s_variance != t_variance:
+                return None
             return max(0.0, 1.0 - (sad / n) / 32.0)
+        denom = (s_variance * t_variance) ** 0.5
         return max(-1.0, min(1.0, (cross - n * s_mean * t_mean) / denom))
 
     best: tuple[float, int, int] | None = None  # (score, cx, cy)
-    best_pos: tuple[int, int] | None = None
     strong_count = 0  # 閾値超えの候補数（多すぎたら曖昧として不採用）
 
     # 粗走査
@@ -90,24 +103,26 @@ def find_template(
                 strong_count += 1
             if best is None or score > best[0]:
                 best = (score, left + tw // 2, top + th // 2)
-                best_pos = (left, top)
 
-    if best is None or best_pos is None:
+    if best is None:
         return None
     if strong_count > 10:
         logger.debug("候補が多すぎるため曖昧として不採用: %d", strong_count)
         return None
 
     # 精密化（粗走査の最良点周辺を stride 1 で再走査）
-    bl, bt = best_pos
+    bl, bt = best[1] - tw // 2, best[2] - th // 2
+    # Sampled scores only select a search region. Verify the winning position
+    # using every pixel; a coarse perfect score can hide a different image.
+    best = None
     for top in range(max(0, bt - max_stride), min(sh - th, bt + max_stride) + 1):
         for left in range(max(0, bl - max_stride), min(sw - tw, bl + max_stride) + 1):
             score = ncc_at(left, top, 1)
             if score is None:
                 continue
-            if score > best[0]:
+            if best is None or score > best[0]:
                 best = (score, left + tw // 2, top + th // 2)
 
-    if best[0] < threshold:
+    if best is None or best[0] < threshold:
         return None
     return (best[1], best[2], best[0])
