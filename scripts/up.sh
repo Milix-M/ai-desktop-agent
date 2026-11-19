@@ -53,12 +53,26 @@ main() {
     echo 'Create .env from .env.example and configure an LLM provider before starting.' >&2
     return 1
   fi
-  local mode profile environment
-  # Compose resolves .env, quoted values, overrides, and shell precedence. Print only this key.
-  mode="$(docker compose config --environment | awk -F= '$1 == "USE_KVM" { print substr($0, index($0, "=") + 1) }')"
+  local settings key value mode profile environment runtime=""
+  # Resolve settings the same way as Compose, and retain only the keys used here.
+  settings="$(docker compose config --environment | awk '/^(USE_KVM|DESKTOP_RUNTIME)=/')"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      USE_KVM) mode="$value" ;;
+      DESKTOP_RUNTIME) runtime="$value" ;;
+    esac
+  done <<< "$settings"
+  case "$runtime" in
+    ""|runc|runsc) ;;
+    *) echo 'DESKTOP_RUNTIME must be empty, runc, or runsc.' >&2; return 2 ;;
+  esac
   mode="${mode:-auto}"
   mode="${mode,,}"
   profile="$(choose_profile "$mode" /dev/kvm "$(uname -m)")"
+  if [[ "$runtime" == runsc && "$(docker info --format '{{if index .Runtimes "runsc"}}yes{{end}}')" != yes ]]; then
+    echo 'DESKTOP_RUNTIME=runsc requires the runsc runtime to be registered with Docker.' >&2
+    return 1
+  fi
   if [[ "$profile" == kvm ]]; then
     export VNC_HOST=vm USE_KVM=true
     environment=vm

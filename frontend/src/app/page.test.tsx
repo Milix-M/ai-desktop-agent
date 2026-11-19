@@ -792,3 +792,15 @@ test("history restores a limit failure and the usage of all model requests", asy
   expect(await screen.findByText("トークン使用量の上限に到達しました")).toBeVisible();
   expect(screen.getByText(/モデル3回（入力90\/出力10トークン）/)).toBeVisible();
 });
+
+test("history shows the task answer above the log", async () => {
+  current.running = false;
+  vi.mocked(getTaskDetail).mockResolvedValueOnce({
+    ...detail("old"),
+    result: [{ summary: "発送待ち0件", data: { count: 0 } }],
+  });
+  render(<Home />);
+  fireEvent.click(await screen.findByTitle("old completed task"));
+  expect(await screen.findByRole("heading", { name: "実行結果" })).toBeVisible();
+  expect(screen.getByText("発送待ち0件")).toBeVisible();
+});

@@ -37,6 +37,7 @@ from ai_desktop_agent.agent.llm.types import (
     VerificationResult,
 )
 from ai_desktop_agent.agent.loop import AgentLoop
+from ai_desktop_agent.agent.output import TaskOutput, parse_task_output
 from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.privacy import redact, redact_data
 from ai_desktop_agent.server.persistence import StorageError
@@ -178,6 +179,7 @@ class TaskSession:
         self.request_digest: str | None = None
         self.request_fingerprint: str | None = None
         self._instruction = ""
+        self._outputs: list[TaskOutput] = []
         self._created_at = time.time()
         # 実行対象VMのID（複数VMの並列実行用）
         self.vm_id = vm_id
@@ -440,6 +442,7 @@ class TaskSession:
             instruction=self._instruction,
             state=self.loop.state.value,
             success=success,
+            result=list(self._outputs) if success else [],
             prompt_tokens=int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
             completion_tokens=int(getattr(self.llm, "total_completion_tokens", 0) or 0),
             llm_calls=int(getattr(self.llm, "call_count", 0) or 0),
@@ -1217,6 +1220,10 @@ class TaskSession:
 
         if result.success:
             logger.info("サブタスク達成を確認: %s", subtask.id)
+            params = record.action.params or {}
+            output = parse_task_output(params.get("summary"), params.get("data_json"))
+            if output is not None:
+                self._outputs.append(output)
             self._pending_error = None
             self.loop.verify_subtask_done()
             await self._emit_state_change()

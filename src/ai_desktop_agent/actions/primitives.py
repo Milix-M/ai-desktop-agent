@@ -114,7 +114,7 @@ _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
     ActionType.WAIT: set(),
     ActionType.WAIT_FOR_STILL: set(),
     ActionType.SCREENSHOT: set(),
-    ActionType.SUBTASK_COMPLETE: set(),
+    ActionType.SUBTASK_COMPLETE: {"summary", "data_json"},
     ActionType.REGION_SELECT: set(),
 }
 
