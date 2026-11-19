@@ -4,9 +4,37 @@
 このインターフェースを実装する。
 """
 
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 
 from ai_desktop_agent.vm.screenshot import Screenshot
+
+logger = logging.getLogger(__name__)
+
+
+def validate_click_position(x: int | None, y: int | None) -> None:
+    if (x is None) != (y is None):
+        raise ValueError("クリック座標のxとyは両方指定してください")
+
+
+@contextmanager
+def held_input[T](
+    down: Callable[[T], object], up: Callable[[T], object], value: T
+) -> Iterator[None]:
+    """Release even if input reached the guest but its acknowledgement was lost."""
+    try:
+        down(value)
+        yield
+    except BaseException:
+        try:
+            up(value)
+        except Exception:
+            logger.warning("入力中断後のキー・ボタン解放に失敗", exc_info=True)
+        raise
+    else:
+        up(value)
 
 
 class DisplayBackend(ABC):
@@ -85,10 +113,11 @@ class DisplayBackend(ABC):
 
     def mouse_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
         """指定座標をクリック（デフォルト実装: move → down → up）。"""
+        validate_click_position(x, y)
         if x is not None and y is not None:
             self.mouse_move(x, y)
-        self.mouse_down(button)
-        self.mouse_up(button)
+        with held_input(self.mouse_down, self.mouse_up, button):
+            pass
 
     def mouse_double_click(
         self, x: int | None = None, y: int | None = None, button: int = 1
@@ -102,9 +131,8 @@ class DisplayBackend(ABC):
     ) -> None:
         """ドラッグ操作（デフォルト実装: move → down → move → up）。"""
         self.mouse_move(start_x, start_y)
-        self.mouse_down(button)
-        self.mouse_move(end_x, end_y)
-        self.mouse_up(button)
+        with held_input(self.mouse_down, self.mouse_up, button):
+            self.mouse_move(end_x, end_y)
 
     # ── キーボード操作 ──────────────────────────
 
@@ -130,7 +158,6 @@ class DisplayBackend(ABC):
 
     def key_combo(self, keys: list[str]) -> None:
         """キーコンビネーション（デフォルト実装: 全部down → 逆順up）。"""
-        for k in keys:
-            self.key_down(k)
-        for k in reversed(keys):
-            self.key_up(k)
+        with ExitStack() as held:
+            for key in keys:
+                held.enter_context(held_input(self.key_down, self.key_up, key))

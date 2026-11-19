@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw, ImageFont
@@ -119,8 +120,7 @@ def crop_region(
 ) -> Screenshot:
     """指定領域を切り出して拡大する（ズームイン用）。
 
-    後方互換のためのラッパー。実際に適用された倍率が必要な場合は
-    :func:`crop_region_with_meta` を使うこと（座標逆変換に必須）。
+    座標の逆変換には、縦横の実倍率を返す Screenshot.crop_with_geometry を使う。
 
     Args:
         screenshot: 元のスクリーンショット。
@@ -148,10 +148,10 @@ def crop_region_with_meta(
     scale: float = 2.0,
     max_dim: int = 1024,
 ) -> tuple[Screenshot, float]:
-    """指定領域を切り出して拡大し、実際に適用された倍率も返す。
+    """指定領域を切り出して拡大し、横方向の実倍率も返す。
 
-    ``session._handle_region_zoom`` での座標逆変換
-    ``absolute = origin + zoomed_coord / actual_scale`` に必須。
+    整数丸めにより縦横の倍率は異なる。両軸の座標を逆変換する場合は
+    Screenshot.crop_with_geometry を使う。
 
     Args:
         screenshot: 元のスクリーンショット。
@@ -161,9 +161,18 @@ def crop_region_with_meta(
         max_dim: 拡大後の最大サイズ（長辺がこれを超えたら倍率を下げる）。
 
     Returns:
-        (拡大後の Screenshot, 実際に適用された倍率) のタプル。
+        (拡大後の Screenshot, 横方向の実倍率) のタプル。
     """
     from ai_desktop_agent.vm.screenshot import Screenshot
+
+    try:
+        valid_scale = type(scale) in (int, float) and math.isfinite(scale) and scale > 0
+    except OverflowError:
+        valid_scale = False
+    if not valid_scale:
+        raise ValueError("scale must be finite and positive")
+    if type(max_dim) is not int or max_dim <= 0:
+        raise ValueError("max_dim must be a positive integer")
 
     img = Image.open(io.BytesIO(screenshot.image_bytes))
     w, h = img.size
@@ -177,16 +186,17 @@ def crop_region_with_meta(
     cropped = img.crop((x, y, x + rw, y + rh))
 
     # 拡大（max_dim を考慮して実倍率を決定）
-    new_w = int(rw * scale)
-    new_h = int(rh * scale)
-    actual_scale = scale
+    if not math.isfinite(rw * scale) or not math.isfinite(rh * scale):
+        raise ValueError("scale is too large for this region")
+    new_w = max(1, int(rw * scale))
+    new_h = max(1, int(rh * scale))
 
     # 長辺でリミット
     if max(new_w, new_h) > max_dim:
         ratio = max_dim / max(new_w, new_h)
-        new_w = int(new_w * ratio)
-        new_h = int(new_h * ratio)
-        actual_scale = new_w / rw if rw else scale
+        new_w = max(1, int(new_w * ratio))
+        new_h = max(1, int(new_h * ratio))
+    actual_scale = new_w / rw
 
     zoomed = cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 

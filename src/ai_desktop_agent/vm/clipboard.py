@@ -62,12 +62,15 @@ class ClipboardClient(VNCDoToolClient):
         self.transport.write(pack("!Bxxxi", 6, -len(message)) + message)
 
     def _invalid_clipboard(self):
+        self.cancel_clipboard("VNCのクリップボード応答が不正です")
+        self.transport.loseConnection()
+
+    def cancel_clipboard(self, error):
         self.clipboard_supported = False
-        self.clipboard_error = "VNCのクリップボード応答が不正です"
+        self.clipboard_error = self.clipboard_error or error
         self._clipboard_payload = None
         self.clipboard_ready.set()
         self.clipboard_provided.set()
-        self.transport.loseConnection()
 
     def _handleServerCutText(self, block):  # noqa: N802
         (length,) = unpack("!xxxi", block)
@@ -112,11 +115,7 @@ class ClipboardClient(VNCDoToolClient):
         return self
 
     def connectionLost(self, reason):  # noqa: N802
-        self.clipboard_supported = False
-        self.clipboard_error = "VNC接続が切断されました"
-        self._clipboard_payload = None
-        self.clipboard_ready.set()
-        self.clipboard_provided.set()
+        self.cancel_clipboard("VNC接続が切断されました")
         super().connectionLost(reason)
 
 

@@ -66,7 +66,16 @@ def test_docker_names_reach_the_resolver_without_being_renamed(runtime, host):
 
 
 @pytest.mark.parametrize(
-    "host", ["host_name/escape", "host_name\nother", "host_name\x00", "_leading", "名前_付き"]
+    "host",
+    [
+        "host_name/escape",
+        "host_name\nother",
+        "host_name\x00",
+        "_leading",
+        "名前_付き",
+        b"desktop_\xff",
+        "例え.テスト".encode(),
+    ],
 )
 def test_the_docker_exception_does_not_allow_invalid_or_non_ascii_names(runtime, host):
     clock, connect = runtime
@@ -160,3 +169,26 @@ def test_vnc_client_formats_ipv6_literals_for_the_underlying_parser(monkeypatch,
         assert parsed_host == host.strip("[]") and port == 5917
     finally:
         display.disconnect()
+
+
+def test_idna_encoded_bytes_resolve_to_the_same_unicode_name(runtime):
+    clock, connect = runtime
+    proxy = connect("例え.テスト".encode("idna"))
+    assert clock.nameResolver.names == ["例え.テスト"]
+    assert not proxy.closed and clock.tcpClients[0][:2] == ("127.0.0.1", 5900)
+
+
+def test_unsupported_socket_family_cannot_resolve_or_open_a_socket(runtime):
+    clock, connect = runtime
+    proxy = vnc_transport.ManagedVNCProxy(vnc_transport.ManagedVNCFactory(), timeout=0.02)
+    try:
+        proxy.connect("desktop", family=-1)
+        assert proxy.closed
+        with pytest.raises(ConnectionError, match="切断"):
+            proxy.connection_ready()
+        assert not clock.nameResolver.names and not clock.tcpClients and not clock.unixClients
+        replacement = connect("desktop")
+        assert not replacement.closed and clock.nameResolver.names == ["desktop"]
+        assert clock.tcpClients[0][:2] == ("127.0.0.1", 5900)
+    finally:
+        proxy.disconnect()
