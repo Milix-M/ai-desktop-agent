@@ -72,15 +72,11 @@ async def test_failed_outcome_is_durable_and_cannot_type_past_the_replan_limit(
     async def respond(body: dict):
         stage = body["response_format"]["json_schema"]["name"]
         requests.append(stage)
-        if stage == "understand_instruction":
+        if stage in ("initial_plan", "decompose_task"):
             data = {
                 "intent": "inspect",
                 "target_application": None,
                 "constraints": [],
-                "reasoning": "inspect",
-            }
-        elif stage == "decompose_task":
-            data = {
                 "subtasks": []
                 if outcome == "empty-plan"
                 else [

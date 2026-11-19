@@ -30,11 +30,11 @@ pytestmark = [
 
 
 class ShortStepProvider(OpenAICompatProvider):
-    async def decompose_task(self, *args, **kwargs):
-        result = await super().decompose_task(*args, **kwargs)
+    async def initial_plan(self, *args, **kwargs):
+        understanding, plan = await super().initial_plan(*args, **kwargs)
         # Exercise the public Subtask timeout without replacing the SDK/model flow.
-        return DecompositionResult(
-            [replace(subtask, timeout_seconds=1.0) for subtask in result.subtasks], result.reasoning
+        return understanding, DecompositionResult(
+            [replace(subtask, timeout_seconds=1.0) for subtask in plan.subtasks], plan.reasoning
         )
 
 
@@ -52,15 +52,11 @@ async def test_a_late_model_response_cannot_type_or_complete_a_real_subtask(
         nonlocal actions, recoveries
         stage = body["response_format"]["json_schema"]["name"]
         requests.append(stage)
-        if stage == "understand_instruction":
+        if stage == "initial_plan":
             data = {
                 "intent": "inspect",
                 "target_application": None,
                 "constraints": [],
-                "reasoning": "inspect",
-            }
-        elif stage == "decompose_task":
-            data = {
                 "subtasks": [
                     {
                         "id": "s1",

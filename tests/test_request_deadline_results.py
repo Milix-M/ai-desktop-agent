@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import json
 import time
+from functools import partial
 
 import httpx
 import pytest
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits, TaskBudget, TaskLimitError, model_request
+from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.types import ActionDecision
 from ai_desktop_agent.server import app as server
@@ -21,6 +23,7 @@ from tests.test_model_metadata import metadata_reply
 from tests.test_task_budget import completion, llm_with_transport
 
 PHASES = {
+    "initial_plan": "plan.valid",
     "understand_instruction": "understand.valid",
     "decompose_task": "plan.valid",
     "action_decision": "action.valid",
@@ -57,6 +60,9 @@ async def test_elapsed_request_cannot_authorize_input_completion_or_retry(
         return completion(json.dumps(data))
 
     provider = await llm_with_transport(respond)
+    if phase in {"understand_instruction", "decompose_task"}:
+        # Exercise providers that still plan in two separate requests.
+        provider.initial_plan = partial(LLMProvider.initial_plan, provider)
     await provider._call("initialize SDK")
     display = FakeDisplayBackend()
     store = TaskStore(tmp_path)

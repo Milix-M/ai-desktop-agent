@@ -209,6 +209,7 @@ class TaskSession:
         self._closing_task: asyncio.Task | None = None
         self._resources_closed = False
         # 検証用：実行直前の生画像（オーバーレイなし）
+        self._settled_click: Screenshot | None = None
         self._last_before_raw: Screenshot | None = None
         # サブタスクごとの空完了却下回数
         self._empty_complete_refusals: dict[str, int] = {}
@@ -400,7 +401,7 @@ class TaskSession:
             self._startup_error = error
             raise
         self._started.set()
-        understanding = await self.llm.understand_instruction(goal, platform=self._platform())
+        understanding, decomposition = await self.llm.initial_plan(goal, platform=self._platform())
         self._budget.check()
         goal.intent = understanding.intent
         goal.target_application = understanding.target_application
@@ -408,7 +409,8 @@ class TaskSession:
         self.loop.understanding_done()
         await self._emit_state_change()
 
-        decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
+        if decomposition is None:
+            decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
         self._budget.check()
         if not decomposition.subtasks:
             await self._fail(
@@ -742,21 +744,33 @@ class TaskSession:
             decision.confidence,
         )
         # 検証用に実行直前の生画像を保持（オーバーレイの影響を除外）
+        self._settled_click = None
         try:
             capture_raw = getattr(self.display, "capture_raw", None)
             self._last_before_raw = (
-                await run_display_call(capture_raw) if callable(capture_raw) else None
+                await run_display_call(capture_raw)
+                if action.action_type in CLICK_ACTIONS and callable(capture_raw)
+                else None
             )
         except Exception:
             self._last_before_raw = None
-        success = await self._execute_recorded_action(
-            action, decision.reasoning, decision.confidence
-        )
+        for index in range(
+            min(decision.repeats, MAX_ACTIONS_PER_TASK - len(self.loop.context.action_history))
+        ):
+            if index:
+                await self._emit_action(action, True)
+            success = await self._execute_recorded_action(
+                action, decision.reasoning, decision.confidence
+            )
+            if not success or self.loop.state == AgentState.PAUSED:
+                break
 
         # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
         # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
         if action.action_type in VISUAL_ACTIONS:
-            await self.executor.wait_for_still(SETTLE_TIMEOUT)
+            settled = await self.executor.wait_for_still(SETTLE_TIMEOUT)
+            if action.action_type in CLICK_ACTIONS:
+                self._settled_click = settled
         elif action.action_type in (ActionType.WAIT, ActionType.MOUSE_MOVE):
             # 待機自体が待機・移動は画面を変えないため追加待機なし
             pass
@@ -1016,6 +1030,8 @@ class TaskSession:
                 platform=self._platform(),
             )
             self._budget.check()
+            if zoom_decision.working_note and self.loop.context.goal:
+                self.loop.context.goal.working_note = zoom_decision.working_note
             pending = zoom_decision
             if pending.action.action_type != ActionType.REGION_SELECT:
                 break
@@ -1056,14 +1072,12 @@ class TaskSession:
             mapped_params = self._clamp_params_to_raw(mapped_params, raw)
 
             try:
-                pending = ActionDecision(
+                pending = replace(
+                    pending,
                     action=Action(
                         action_type=pending.action.action_type,
                         params=mapped_params,
                     ),
-                    expected_effect=pending.expected_effect,
-                    confidence=pending.confidence,
-                    reasoning=pending.reasoning,
                 )
             except ValueError:
                 logger.warning("精密アクションの構築に失敗: %s", pending.action.action_type.value)
@@ -1105,11 +1119,9 @@ class TaskSession:
         if clamped == decision.action.params:
             return decision
         try:
-            return ActionDecision(
+            return replace(
+                decision,
                 action=Action(action_type=decision.action.action_type, params=clamped),
-                expected_effect=decision.expected_effect,
-                confidence=decision.confidence,
-                reasoning=decision.reasoning,
             )
         except ValueError:
             return decision
@@ -1239,12 +1251,7 @@ class TaskSession:
             return
 
         # クリック系アクションの場合、追加の画面検証を行う
-        if last.action.action_type in (
-            ActionType.LEFT_CLICK,
-            ActionType.RIGHT_CLICK,
-            ActionType.DOUBLE_CLICK,
-            ActionType.MIDDLE_CLICK,
-        ):
+        if last.action.action_type in CLICK_ACTIONS:
             verified = await self._verify_click_effect(last)
             if not verified:
                 self._pending_error = ErrorContext(
@@ -1373,27 +1380,25 @@ class TaskSession:
     async def _verify_click_effect(self, record) -> bool:
         """クリック後に画面が変化したかを検証する。
 
-        生画像のハッシュ比較で「無変化の空振り」を検出する。
+        安定待ちで得た生画像を使い、変化が分からなければ再撮影する。
         変化がなければ False を返して RECOVERING へ回す。
-        直前の安定待ちで画面は収束済みのため、短い再観測で足りる。
         """
         try:
-            await asyncio.sleep(0.1)
             before = self._last_before_raw
-            capture_raw = getattr(self.display, "capture_raw", None)
-            after = (
-                await run_display_call(capture_raw)
-                if callable(capture_raw)
-                else await self._capture_screenshot()
-            )
             if before is None:
-                # 比較元がなければ成功扱い（従来動作）
                 return True
-            import hashlib as _hashlib
-
-            h_before = _hashlib.sha256(before.image_bytes).hexdigest()
-            h_after = _hashlib.sha256(after.image_bytes).hexdigest()
-            if h_before == h_after:
+            after = self._settled_click
+            self._settled_click = None
+            # 無変化の場合は、遅れて届くクリックの描画を従来どおり再確認する。
+            if after is None or after.image_bytes == before.image_bytes:
+                await asyncio.sleep(0.1)
+                capture_raw = getattr(self.display, "capture_raw", None)
+                after = (
+                    await run_display_call(capture_raw)
+                    if callable(capture_raw)
+                    else await self._capture_screenshot()
+                )
+            if before.image_bytes == after.image_bytes:
                 logger.warning("クリック後に画面変化なし: %s", record.action.params)
                 return False
             return True
@@ -1592,6 +1597,8 @@ class TaskSession:
                     platform=self._platform(),
                 )
                 self._budget.check()
+                if decision.working_note and self.loop.context.goal:
+                    self.loop.context.goal.working_note = decision.working_note
                 self._consec_empty_decides = 0
                 return decision
             except ValueError as e:

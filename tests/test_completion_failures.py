@@ -30,20 +30,16 @@ from tests.test_task_budget import completion, llm_with_transport
 
 
 def script_pre_verification(provider):
-    provider.understand_instruction = AsyncMock(
-        return_value=UnderstandingResult("inspect", None, [], "inspect")
+    step = Subtask(
+        "s1",
+        "inspect the visible result",
+        expected_outcome="result visible",
+        max_retries=1,
     )
-    provider.decompose_task = AsyncMock(
-        return_value=DecompositionResult(
-            [
-                Subtask(
-                    "s1",
-                    "inspect the visible result",
-                    expected_outcome="result visible",
-                    max_retries=1,
-                )
-            ],
-            "inspect",
+    provider.initial_plan = AsyncMock(
+        return_value=(
+            UnderstandingResult("inspect", None, [], "inspect"),
+            DecompositionResult([step], "inspect"),
         )
     )
     provider.decide_next_action = AsyncMock(
