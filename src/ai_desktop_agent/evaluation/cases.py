@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 
 from docker.errors import NotFound
 
-SUITE_VERSION = 1
+SUITE_VERSION = 2
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 NS = {
     "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
@@ -36,7 +36,7 @@ CASES = (
     DesktopCase(
         "text-edit",
         "議事録.txt",
-        "開いているMousepadで{directory}/議事録.txtを編集し、内容を次の3行にして保存してください。"
+        "開いているMousepadで{directory}/議事録.txtを編集し、内容を次の3行にして、最終行の末尾にも改行を入れて保存してください。"
         "\n会議メモ\n担当: 佐藤\n期限: 金曜日\n",
         "会議メモ\n担当: 未定\n",
         "会議メモ\n担当: 佐藤\n期限: 金曜日\n",
@@ -57,6 +57,14 @@ CASES = (
         "A4に合計、B4にSUM関数でB2からB3の合計を入れて保存してください。既存の値は変えないでください。",
         "",
         "",
+    ),
+    DesktopCase(
+        "text-append",
+        "引継ぎ.txt",
+        "開いているMousepadで{directory}/引継ぎ.txtの既存2行を保ち、"
+        "末尾に「確認者: 高橋」を1行追記してください。最終行も改行して上書き保存してください。",
+        "受付番号: 103\n予定: 木曜日\n",
+        "受付番号: 103\n予定: 木曜日\n確認者: 高橋\n",
     ),
 )
 

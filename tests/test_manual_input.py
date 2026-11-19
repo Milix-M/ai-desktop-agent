@@ -381,7 +381,7 @@ async def test_model_schema_and_parser_can_request_manual_input():
             FakeDisplayBackend().capture_screen(),
         )
         assert decision.action.action_type == ActionType.REQUEST_USER_INPUT
-        schema = provider._call.call_args.args[1]["schema"]["oneOf"]
+        schema = provider._call.call_args.args[1]["schema"]["properties"]["action"]["anyOf"]
         assert any(
             item["properties"]["action_type"]["const"] == "request_user_input" for item in schema
         )

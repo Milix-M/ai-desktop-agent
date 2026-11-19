@@ -82,10 +82,22 @@ class ActionDecision:
     reasoning: str
     is_region_zoom: bool = False  # 領域ズーム後の決定か
 
+    repeats: int = 1  # 同じ方向キーを続けて押す回数
+
+    working_note: str = ""  # 空文字なら既存のメモを維持する
+
     def __post_init__(self) -> None:
         if not isinstance(self.action, Action):
             raise ValueError("actionはActionで指定してください")
         validate_text(self.expected_effect, "expected_effect")
+        validate_text(self.working_note, "working_note")
+        if type(self.repeats) is not int or not 1 <= self.repeats <= 5:
+            raise ValueError("方向キーの回数は1〜5回です")
+        if self.repeats > 1 and (
+            self.action.action_type.value != "key_press"
+            or self.action.params.get("key") not in ("up", "down", "left", "right")
+        ):
+            raise ValueError("繰り返せるのは方向キーだけです")
         if type(self.confidence) not in (int, float) or not 0.0 <= self.confidence <= 1.0:
             raise ValueError(
                 f"confidence は 0.0〜1.0 の範囲である必要があります: {self.confidence}"

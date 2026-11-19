@@ -3,14 +3,20 @@
 import asyncio
 import io
 from dataclasses import replace
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
 
+from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.decision.provider import MockDecisionProvider
 from ai_desktop_agent.agent.decision.types import DecisionVerify
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
-from ai_desktop_agent.agent.llm.types import DecompositionResult, UnderstandingResult
+from ai_desktop_agent.agent.llm.types import (
+    ActionDecision,
+    DecompositionResult,
+    UnderstandingResult,
+)
 from ai_desktop_agent.agent.state import AgentState, Subtask
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
@@ -175,13 +181,24 @@ async def test_recovered_screen_completes_after_uncertain_wake_and_optional_raw_
     caplog.set_level("DEBUG", logger="ai_desktop_agent.server.session")
     display = RecoveringDisplay()
     store = TaskStore(tmp_path)
-    session = TaskSession(llm=MockLLMProvider(), display=display, store=store, decision=None)
+    model = MockLLMProvider()
+    model.decide_next_action = AsyncMock(
+        side_effect=[
+            ActionDecision(Action(ActionType.LEFT_CLICK, {"x": 20, "y": 20}), "", 1, ""),
+            ActionDecision(Action(ActionType.SUBTASK_COMPLETE), "", 1, ""),
+        ]
+    )
+    session = TaskSession(llm=model, display=display, store=store, decision=None)
     try:
         assert await asyncio.wait_for(session.run("inspect the recovered display"), 5)
         saved = TaskStore(tmp_path).load(session.id)
         assert saved.state == "completed" and saved.success is True and saved.stop_reason is None
         assert display.wakes == ["shift"] and display.raw_calls > 0
-        assert saved.actions and all(action.success for action in saved.actions)
+        assert [action.action_type for action in saved.actions] == [
+            "left_click",
+            "subtask_complete",
+        ]
+        assert all(action.success for action in saved.actions)
         assert not display.text_inputs and not display.is_connected
         assert "ウェイクアップキー送信に失敗" in caplog.text
     finally:

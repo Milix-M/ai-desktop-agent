@@ -102,7 +102,7 @@ async def test_close_cancels_the_actual_model_request_and_releases_vnc_before_re
         assert proof["action_count"] == 0 and completions == [False], proof
         release.set()
         await asyncio.gather(run, return_exceptions=True)
-        assert requests == ["understand_instruction"]
+        assert requests == ["initial_plan"]
     finally:
         session.stop()
         release.set()

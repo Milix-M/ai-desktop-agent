@@ -45,6 +45,63 @@ class TestOpenAICompatProvider:
         response.choices = [choice]
         return response
 
+    @pytest.mark.asyncio
+    async def test_initial_plan_uses_one_request(self, provider):
+        send = AsyncMock(
+            return_value=self._make_mock_response(
+                {
+                    "intent": "text_editing",
+                    "target_application": "Mousepad",
+                    "constraints": ["書式を保つ"],
+                    "reasoning": "編集",
+                    "subtasks": [
+                        {"id": "step_1", "description": "編集", "expected_outcome": "保存済み"}
+                    ],
+                }
+            )
+        )
+        provider._client.chat.completions.create = send
+        goal, plan = await provider.initial_plan(Goal("編集してください"), "linux")
+        send.assert_awaited_once()
+        assert goal.constraints == ["書式を保つ"]
+        assert plan.subtasks[0].expected_outcome == "保存済み"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "key,count,valid", [("down", 3, True), ("enter", 2, False), ("up", 6, False)]
+    )
+    async def test_bounded_navigation(self, provider, key, count, valid):
+        provider._client.chat.completions.create = AsyncMock(
+            return_value=self._make_mock_response(
+                {
+                    "action": {
+                        "action_type": "repeat_navigation",
+                        "params": {"key": key, "count": count},
+                    },
+                }
+            )
+        )
+        args = (Goal("移動"), Subtask(id="s", description="移動"), [], self._fake_screenshot())
+        if valid:
+            decision = await provider.decide_next_action(*args)
+            assert decision.repeats == count
+            assert decision.action == Action(ActionType.KEY_PRESS, {"key": key})
+        else:
+            with pytest.raises(ValueError):
+                await provider.decide_next_action(*args)
+
+    async def test_gpt6_sends_supported_completion_limit(self):
+        provider = OpenAICompatProvider(model="gpt-6.2-sol", api_key="test-key")
+        try:
+            send = AsyncMock(return_value=self._make_mock_response({"ok": True}))
+            provider._client.chat.completions.create = send
+            await provider._call("ok")
+            args = send.await_args.kwargs
+            assert args["max_completion_tokens"] == provider._max_tokens
+            assert "temperature" not in args and "max_tokens" not in args
+        finally:
+            await provider.aclose()
+
     def test_provider_name(self, provider):
         assert provider.provider_name == "openai_compat"
 
@@ -142,6 +199,36 @@ class TestOpenAICompatProvider:
             Goal(description="t"), Subtask(id="s1", description="d"), [], self._fake_screenshot()
         )
         assert result.action.action_type == ActionType.SUBTASK_COMPLETE
+
+    async def test_observation_survives_switching_subtasks(self, provider):
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        response = {"action_type": "key_press", "params": {"key": "tab"}}
+        note = "依頼書の受付番号は A-007"
+        provider._call = AsyncMock(
+            side_effect=[
+                {**response, "working_note": note},
+                response,
+                response,
+                response,
+            ]
+        )
+        session = TaskSession(llm=provider, display=FakeDisplayBackend())
+        session.loop.start(Goal("転記する"))
+        read = Subtask("read", "依頼書を読む")
+        write = Subtask("write", "報告に転記")
+        screen = self._fake_screenshot()
+        await session._decide_action(read, screen)
+        await session._decide_action(write, screen)
+        await session._decide_action(write, screen)
+        for call in provider._call.await_args_list[1:]:
+            assert note in call.args[0]
+
+        other = TaskSession(llm=provider, display=FakeDisplayBackend())
+        other.loop.start(Goal("別の依頼書を読む"))
+        await other._decide_action(read, screen)
+        assert note not in provider._call.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_decide_next_action_with_error(self, provider):
