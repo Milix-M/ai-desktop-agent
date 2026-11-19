@@ -4,11 +4,13 @@
 状態遷移は loop.py の AgentLoop が管理する。
 """
 
+import math
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ai_desktop_agent.actions.primitives import Action
+from ai_desktop_agent.validation import validate_text
 
 
 class AgentState(StrEnum):
@@ -107,10 +109,22 @@ class Subtask:
     timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
-        if self.max_retries < 0:
-            raise ValueError("max_retries は 0 以上である必要がある")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds は正の値である必要がある")
+        for name in ("id", "description", "expected_outcome"):
+            validate_text(getattr(self, name), name)
+        if not self.id.strip():
+            raise ValueError("idは空でない文字列で指定してください")
+        if type(self.max_retries) is not int or self.max_retries < 0:
+            raise ValueError("max_retries は 0 以上の整数で指定してください")
+        try:
+            valid_timeout = (
+                type(self.timeout_seconds) in (int, float)
+                and math.isfinite(self.timeout_seconds)
+                and self.timeout_seconds > 0
+            )
+        except OverflowError:
+            valid_timeout = False
+        if not valid_timeout:
+            raise ValueError("timeout_seconds は有限の正の値で指定してください")
 
 
 @dataclass

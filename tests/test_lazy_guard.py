@@ -182,10 +182,20 @@ class TestJpegConversion:
         provider._client.chat.completions.create = AsyncMock(
             return_value=MagicMock(choices=[choice])
         )
-        await provider._call("p", image_bytes=b"fakepng")
+        import io
+
+        from PIL import Image
+
+        encoded = io.BytesIO()
+        Image.new("RGB", (32, 24), "white").save(encoded, format="PNG")
+        await provider._call("p", image_bytes=encoded.getvalue())
         kwargs = provider._client.chat.completions.create.call_args.kwargs
         url = kwargs["messages"][1]["content"][1]["image_url"]["url"]
         assert url.startswith("data:image/jpeg;base64,")
+        import base64
+
+        with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as actual:
+            assert actual.format == "JPEG" and actual.size == (32, 24)
 
 
 class _BlockingLLM(MockLLMProvider):
@@ -584,14 +594,13 @@ class TestVmRestartAction:
 
         restarted = []
 
-        class _FakePool:
-            def restart_vm(self, vm_id, timeout=30):
-                restarted.append(vm_id)
-                from ai_desktop_agent.server.vm_pool import VmInfo
+        def restart_vm(self, vm_id, timeout=30):
+            restarted.append(vm_id)
+            from ai_desktop_agent.server.vm_pool import VmInfo
 
-                return VmInfo(id=vm_id, name=vm_id, status="running")
+            return VmInfo(id=vm_id, name=vm_id, status="running")
 
-        monkeypatch.setattr("ai_desktop_agent.server.vm_pool.VmPool", _FakePool)
+        monkeypatch.setattr("ai_desktop_agent.server.vm_pool.VmPool.restart_vm", restart_vm)
         monkeypatch.setattr("ai_desktop_agent.server.session.RESTART_SETTLE_SECONDS", 0.0)
 
         session = TaskSession(llm=MockLLMProvider(), display=FakeDisplayBackend())

@@ -3,20 +3,26 @@
 import pytest
 
 from ai_desktop_agent.actions.primitives import (
-    _REQUIRED_PARAMS,
     ALL_ACTION_TYPES,
     Action,
     ActionType,
+    required_params,
 )
 
 
 class TestActionType:
     """ActionType enum のテスト。"""
 
-    def test_all_types_have_required_params_defined(self):
-        """すべての ActionType が _REQUIRED_PARAMS に定義されていること。"""
-        for at in ALL_ACTION_TYPES:
-            assert at in _REQUIRED_PARAMS, f"{at} が _REQUIRED_PARAMS に未定義"
+    def test_editing_a_callers_schema_cannot_disable_required_click_coordinates(self):
+        schema = required_params(ActionType.LEFT_CLICK)
+        assert schema == {"x", "y"}
+        schema.clear()
+        with pytest.raises(ValueError, match="必須パラメータ"):
+            Action(ActionType.LEFT_CLICK)
+        schema.add("unrecognized")
+        assert required_params(ActionType.LEFT_CLICK) == {"x", "y"}
+        valid = Action(ActionType.LEFT_CLICK, {"x": 30, "y": 40})
+        assert valid.params == {"x": 30, "y": 40}
 
     def test_all_types_are_unique(self):
         """値の重複がないこと。"""

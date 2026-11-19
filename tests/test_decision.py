@@ -67,17 +67,17 @@ class TestMockProvider:
 
 class TestWorkersAiPayload:
     def test_verify_payload_has_two_questions(self):
-        p = WorkersAiClefProvider.__new__(WorkersAiClefProvider)
+        p = WorkersAiClefProvider(account_id="test-account", api_token="test-token")
         payload = WorkersAiClefProvider.build_verify_payload(p, "期待結果", "根拠テキスト")
-        kinds = {q["type"] for q in payload["questions"]}
+        kinds = {q["type"] for q in payload["questions"].values()}
         assert kinds == {"noul", "score"}
         assert "期待結果" in payload["state"]
 
     def test_recover_payload_has_choice(self):
-        p = WorkersAiClefProvider.__new__(WorkersAiClefProvider)
+        p = WorkersAiClefProvider(account_id="test-account", api_token="test-token")
         payload = WorkersAiClefProvider.build_recover_payload(p, "失敗", "説明")
-        assert payload["questions"][0]["type"] == "choice"
-        assert "give_up" in payload["questions"][0]["options"]
+        assert payload["questions"]["recover_strategy"]["type"] == "choice"
+        assert "give_up" in payload["questions"]["recover_strategy"]["criteria"]
 
 
 class TestOpenRouterClef:
@@ -173,7 +173,12 @@ class TestOpenRouterClef:
                 "recover_strategy": {
                     "type": "choice",
                     "choice": "alternative_approach",
-                    "probabilities": {"alternative_approach": 0.82, "wait_and_retry": 0.1},
+                    "probabilities": {
+                        "alternative_approach": 0.82,
+                        "wait_and_retry": 0.1,
+                        "replan_subtask": 0.04,
+                        "give_up": 0.04,
+                    },
                 }
             }
 

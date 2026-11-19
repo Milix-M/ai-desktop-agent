@@ -52,12 +52,16 @@ class AgentLoop:
 
     # ── 内部 ──────────────────────────────────────────
 
-    def _transition(self, to_state: AgentState) -> None:
+    def _transition(
+        self, to_state: AgentState, *, update: Callable[[], object] | None = None
+    ) -> None:
         """状態遷移を実行し、履歴とフックを処理。"""
         from_state = self.context.state
         if not can_transition(from_state, to_state):
             raise InvalidTransitionError(from_state, to_state)
 
+        if update is not None:
+            update()
         self.context.state = to_state
         self._history.append(
             TransitionRecord(
@@ -103,9 +107,12 @@ class AgentLoop:
         Args:
             goal: 設定するゴール。None の場合は既存の context.goal を使用。
         """
-        if goal is not None:
-            self.context.goal = goal
-        self._transition(AgentState.UNDERSTANDING)
+
+        def update_goal() -> None:
+            if goal is not None:
+                self.context.goal = goal
+
+        self._transition(AgentState.UNDERSTANDING, update=update_goal)
 
     def understanding_done(self) -> None:
         """指示理解が完了: UNDERSTANDING → PLANNING。"""
@@ -123,10 +130,13 @@ class AgentLoop:
         """
         if not 0 <= completed_count < len(subtasks):
             raise ValueError("実行するサブタスクが必要です")
-        self.context.subtasks = subtasks
-        self.context.current_subtask_index = completed_count
-        self.context.retry_counts.clear()
-        self._transition(AgentState.EXECUTING)
+
+        def update_plan() -> None:
+            self.context.subtasks = subtasks
+            self.context.current_subtask_index = completed_count
+            self.context.retry_counts.clear()
+
+        self._transition(AgentState.EXECUTING, update=update_plan)
 
     def planning_failed(self) -> None:
         """計画に失敗: PLANNING → FAILED。"""
@@ -159,11 +169,12 @@ class AgentLoop:
 
     def verify_subtask_done(self) -> None:
         """サブタスク完了 → 次のサブタスクへ。"""
-        self.context.advance_subtask()
-        if self.context.is_task_complete:
-            self._transition(AgentState.COMPLETED)
-        else:
-            self._transition(AgentState.EXECUTING)
+        next_index = self.context.current_subtask_index + 1
+        complete = bool(self.context.subtasks) and next_index >= len(self.context.subtasks)
+        self._transition(
+            AgentState.COMPLETED if complete else AgentState.EXECUTING,
+            update=self.context.advance_subtask,
+        )
 
     def verify_failed(self) -> None:
         """検証失敗: VERIFYING → RECOVERING。"""

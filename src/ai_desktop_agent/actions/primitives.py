@@ -9,6 +9,8 @@ import dataclasses
 import math
 from enum import Enum
 
+from ai_desktop_agent.validation import validate_text
+
 
 class ActionType(Enum):
     """エージェントが実行可能な操作の種類。"""
@@ -191,20 +193,23 @@ class Action:
         if "direction" in params and params["direction"] not in ("up", "down"):
             raise ValueError("スクロール方向はupかdownで指定してください")
         for name in ("text", "key", "reason"):
-            if name in params and (
-                not isinstance(params[name], str) or (name != "text" and not params[name].strip())
-            ):
-                raise ValueError(f"{name}は文字列で指定してください")
+            if name in params:
+                validate_text(params[name], name)
+                if name != "text" and not params[name].strip():
+                    raise ValueError(f"{name}は文字列で指定してください")
         if "keys" in params and (
             not isinstance(params["keys"], list)
             or not params["keys"]
             or any(not isinstance(key, str) or not key.strip() for key in params["keys"])
         ):
             raise ValueError("keysは空でないキー名の配列で指定してください")
+        for key in params.get("keys", []):
+            validate_text(key, "keys")
         if self.action_type == ActionType.REQUEST_USER_INPUT and len(params["reason"]) > 1000:
             raise ValueError("手動入力の理由は1〜1000文字で指定してください")
 
         # 説明文の自動生成
+        validate_text(self.description, "description")
         if not self.description:
             object.__setattr__(self, "description", _generate_description(self.action_type, params))
 
