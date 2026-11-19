@@ -17,7 +17,7 @@ pytestmark = [
 ]
 
 
-def test_scripted_evaluation_checks_three_fresh_desktops_and_cleans_up(tmp_path):
+def test_scripted_evaluation_checks_four_fresh_desktops_and_cleans_up(tmp_path):
     image = os.environ.get("DESKTOP_SMOKE_IMAGE", "ai-desktop-agent-desktop-smoke")
     output = Path(os.environ.get("DESKTOP_EVAL_RESULTS_DIR", str(tmp_path))) / (
         "scripted-" + uuid.uuid4().hex[:8]
@@ -41,12 +41,12 @@ def test_scripted_evaluation_checks_three_fresh_desktops_and_cleans_up(tmp_path)
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads((output / "report.json").read_text())
-    assert report["mode"] == "scripted" and report["model"] == "scripted-v1"
-    assert report["status"] == "completed" and report["requested_attempts"] == 3
-    assert report["summary"]["successes"] == 3 and report["summary"]["infrastructure_errors"] == 0
+    assert report["mode"] == "scripted" and report["model"] == "scripted-v2"
+    assert report["status"] == "completed" and report["requested_attempts"] == 4
+    assert report["summary"]["successes"] == 4 and report["summary"]["infrastructure_errors"] == 0
     assert report["summary"]["model_requests"] == 0
-    assert len({r["container_id"] for r in report["results"]}) == 3
-    assert len({r["network_id"] for r in report["results"]}) == 3
+    assert len({r["container_id"] for r in report["results"]}) == 4
+    assert len({r["network_id"] for r in report["results"]}) == 4
     client = docker.from_env()
     try:
         for result in report["results"]:

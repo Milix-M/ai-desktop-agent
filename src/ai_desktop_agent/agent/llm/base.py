@@ -49,6 +49,12 @@ class LLMProvider(ABC):
 
     # ── 判断メソッド ───────────────────────────────────
 
+    async def initial_plan(
+        self, goal: Goal, platform: str
+    ) -> tuple[UnderstandingResult, DecompositionResult | None]:
+        """指示を解析し、対応プロバイダでは同じ応答で初期計画も返す。"""
+        return await self.understand_instruction(goal, platform=platform), None
+
     @abstractmethod
     async def understand_instruction(
         self, goal: Goal, platform: str = "linux"

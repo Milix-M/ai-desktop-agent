@@ -121,6 +121,7 @@ SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
 ANDROID_WAKE_HOLD_SECONDS = 1.1
 
 # 画面を変える可能性のあるアクション（実行後に安定待ちする）
+VERIFIED_CLICKS = (ActionType.LEFT_CLICK, ActionType.RIGHT_CLICK, ActionType.DOUBLE_CLICK)
 VISUAL_ACTIONS: frozenset = frozenset(
     {
         ActionType.LEFT_CLICK,
@@ -206,6 +207,7 @@ class TaskSession:
         self._closing_task: asyncio.Task | None = None
         self._resources_closed = False
         # 検証用：実行直前の生画像（オーバーレイなし）
+        self._settled_click: Screenshot | None = None
         self._last_before_raw: Screenshot | None = None
         # サブタスクごとの空完了却下回数
         self._empty_complete_refusals: dict[str, int] = {}
@@ -329,14 +331,15 @@ class TaskSession:
             self._startup_error = error
             raise
         self._started.set()
-        understanding = await self.llm.understand_instruction(goal, platform=self._platform())
+        understanding, decomposition = await self.llm.initial_plan(goal, platform=self._platform())
         goal.intent = understanding.intent
         goal.target_application = understanding.target_application
         goal.constraints = understanding.constraints
         self.loop.understanding_done()
         await self._emit_state_change()
 
-        decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
+        if decomposition is None:
+            decomposition = await self.llm.decompose_task(goal, 0, platform=self._platform())
         if not decomposition.subtasks:
             self.loop.planning_failed()
             await self._emit_error("タスクの分解に失敗しました")
@@ -669,18 +672,28 @@ class TaskSession:
         try:
             capture_raw = getattr(self.display, "capture_raw", None)
             self._last_before_raw = (
-                await run_display_call(capture_raw) if callable(capture_raw) else None
+                await run_display_call(capture_raw)
+                if action.action_type in VERIFIED_CLICKS and callable(capture_raw)
+                else None
             )
         except Exception:
             self._last_before_raw = None
-        success = await self._execute_recorded_action(
-            action, decision.reasoning, decision.confidence
-        )
+        for index in range(
+            min(decision.repeats, MAX_ACTIONS_PER_TASK - len(self.loop.context.action_history))
+        ):
+            if index:
+                await self._emit_action(action, True)
+            success = await self._execute_recorded_action(
+                action, decision.reasoning, decision.confidence
+            )
+            if not success or self.loop.state == AgentState.PAUSED:
+                break
 
         # 画面変化を待つ。視覚系アクション後は安定するまで待機し、
         # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
         if action.action_type in VISUAL_ACTIONS:
-            await self.executor.wait_for_still(SETTLE_TIMEOUT)
+            settled = await self.executor.wait_for_still(SETTLE_TIMEOUT)
+            self._settled_click = settled if action.action_type in VERIFIED_CLICKS else None
         elif action.action_type in (ActionType.WAIT, ActionType.MOUSE_MOVE):
             # 待機自体が待機・移動は画面を変えないため追加待機なし
             pass
@@ -911,6 +924,8 @@ class TaskSession:
                 zoom_scale=total_scale,
                 platform=self._platform(),
             )
+            if zoom_decision.working_note and self.loop.context.goal:
+                self.loop.context.goal.working_note = zoom_decision.working_note
             pending = zoom_decision
         else:
             logger.warning("region_select の最大深度に達しました。フォールバックします。")
@@ -943,14 +958,12 @@ class TaskSession:
             mapped_params = self._clamp_params_to_raw(mapped_params, raw)
 
             try:
-                pending = ActionDecision(
+                pending = replace(
+                    pending,
                     action=Action(
                         action_type=pending.action.action_type,
                         params=mapped_params,
                     ),
-                    expected_effect=pending.expected_effect,
-                    confidence=pending.confidence,
-                    reasoning=pending.reasoning,
                 )
             except ValueError:
                 logger.warning("精密アクションの構築に失敗: %s", pending.action.action_type.value)
@@ -1125,11 +1138,7 @@ class TaskSession:
             return
 
         # クリック系アクションの場合、追加の画面検証を行う
-        if last.action.action_type in (
-            ActionType.LEFT_CLICK,
-            ActionType.RIGHT_CLICK,
-            ActionType.DOUBLE_CLICK,
-        ):
+        if last.action.action_type in VERIFIED_CLICKS:
             verified = await self._verify_click_effect(last)
             if not verified:
                 self.loop.verify_failed()
@@ -1254,22 +1263,16 @@ class TaskSession:
         直前の安定待ちで画面は収束済みのため、短い再観測で足りる。
         """
         try:
-            await asyncio.sleep(0.1)
             before = self._last_before_raw
-            capture_raw = getattr(self.display, "capture_raw", None)
-            after = (
-                await run_display_call(capture_raw)
-                if callable(capture_raw)
-                else await self._capture_screenshot()
-            )
             if before is None:
-                # 比較元がなければ成功扱い（従来動作）
                 return True
-            import hashlib as _hashlib
-
-            h_before = _hashlib.sha256(before.image_bytes).hexdigest()
-            h_after = _hashlib.sha256(after.image_bytes).hexdigest()
-            if h_before == h_after:
+            after = self._settled_click
+            self._settled_click = None
+            # 無変化の場合は、遅れて届くクリックの描画を従来どおり再確認する。
+            if after is None or after.image_bytes == before.image_bytes:
+                await asyncio.sleep(0.1)
+                after = await run_display_call(self.display.capture_raw)
+            if before.image_bytes == after.image_bytes:
                 logger.warning("クリック後に画面変化なし: %s", record.action.params)
                 return False
             return True
@@ -1459,6 +1462,8 @@ class TaskSession:
                     error_context=error_context,
                     platform=self._platform(),
                 )
+                if decision.working_note and self.loop.context.goal:
+                    self.loop.context.goal.working_note = decision.working_note
                 self._consec_empty_decides = 0
                 return decision
             except ValueError as e:
