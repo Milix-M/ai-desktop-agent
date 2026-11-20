@@ -10,9 +10,13 @@ import ipaddress
 import logging
 import threading
 import time
+from contextlib import ExitStack
 from typing import Any
 
-from ai_desktop_agent.vm.base import DisplayBackend
+from PIL import Image
+from vncdotool.client import KEYMAP
+
+from ai_desktop_agent.vm.base import DisplayBackend, held_input, validate_click_position
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
@@ -79,10 +83,6 @@ def _ensure_vncdotool_keymap() -> None:
     後続呼び出しが壊れるため、keyEvent の直接利用は避け、
     常に self を返す keyDown/keyUp/keyPress を使う。
     """
-    try:
-        from vncdotool.client import KEYMAP
-    except ImportError:
-        return
     KEYMAP.setdefault("backspace", 0xFF08)
     KEYMAP.setdefault("escape", 0xFF1B)
     KEYMAP.setdefault("esc", 0xFF1B)
@@ -130,12 +130,8 @@ _SHIFT_KEYSYMS: dict[str, tuple[str, int]] = {
 # 手動 Shift 合成すると逆に小文字化する（実測）。
 
 # _SHIFT_KEYSYMSのkeysym名を登録する（定義の直後）。
-try:
-    from vncdotool.client import KEYMAP as _KM2
-except ImportError:
-    _KM2 = {}  # type: ignore[assignment]
 for _name, _keysym in _SHIFT_KEYSYMS.values():
-    _KM2.setdefault(_name, _keysym)
+    KEYMAP.setdefault(_name, _keysym)
 
 
 class VNCClient(DisplayBackend):
@@ -277,14 +273,12 @@ class VNCClient(DisplayBackend):
         data = buf.getvalue()
         self._frame_count += 1
 
-        width, height = self._width or 1024, self._height or 768
         try:
-            from PIL import Image
-
             with Image.open(io.BytesIO(data)) as img:
                 width, height = img.size
-        except Exception:
-            logger.debug("スクリーンショットサイズ取得に失敗、デフォルトを使用")
+                img.verify()
+        except Exception as error:
+            raise RuntimeError("VNCの画面画像を読み取れません") from error
         self._width, self._height = width, height
 
         ss = Screenshot(
@@ -317,7 +311,7 @@ class VNCClient(DisplayBackend):
         self._ensure_connected()
 
         buf = io.BytesIO()
-        self._client.captureRegion(buf, x, y, width, height)
+        self._client.capture_region_png(buf, x, y, width, height)
         data = buf.getvalue()
         self._frame_count += 1
 
@@ -355,18 +349,23 @@ class VNCClient(DisplayBackend):
         self._ensure_connected()
         self._client.mouseUp(button)
 
+    def _pressed(self, down, up, value):
+        """Release even if the press reached the guest but its reply was lost."""
+        self._check_stop()
+        return held_input(down, up, value)
+
     def mouse_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
         """指定座標をクリック（move → 整定 → press → 50ms → release）。
 
         move 直後に少し待つことで、VM側がカーソル移動を確定してから
         クリックを受け付けられるようにする。
         """
+        validate_click_position(x, y)
         if x is not None and y is not None:
             self.mouse_move(x, y)
             time.sleep(0.1)  # 移動の整定待ち（VM側の描画・フォーカス確定）
-        self.mouse_down(button)
-        time.sleep(0.05)  # 押下時間を確保（短すぎるとOSがクリックを認識しない）
-        self.mouse_up(button)
+        with self._pressed(self.mouse_down, self.mouse_up, button):
+            time.sleep(0.05)  # 押下時間を確保
 
     def mouse_double_click(
         self, x: int | None = None, y: int | None = None, button: int = 1
@@ -398,17 +397,14 @@ class VNCClient(DisplayBackend):
         steps = max(2, min(50, max(20, int(dist / 10))))
         self._client.mouseMove(start_x, start_y)
         time.sleep(0.1)
-        self._client.mouseDown(button)
-        time.sleep(0.05)
-        try:
+        with self._pressed(self._client.mouseDown, self._client.mouseUp, button):
+            time.sleep(0.05)
             for i in range(1, steps + 1):
                 self._check_stop()
                 x = int(start_x + (end_x - start_x) * i / steps)
                 y = int(start_y + (end_y - start_y) * i / steps)
                 self._client.mouseMove(x, y)
                 time.sleep(0.015)
-        finally:
-            self._client.mouseUp(button)
         self._cursor_x = end_x
         self._cursor_y = end_y
 
@@ -418,8 +414,8 @@ class VNCClient(DisplayBackend):
         btn = _BUTTON_SCROLL_UP if direction == "up" else _BUTTON_SCROLL_DOWN
         for _ in range(abs(amount)):
             self._check_stop()
-            self._client.mouseDown(btn)
-            self._client.mouseUp(btn)
+            with self._pressed(self._client.mouseDown, self._client.mouseUp, btn):
+                pass
 
     # ── キーボード操作 ────────────────────────────────────
     # keyDown/keyUp/keyPress（self を返す）を使い、戻り値 None の
@@ -430,9 +426,8 @@ class VNCClient(DisplayBackend):
         """キーを押して離す（50ms押下）。"""
         self._ensure_connected()
         mapped = self._map_key(key)
-        self._client.keyDown(mapped)
-        time.sleep(0.05)  # 押下時間を確保
-        self._client.keyUp(mapped)
+        with self._pressed(self._client.keyDown, self._client.keyUp, mapped):
+            time.sleep(0.05)  # 押下時間を確保
 
     def key_down(self, key: str) -> None:
         """キーを押し続ける。"""
@@ -450,15 +445,11 @@ class VNCClient(DisplayBackend):
         """キーコンビネーション（Ctrl+C 等）。各押下間に20msを挟む。"""
         self._ensure_connected()
         mapped = [self._map_key(k) for k in keys]
-        # すべて押す
-        for k in mapped:
-            self._client.keyDown(k)
-            time.sleep(0.02)
-        time.sleep(0.05)
-        # 逆順で離す
-        for k in reversed(mapped):
-            self._client.keyUp(k)
-            time.sleep(0.02)
+        with ExitStack() as held:
+            for k in mapped:
+                held.enter_context(self._pressed(self._client.keyDown, self._client.keyUp, k))
+                time.sleep(0.02)
+            time.sleep(0.05)
 
     #: Android-x86 のスリープ復帰に必要な長押し秒数。
     #: 公式doc（android-x86.org/documentation/wake_machine.html）では
@@ -476,9 +467,8 @@ class VNCClient(DisplayBackend):
         for key in ("escape", "menu"):
             try:
                 mapped = self._map_key(key)
-                self._client.keyDown(mapped)
-                time.sleep(self.ANDROID_WAKE_HOLD_SECONDS)
-                self._client.keyUp(mapped)
+                with self._pressed(self._client.keyDown, self._client.keyUp, mapped):
+                    time.sleep(self.ANDROID_WAKE_HOLD_SECONDS)
                 time.sleep(0.3)
             except Exception:
                 logger.debug("Androidウェイクキー送信に失敗: %s", key, exc_info=True)
@@ -554,13 +544,16 @@ class VNCClient(DisplayBackend):
         self.key_combo(["shift", "insert"])
         self._wait_clipboard(protocol.clipboard_provided)
         if protocol.clipboard_error:
-            raise RuntimeError(protocol.clipboard_error)
+            error = protocol.clipboard_error
+            self.disconnect()
+            raise RuntimeError(error)
 
     def _wait_clipboard(self, event: threading.Event) -> None:
         deadline = time.monotonic() + 2.0
         while not event.wait(0.05):
             self._check_stop()
             if time.monotonic() >= deadline:
+                self.disconnect()
                 raise RuntimeError("VNCの貼り付け応答がありません。入力結果を確認してください")
         self._check_stop()
 

@@ -16,8 +16,6 @@ class TestScreenshot:
         ss = Screenshot(image_bytes=png, width=800, height=600)
         assert ss.width == 800
         assert ss.height == 600
-        assert ss.width == 800
-        assert ss.height == 600
         assert ss.size_bytes == len(png)
 
     def test_mock_screenshot_via_fake_backend(self):
@@ -35,6 +33,12 @@ class TestScreenshot:
         ss = backend.capture_screen()
         assert ss.width == 640
         assert ss.height == 480
+        with ss.to_pil() as image:
+            assert image.size == (640, 480)
+        region = backend.capture_region(10, 20, 120, 80)
+        with region.to_pil() as image:
+            assert image.size == (120, 80)
+            assert image.getpixel((60, 40)) == (230, 230, 230)
 
 
 # ── FakeDisplayBackend ────────────────────────────────

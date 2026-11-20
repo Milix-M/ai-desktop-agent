@@ -136,6 +136,14 @@ def test_desktop_clipboard_contents_are_never_requested_decoded_or_echoed(protoc
     protocol.bell.assert_called_once()
 
 
+def test_empty_desktop_clipboard_text_does_not_consume_the_next_rfb_event(protocol):
+    protocol.bell = Mock()
+    protocol.dataReceived(pack("!BxxxI", 3, 0) + b"\2")
+    protocol.bell.assert_called_once()
+    protocol.transport.write.assert_not_called()
+    assert not protocol.clipboard_ready.is_set()
+
+
 def test_peek_only_announces_the_available_format(protocol):
     negotiate(protocol)
     protocol.dataReceived(server_message(PEEK))

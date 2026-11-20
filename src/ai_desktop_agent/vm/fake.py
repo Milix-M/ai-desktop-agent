@@ -4,6 +4,7 @@
 """
 
 import io
+from functools import lru_cache
 
 from PIL import Image
 
@@ -11,10 +12,11 @@ from ai_desktop_agent.vm.base import DisplayBackend
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 
-def _make_dummy_png() -> bytes:
-    """1x1 ピクセルの最小PNGを生成。"""
+@lru_cache(maxsize=16)
+def _make_dummy_png(width: int, height: int) -> bytes:
+    """Return a visible desktop with dimensions matching its screenshot metadata."""
     buf = io.BytesIO()
-    Image.new("RGB", (1, 1), color="black").save(buf, format="PNG")
+    Image.new("RGB", (width, height), color=(230, 230, 230)).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -32,6 +34,7 @@ class FakeDisplayBackend(DisplayBackend):
 
         # 操作ログ
         self.mouse_moves: list[tuple[int, int]] = []
+        self.button_events: list[tuple[str, int]] = []
         self.clicks: list[dict] = []  # {button, x, y}
         self.drags: list[dict] = []  # {start, end}
         self.scrolls: list[dict] = []  # {direction, amount}
@@ -57,7 +60,7 @@ class FakeDisplayBackend(DisplayBackend):
         self._frame_count += 1
         self.screenshots_taken += 1
         return Screenshot(
-            image_bytes=_make_dummy_png(),
+            image_bytes=_make_dummy_png(self._screen_width, self._screen_height),
             width=self._screen_width,
             height=self._screen_height,
             timestamp=0.0,
@@ -72,7 +75,7 @@ class FakeDisplayBackend(DisplayBackend):
         self._frame_count += 1
         self.screenshots_taken += 1
         return Screenshot(
-            image_bytes=_make_dummy_png(),
+            image_bytes=_make_dummy_png(width, height),
             width=width,
             height=height,
             timestamp=0.0,
@@ -91,10 +94,10 @@ class FakeDisplayBackend(DisplayBackend):
         self.mouse_moves.append((x, y))
 
     def mouse_down(self, button: int = 1) -> None:
-        pass  # mouse_click でまとめて記録
+        self.button_events.append(("down", button))
 
     def mouse_up(self, button: int = 1) -> None:
-        pass
+        self.button_events.append(("up", button))
 
     def mouse_click(self, x: int | None = None, y: int | None = None, button: int = 1) -> None:
         # None の場合は (0, 0) 扱い（旧「現在位置クリック」の代替。座標必須化後は通常呼ばれない）
@@ -155,6 +158,7 @@ class FakeDisplayBackend(DisplayBackend):
         """記録された全操作の数。"""
         return (
             len(self.clicks)
+            + len(self.button_events)
             + len(self.drags)
             + len(self.scrolls)
             + len(self.key_presses)
@@ -166,6 +170,7 @@ class FakeDisplayBackend(DisplayBackend):
     def reset_logs(self) -> None:
         """操作ログをリセット。"""
         self.mouse_moves.clear()
+        self.button_events.clear()
         self.clicks.clear()
         self.drags.clear()
         self.scrolls.clear()
