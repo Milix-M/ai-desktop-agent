@@ -90,6 +90,7 @@ class ActionDecision:
         if not isinstance(self.action, Action):
             raise ValueError("actionはActionで指定してください")
         validate_text(self.expected_effect, "expected_effect")
+        validate_text(self.working_note, "working_note")
         if type(self.repeats) is not int or not 1 <= self.repeats <= 5:
             raise ValueError("方向キーの回数は1〜5回です")
         if self.repeats > 1 and (

@@ -664,12 +664,7 @@ class OpenAICompatProvider(LLMProvider):
             f"{_PLAN_VERIFICATION}IDはstep_1から連番にしてください。\n" + goal.description
         )
         data = await self._call(prompt, _SCHEMA_INITIAL, system_prompt=_planning_prompt(platform))
-        return (
-            UnderstandingResult(
-                data["intent"], data["target_application"], data["constraints"], data["reasoning"]
-            ),
-            self._decomposition(data, 0),
-        )
+        return self._understanding(data), self._decomposition(data, 0)
 
     async def understand_instruction(
         self, goal: Goal, platform: str = PLATFORM_LINUX
@@ -681,6 +676,10 @@ class OpenAICompatProvider(LLMProvider):
         data = await self._call(
             prompt, _SCHEMA_UNDERSTAND, system_prompt=_planning_prompt(platform)
         )
+        return self._understanding(data)
+
+    @staticmethod
+    def _understanding(data: dict) -> UnderstandingResult:
         return UnderstandingResult(
             intent=data.get("intent", "unknown"),
             target_application=data.get("target_application"),

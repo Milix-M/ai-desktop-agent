@@ -56,14 +56,18 @@ async def test_invalid_coordinate_cannot_become_top_left_click(coordinate):
 @pytest.mark.parametrize(
     ("action_type", "params"),
     [
+        ("left_click", {"x": 10, "y": 20}),
+        (ActionType.LEFT_CLICK, [10, 20]),
         (ActionType.WAIT, {"seconds": float("nan")}),
         (ActionType.WAIT, {"seconds": -1}),
+        (ActionType.WAIT, {"seconds": 10**1000}),
         (ActionType.WAIT_FOR_STILL, {"timeout": float("inf")}),
         (ActionType.KEY_HOLD, {"key": "shift", "duration_ms": -1}),
         (ActionType.SCROLL, {"direction": "sideways", "amount": 3}),
         (ActionType.SCROLL, {"direction": "down", "amount": True}),
         (ActionType.SCROLL, {"direction": "down", "amount": -3}),
         (ActionType.TYPE, {"text": ["hello"]}),
+        (ActionType.REQUEST_USER_INPUT, {"reason": "a" * 1001}),
         (ActionType.KEY_COMBO, {"keys": "ctrl+c"}),
         (ActionType.KEY_COMBO, {"keys": []}),
         (ActionType.KEY_PRESS, {"key": ""}),
@@ -173,24 +177,24 @@ async def test_bad_decision_fails_and_persists_without_any_desktop_input(tmp_pat
     assert record.actions == []
 
 
-async def test_string_false_cannot_advance_the_sessions_subtask():
+async def test_string_false_cannot_advance_the_sessions_subtask(tmp_path, session_retry_sleep):
     from ai_desktop_agent.agent.llm.mock import MockLLMProvider
     from ai_desktop_agent.agent.state import AgentState
     from ai_desktop_agent.server.session import TaskSession
+    from ai_desktop_agent.server.store import TaskStore
     from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
     llm = MockLLMProvider()
     llm.verify_result = provider_with({"success": "false"}).verify_result
-    session = TaskSession(llm=llm, display=FakeDisplayBackend(), decision=None)
-    session.loop.start(Goal("save report"))
-    session.loop.understanding_done()
-    session.loop.plan_ready([Subtask("s1", "save")])
-    session.loop.record_action(Action(ActionType.SUBTASK_COMPLETE), True)
-    session.loop.action_executed()
-    session.loop.wait_complete()
+    store = TaskStore(tmp_path)
+    session = TaskSession(llm=llm, display=FakeDisplayBackend(), store=store, decision=None)
     try:
-        await session._verify_phase()
-        assert session.loop.state == AgentState.RECOVERING
+        assert await session.run("save report") is False
+        assert session.loop.state == AgentState.FAILED
         assert session.loop.context.current_subtask_index == 0
+        record = store.load(session.id)
+        assert record.stop_reason == "execution_error"
+        assert "真偽値" in record.error_message
+        assert not session.display.is_connected
     finally:
         await session.aclose()

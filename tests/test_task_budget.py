@@ -61,6 +61,7 @@ async def llm_with_transport(handler):
         ("TASK_MAX_REQUESTS", "1.5"),
         ("TASK_MAX_TOKENS", ""),
         ("TASK_MAX_COST_USD", "nan"),
+        ("TASK_MAX_COST_USD", "0"),
         ("TASK_MAX_COST_USD", "1"),
         ("TASK_INPUT_USD_PER_MILLION", "1"),
     ],
@@ -220,9 +221,9 @@ async def test_decision_limit_is_shared_and_never_falls_back_to_llm(
     assert len(seen) == 1
     llm.verify_result.assert_not_awaited()
     llm.recover_from_error.assert_not_awaited()
-    assert session._store.load(session.id).stop_reason == (
-        "token_limit" if failure == "tokens" else "usage_unavailable"
-    )
+    record = session._store.load(session.id)
+    assert record.decision_calls == 1
+    assert record.stop_reason == ("token_limit" if failure == "tokens" else "usage_unavailable")
 
 
 @pytest.mark.parametrize(
@@ -270,7 +271,12 @@ async def test_pause_counts_toward_deadline_and_notifies_failure(tmp_path):
 
 
 @pytest.mark.parametrize("phase", ["execute", "recover"])
-async def test_deadline_signals_and_drains_display_before_cleanup(tmp_path, phase):
+async def test_deadline_signals_and_drains_display_before_cleanup(
+    tmp_path, phase, advance_task_clock
+):
+    loop = asyncio.get_running_loop()
+    limits = ExecutionLimits(max_seconds=30)
+
     class BlockingDisplay(FakeDisplayBackend):
         def __init__(self):
             super().__init__()
@@ -280,7 +286,8 @@ async def test_deadline_signals_and_drains_display_before_cleanup(tmp_path, phas
 
         def type_text(self, text):
             self.entered.set()
-            assert self.stopped.wait(2), "deadline did not signal display thread"
+            loop.call_soon_threadsafe(advance_task_clock, limits.max_seconds)
+            assert self.stopped.wait(10), "deadline did not signal display thread"
             self.finished.set()
             raise RuntimeError("typing interrupted")
 
@@ -298,7 +305,7 @@ async def test_deadline_signals_and_drains_display_before_cleanup(tmp_path, phas
         display=display,
         store=TaskStore(tmp_path),
         decision=None,
-        limits=ExecutionLimits(max_seconds=0.1),
+        limits=limits,
     )
     session._capture_screenshot = AsyncMock(return_value=display.capture_screen())
     if phase == "recover":

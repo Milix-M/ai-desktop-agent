@@ -7,7 +7,6 @@ import pytest
 from httpx import ASGITransport
 
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
-from ai_desktop_agent.agent.state import AgentState
 from ai_desktop_agent.server import app as server
 from ai_desktop_agent.server.session import TaskSession
 from ai_desktop_agent.server.store import TaskStore
@@ -16,7 +15,7 @@ from tests.http import AuthenticatedClient
 
 
 @pytest.fixture
-async def snapshot_server(tmp_path, monkeypatch):
+async def snapshot_server(tmp_path, monkeypatch, session_retry_sleep):
     store = TaskStore(tmp_path)
     made = []
     monkeypatch.setattr(server, "_store", store)
@@ -28,15 +27,16 @@ async def snapshot_server(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_connect_vm_display", lambda _: FakeDisplayBackend())
 
     def create(display):
-        session = TaskSession(llm=MockLLMProvider(), display=display, store=store, decision=None)
-        session.ready, session.finish = asyncio.Event(), asyncio.Event()
+        ready, finish = asyncio.Event(), asyncio.Event()
 
-        async def wait():
-            session.ready.set()
-            await session.finish.wait()
-            session.loop.context.state = AgentState.COMPLETED
+        class WaitingModel(MockLLMProvider):
+            async def decide_next_action(self, *args, **kwargs):
+                ready.set()
+                await finish.wait()
+                return await super().decide_next_action(*args, **kwargs)
 
-        session._execute_phase = wait
+        session = TaskSession(llm=WaitingModel(), display=display, store=store, decision=None)
+        session.ready, session.finish = ready, finish
         made.append(session)
         return session
 
@@ -60,20 +60,44 @@ async def snapshot_server(tmp_path, monkeypatch):
             await asyncio.gather(*(s._task for s in made if s._task), return_exceptions=True)
 
 
-async def blocked_scan(store, monkeypatch):
+async def blocked_scan(store, monkeypatch, *, read_before_gate=True):
     entered, release = threading.Event(), threading.Event()
     original = store.latest_per_vm
 
     def scan():
-        records = original()
+        records = original() if read_before_gate else None
         entered.set()
         assert release.wait(5)
-        return records
+        return records if read_before_gate else original()
 
     monkeypatch.setattr(store, "latest_per_vm", scan)
     task = asyncio.create_task(server._task_snapshot())
     assert await asyncio.to_thread(entered.wait, 2)
     return task, release
+
+
+@pytest.mark.parametrize("complete_newer", [False, True])
+async def test_snapshot_started_before_replacement_respects_history_read_after_replacement(
+    snapshot_server, monkeypatch, complete_newer
+):
+    store, _, start = snapshot_server
+    old = await start("A")
+    snapshot, release = await blocked_scan(store, monkeypatch, read_before_gate=False)
+    try:
+        newer = await start("A")
+        assert old._task.cancelled() and newer.session_order > old.session_order
+        if complete_newer:
+            newer.finish.set()
+            assert await newer._task
+        assert store.latest().id == newer.id
+    finally:
+        release.set()
+    states = {task.vm_id: task for task in await snapshot}
+    assert states["A"].session_id == newer.id
+    assert states["A"].session_order == newer.session_order
+    assert states["A"].state == ("completed" if complete_newer else "executing")
+    assert states["A"].is_running is not complete_newer
+    assert len(store.list(limit=None)) == 2
 
 
 async def test_snapshot_keeps_completion_on_another_vm_during_its_disk_scan(

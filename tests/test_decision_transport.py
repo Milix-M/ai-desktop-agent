@@ -4,6 +4,7 @@ Reference: https://developers.cloudflare.com/workers-ai/models/clef/schema-input
 Response: https://developers.cloudflare.com/workers-ai/models/clef/schema-output.json
 """
 
+import asyncio
 import base64
 import json
 from io import BytesIO
@@ -17,9 +18,10 @@ from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits, TaskBudget
 from ai_desktop_agent.agent.decision.provider import OpenRouterClefProvider, WorkersAiClefProvider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
-from ai_desktop_agent.agent.llm.types import ErrorContext
-from ai_desktop_agent.agent.state import Goal, Subtask
+from ai_desktop_agent.agent.llm.types import ErrorContext, RecoveryPlan, RecoveryStrategy
+from ai_desktop_agent.agent.state import AgentState, Goal, Subtask
 from ai_desktop_agent.server.session import TaskSession
+from ai_desktop_agent.server.store import TaskStore
 from ai_desktop_agent.vm.fake import FakeDisplayBackend
 
 
@@ -426,3 +428,109 @@ def test_a_compressed_image_above_sixteen_megapixels_is_rejected_before_decoding
     with pytest.raises(ValueError, match="画像"):
         provider("workers").build_verify_payload("保存される", "画面を確認", encoded.getvalue())
     decode.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["workers", "openrouter"])
+@pytest.mark.parametrize("phase", ["verify", "recover"])
+@pytest.mark.parametrize("failure", ["http", "invalid-answer"])
+async def test_failed_decision_attempts_remain_in_persisted_usage_when_the_llm_recovers(
+    transport, kind, phase, failure, tmp_path
+):
+    observed = transport(lambda _: httpx.Response(503) if failure == "http" else response(kind, {}))
+    llm = MockLLMProvider(
+        recover_result=RecoveryPlan(RecoveryStrategy.ALTERNATIVE_APPROACH, [], "再確認する", True)
+    )
+    llm.verify_result = AsyncMock(wraps=llm.verify_result)
+    llm.recover_from_error = AsyncMock(wraps=llm.recover_from_error)
+    store = TaskStore(tmp_path)
+    decision = provider(kind)
+    session = TaskSession(llm=llm, display=FakeDisplayBackend(), decision=decision, store=store)
+    session.loop.start(Goal("文書を保存する"))
+    session.loop.understanding_done()
+    session.loop.plan_ready([Subtask("save", "文書を保存する")])
+    session.loop.record_action(
+        Action(ActionType.SUBTASK_COMPLETE), phase == "verify", "保存できない"
+    )
+    session.loop.action_executed()
+    session.loop.wait_complete()
+    try:
+        if phase == "verify":
+            await session._verify_phase()
+            llm.verify_result.assert_awaited_once()
+            assert session.loop.state == AgentState.COMPLETED
+        else:
+            session.loop.verify_failed()
+            await session._recover_phase()
+            llm.recover_from_error.assert_awaited_once()
+            assert session.loop.state == AgentState.EXECUTING
+        record = store.load(session.id)
+        assert len(observed) == decision.call_count == session.decision_calls == 1
+        assert record.decision_calls == 1 and record.decision_escalations == 1
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.parametrize("kind", ["workers", "openrouter"])
+@pytest.mark.parametrize("phase", ["verify", "recover"])
+@pytest.mark.parametrize("outcome", ["timeout", "stop"])
+async def test_interrupted_decision_requests_are_closed_counted_and_never_retried_by_the_llm(
+    transport, kind, phase, outcome, tmp_path
+):
+    entered = asyncio.Event()
+
+    async def serve(request):
+        entered.set()
+        await asyncio.Event().wait()
+
+    observed = transport(serve)
+    llm = MockLLMProvider()
+    llm.verify_result = AsyncMock()
+    llm.recover_from_error = AsyncMock()
+    store = TaskStore(tmp_path)
+    session = TaskSession(
+        llm=llm,
+        display=FakeDisplayBackend(),
+        decision=provider(kind),
+        store=store,
+        limits=ExecutionLimits(
+            max_seconds=5, request_timeout_seconds=0.03 if outcome == "timeout" else 2
+        ),
+    )
+
+    async def run_phase(goal):
+        session.loop.understanding_done()
+        session.loop.plan_ready([Subtask("save", "文書を保存する")])
+        session.loop.record_action(Action(ActionType.SUBTASK_COMPLETE), phase == "verify")
+        session.loop.action_executed()
+        session.loop.wait_complete()
+        if phase == "verify":
+            await session._verify_phase()
+        else:
+            session.loop.verify_failed()
+            await session._recover_phase()
+
+    session._run_task = run_phase
+    task = asyncio.create_task(session.run("文書を保存する"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if outcome == "stop":
+            session.stop()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), 2)
+        else:
+            assert await asyncio.wait_for(asyncio.shield(task), 2) is False
+        record = store.load(session.id)
+        assert record.state == "failed" and record.success is False
+        assert record.decision_calls == 1 and record.decision_escalations == 0
+        assert record.execution_usage["requests"] == len(observed) == 1
+        assert record.execution_usage["usage_complete"] is False
+        assert record.stop_reason == ("request_timeout" if outcome == "timeout" else "cancelled")
+        assert record.error_message
+        llm.verify_result.assert_not_awaited()
+        llm.recover_from_error.assert_not_awaited()
+        assert all(client.is_closed for client in transport.opened)
+        assert not session.is_running and not session.display.is_connected
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

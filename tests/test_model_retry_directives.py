@@ -1,5 +1,6 @@
 """Upstream retry directives must not cause early sends or unbounded waits."""
 
+import asyncio
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from types import SimpleNamespace
@@ -8,7 +9,11 @@ import httpx
 import pytest
 from openai import APIStatusError
 
+from ai_desktop_agent.agent.budget import ExecutionLimits
 from ai_desktop_agent.agent.llm import openai_compat_provider as module
+from ai_desktop_agent.server.session import TaskSession
+from ai_desktop_agent.server.store import TaskStore
+from ai_desktop_agent.vm.fake import FakeDisplayBackend
 from tests.test_task_budget import completion, llm_with_transport
 
 SCHEMA = {"name": "report", "schema": {"type": "object"}}
@@ -167,3 +172,50 @@ async def test_schema_fallback_also_obeys_waits_and_no_retry_directives(
         assert provider._structured_output is False
     finally:
         await provider.aclose()
+
+
+@pytest.mark.parametrize("stop", ["deadline", "operator"])
+async def test_waiting_for_upstream_never_blocks_stop_or_task_deadline(
+    tmp_path, monkeypatch, stop, advance_task_clock
+):
+    entered = asyncio.Event()
+    requests = []
+
+    async def sleep(delay):
+        assert delay == 30
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(module, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": sleep})))
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            429, headers={"Retry-After": "30"}, json={"error": {"message": "busy"}}
+        )
+
+    provider = await llm_with_transport(handle)
+    display = FakeDisplayBackend(32, 32)
+    store = TaskStore(tmp_path)
+    limits = ExecutionLimits(max_seconds=30)
+    session = TaskSession(llm=provider, display=display, store=store, limits=limits, decision=None)
+    task = asyncio.create_task(session.run("報告を保存する"))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        if stop == "operator":
+            session.stop()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), 10)
+        else:
+            advance_task_clock(limits.max_seconds)
+            assert await asyncio.wait_for(asyncio.shield(task), 10) is False
+        assert len(requests) == provider.call_count == 1
+        record = TaskStore(tmp_path).load(session.id)
+        assert record.state == "failed" and record.actions == []
+        if stop == "deadline":
+            assert record.stop_reason == "duration_limit"
+        assert not display.is_connected and provider._client.is_closed()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
