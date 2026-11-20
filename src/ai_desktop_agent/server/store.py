@@ -26,6 +26,7 @@ from ai_desktop_agent.server.persistence import (
     check_writable,
     durable_unlink,
     metadata_lock,
+    unique_json_object,
 )
 from ai_desktop_agent.server.submissions import (
     SubmissionClaim,
@@ -73,6 +74,7 @@ def _read_json(path: Path) -> dict:
         path.read_text(encoding="utf-8"),
         parse_float=_finite_float,
         parse_constant=_reject_constant,
+        object_pairs_hook=unique_json_object,
     )
     _check_json_depth(value)
     return value
@@ -186,6 +188,13 @@ class TaskRecord:
             result["result"] = [output.model_dump() for output in self.result]
             result["actions"] = [dataclasses.asdict(a) for a in self.actions]
         return result
+
+    @staticmethod
+    def from_file(path: Path) -> TaskRecord:
+        record = TaskRecord.from_dict(redact_data(_read_json(path)))
+        if record.id != path.stem:
+            raise ValueError("タスクIDとファイル名が一致しません")
+        return record
 
     @staticmethod
     def from_dict(d: dict) -> TaskRecord:
@@ -431,10 +440,7 @@ class TaskStore:
         if not path.is_file():
             return None
         try:
-            record = TaskRecord.from_dict(redact_data(_read_json(path)))
-            if record.id != task_id:
-                raise ValueError("タスクIDとファイル名が一致しません")
-            return record
+            return TaskRecord.from_file(path)
         except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError) as e:
             logger.warning("タスク記録の読み出しに失敗 %s: %s", task_id, e)
             return None
