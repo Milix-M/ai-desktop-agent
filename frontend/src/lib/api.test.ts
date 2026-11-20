@@ -74,6 +74,7 @@ describe("API client", () => {
           action_count: 0,
           success_count: 0,
           failure_count: 0,
+          subtasks: [], current_subtask_index: 0,
         }),
       } as Response);
 
@@ -111,6 +112,7 @@ describe("API client", () => {
           action_count: 0,
           success_count: 0,
           failure_count: 0,
+          subtasks: [], current_subtask_index: 0,
         }),
       } as Response);
 
@@ -142,13 +144,14 @@ describe("API client", () => {
     it.each(["pause", "resume", "stop"] as const)(
       "POSTs /tasks/current/%s",
       async (action) => {
+        const status = { pause: "paused", resume: "resumed", stop: "stopped" }[action];
         vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ status: action + "d" }),
+          json: async () => ({ status }),
         } as Response);
 
         const result = await controlTask(action, "desktop", "observed-task");
-        expect(result.status).toBe(action + "d");
+        expect(result.status).toBe(status);
         expect(fetch).toHaveBeenCalledWith(
           expect.stringContaining(`/tasks/current/${action}`),
           expect.objectContaining({ method: "POST" })
@@ -162,6 +165,30 @@ describe("API client", () => {
       const url = getWsUrl();
       expect(url).toContain(":8081/ws");
     });
+
+    it.each(["https://desktop.example.test:3443", "https://[2001:db8::1]:3443"])(
+      "builds secure control and desktop endpoints without letting an ID alter the query: %s", origin => {
+        const location = new URL(origin);
+        const vmId = "営業/../?token=private#画面";
+        vi.stubGlobal("window", { location });
+        try {
+          const control = new URL(getWsUrl());
+          const desktop = new URL(getVncWsUrl(vmId));
+          for (const endpoint of [control, desktop]) {
+            expect(endpoint.protocol).toBe("wss:");
+            expect(endpoint.hostname).toBe(location.hostname);
+            expect(endpoint.port).toBe("8081");
+            expect(endpoint.search).toBe("");
+            expect(endpoint.hash).toBe("");
+            expect(endpoint.username).toBe("");
+            expect(endpoint.password).toBe("");
+          }
+          expect(control.pathname).toBe("/ws");
+          expect(desktop.pathname.startsWith("/vnc/")).toBe(true);
+          expect(decodeURIComponent(desktop.pathname.slice("/vnc/".length))).toBe(vmId);
+        } finally { vi.unstubAllGlobals(); }
+      },
+    );
   });
 
   describe("getVncWsUrl", () => {
@@ -260,9 +287,12 @@ describe("API client", () => {
               error_message: "",
               duration_ms: 10,
               at: 1700000000,
+              reasoning: "保存先を選ぶ",
+              confidence: 1,
             },
           ],
           subtasks: [],
+          current_subtask_index: 0,
           goal: {},
           created_at: 1700000000,
         }),

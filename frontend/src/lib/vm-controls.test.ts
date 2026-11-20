@@ -8,7 +8,7 @@ it("sends the selected VM and observed task with control requests", async () => 
   try {
     await controlTask("stop", "vm A", "observed-task");
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A&session_id=observed-task"), { method: "POST", credentials: "include" }
+      expect.stringContaining("/tasks/current/stop?vm_id=vm%20A&session_id=observed-task"), expect.objectContaining({ method: "POST", credentials: "include", signal: expect.any(AbortSignal) })
     );
   } finally { fetchMock.mockRestore(); }
 });
