@@ -175,12 +175,14 @@ async def test_retrying_does_not_restart_the_same_subtask_deadline(session_retry
     assert calls < 8 and model.recover_from_error.await_count >= 1
 
 
-async def test_each_new_subtask_gets_its_own_deadline(tmp_path, session_retry_sleep):
-    model = bounded_model(0.5)
+async def test_each_new_subtask_gets_its_own_deadline(
+    tmp_path, session_retry_sleep, advance_task_clock
+):
+    model = bounded_model(60)
     model._decompose_result = DecompositionResult(
         [
-            Subtask("s1", "inspect first", timeout_seconds=0.5),
-            Subtask("s2", "inspect second", timeout_seconds=0.5),
+            Subtask("s1", "inspect first", timeout_seconds=60),
+            Subtask("s2", "inspect second", timeout_seconds=60),
         ],
         "inspect both",
     )
@@ -188,7 +190,8 @@ async def test_each_new_subtask_gets_its_own_deadline(tmp_path, session_retry_sl
 
     async def verify(*args, **kwargs):
         seen.add(session.loop.context.current_subtask.id)
-        await asyncio.sleep(0.3)
+        # Each verification fits its own deadline, but together they exceed one.
+        advance_task_clock(40)
         return VerificationResult(True, "visible", "visible")
 
     model.verify_result = verify

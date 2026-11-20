@@ -39,6 +39,27 @@ def provider_retry_sleep(monkeypatch):
     return _record_module_sleeps(monkeypatch, openai_compat_provider)
 
 
+@pytest.fixture
+async def advance_task_clock(monkeypatch):
+    """Advance the budget and its asyncio timers together at test checkpoints."""
+    from ai_desktop_agent.agent import budget
+
+    loop = asyncio.get_running_loop()
+    loop_time = loop.time
+    offset = 0.0
+
+    def now():
+        return loop_time() + offset
+
+    def advance(seconds):
+        nonlocal offset
+        offset += seconds
+
+    monkeypatch.setattr(loop, "time", now)
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=now))
+    return advance
+
+
 @pytest.fixture(autouse=True)
 def isolated_task_admission(monkeypatch):
     monkeypatch.setattr(task_admission, "_task_admission", task_admission.TaskAdmission())
