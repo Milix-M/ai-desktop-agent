@@ -42,10 +42,14 @@ def main() -> int:
     parser.add_argument("--llm-output-price", type=float, default=10.0)
     args = parser.parse_args()
 
-    records = load_task_records(args.tasks_dir)
-    manual = load_manual_labels(args.labels)
-    verify_cases = build_verify_cases(records, manual)
-    recover_cases = build_recover_cases(records, manual)
+    try:
+        records = load_task_records(args.tasks_dir)
+        manual = load_manual_labels(args.labels)
+        verify_cases = build_verify_cases(records, manual)
+        recover_cases = build_recover_cases(records, manual)
+    except (ValueError, OSError) as error:
+        print(f"評価データを読み出せません: {error}", file=sys.stderr)
+        return 2
     try:
         if args.provider == "mock":
             provider = MockDecisionProvider()
@@ -56,7 +60,19 @@ def main() -> int:
     except ValueError as e:
         print(f"提供元の初期化に失敗: {e}", file=sys.stderr)
         return 2
-    metrics = asyncio.run(evaluate(provider, verify_cases, recover_cases))
+    try:
+        metrics = asyncio.run(
+            evaluate(
+                provider,
+                verify_cases,
+                recover_cases,
+                llm_input_price=args.llm_input_price,
+                llm_output_price=args.llm_output_price,
+            )
+        )
+    except ValueError as error:
+        print(f"評価の設定が不正です: {error}", file=sys.stderr)
+        return 2
 
     verdict = threshold_recommendation(metrics)
     print(f"records={len(records)} verify={len(verify_cases)} recover={len(recover_cases)}")
@@ -85,11 +101,13 @@ def main() -> int:
                 {
                     "records": len(records),
                     "verify_total": metrics.verify_total,
+                    "verify_weak": metrics.verify_weak,
                     "verify_correct": metrics.verify_correct,
                     "verify_escalations": metrics.verify_escalations,
                     "verify_high_conf_errors": metrics.verify_high_conf_errors,
                     "verify_accuracy": metrics.verify_accuracy,
                     "recover_total": metrics.recover_total,
+                    "recover_weak": metrics.recover_weak,
                     "recover_correct": metrics.recover_correct,
                     "recover_escalations": metrics.recover_escalations,
                     "recover_accuracy": metrics.recover_accuracy,

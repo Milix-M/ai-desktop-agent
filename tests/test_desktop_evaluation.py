@@ -56,7 +56,9 @@ def completed_spreadsheet(*, formula="of:=SUM([.B2:.B3])", amount="2000", change
 
 
 @pytest.mark.parametrize(
-    "data", [b"bad zip", initial_spreadsheet(), completed_spreadsheet(amount="abc")]
+    "data",
+    [b"bad zip", initial_spreadsheet(), completed_spreadsheet(amount="abc")],
+    ids=["invalid-zip", "unfinished-spreadsheet", "invalid-total-value"],
 )
 def test_invalid_or_unfinished_spreadsheets_never_pass(data):
     assert not check_case(CASES[2], {CASES[2].filename: data})[0]
@@ -68,6 +70,22 @@ def test_spreadsheet_requires_the_formula_result_and_unchanged_source_cells():
     assert not check_case(case, {case.filename: completed_spreadsheet(formula="")})[0]
     assert not check_case(case, {case.filename: completed_spreadsheet(amount="1999")})[0]
     assert not check_case(case, {case.filename: completed_spreadsheet(change_seed=True)})[0]
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+@pytest.mark.parametrize("declaration", [None, "internal", "external"])
+def test_spreadsheet_rejects_dtds_in_every_supported_encoding(encoding, declaration):
+    with zipfile.ZipFile(io.BytesIO(completed_spreadsheet())) as archive:
+        xml = archive.read("content.xml").decode()
+    if declaration == "internal":
+        xml = xml.replace('office:value="2000"', 'office:value="&total;"')
+        xml = '<!DOCTYPE office:document-content [<!ENTITY total "2000">]>' + xml
+    elif declaration == "external":
+        xml = '<!DOCTYPE office:document-content SYSTEM "file:///not-read.dtd">' + xml
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("content.xml", xml.encode(encoding))
+    assert check_case(CASES[2], {CASES[2].filename: output.getvalue()})[0] is (declaration is None)
 
 
 def test_rename_requires_old_name_absent_and_other_file_unchanged():
@@ -112,6 +130,70 @@ def test_oversized_artifacts_are_rejected_before_unbounded_reads():
     container.get_archive.return_value = (iter([b"x" * (MAX_ARTIFACT_BYTES + 65537)]), {})
     with pytest.raises(ValueError, match="上限"):
         read_artifact(container, "/guest/file")
+
+
+def test_the_regular_file_limit_also_applies_inside_a_bounded_tar_stream():
+    data = archive_file(b"x" * (MAX_ARTIFACT_BYTES + 1))
+    assert len(data) < MAX_ARTIFACT_BYTES + 65536
+    container = Mock(get_archive=Mock(return_value=(iter([data]), {})))
+    with pytest.raises(ValueError, match="上限"):
+        read_artifact(container, "/guest/file")
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "oversized-xml",
+        "unrelated-xml",
+        "zero-rows",
+        "zero-columns",
+        "missing-total-column",
+        "missing-header",
+        "missing-seed-value",
+        "unexpected-tag",
+    ],
+)
+def test_spreadsheet_structure_and_size_are_checked_before_accepting_values(fault):
+    with zipfile.ZipFile(io.BytesIO(completed_spreadsheet())) as archive:
+        xml = archive.read("content.xml").decode()
+    if fault == "oversized-xml":
+        xml = "x" * (MAX_ARTIFACT_BYTES + 1)
+    elif fault == "unrelated-xml":
+        xml = "<root/>"
+    elif fault == "zero-rows":
+        xml = xml.replace(
+            "<table:table-row>", '<table:table-row table:number-rows-repeated="0">', 1
+        )
+    elif fault == "zero-columns":
+        xml = xml.replace(
+            "<table:table-cell ", '<table:table-cell table:number-columns-repeated="0" ', 1
+        )
+    elif fault == "missing-total-column":
+        start = xml.index("<table:table-cell table:formula=")
+        end = xml.index("</table:table-cell>", start) + len("</table:table-cell>")
+        xml = xml[:start] + xml[end:]
+    elif fault == "missing-header":
+        start = xml.index("<table:table-row>")
+        end = xml.index("</table:table-row>", start)
+        xml = xml[:start] + "<table:table-row>" + xml[end:]
+    elif fault == "missing-seed-value":
+        start = xml.index('<table:table-cell office:value-type="float" office:value="1200">')
+        end = xml.index("</table:table-cell>", start) + len("</table:table-cell>")
+        xml = xml[:start] + xml[end:]
+    else:
+        xml = xml.replace(
+            "<table:table-row>", "<table:table-row><text:p>ignored metadata</text:p>", 1
+        )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("content.xml", xml)
+    assert check_case(CASES[2], {CASES[2].filename: output.getvalue()})[0] is (
+        fault == "unexpected-tag"
+    )
+
+
+def test_a_missing_output_is_a_task_failure_with_a_useful_reason():
+    assert check_case(CASES[0], {}) == (False, "保存先にファイルがありません")
 
 
 def test_infrastructure_errors_are_visible_in_the_denominator():
@@ -163,7 +245,9 @@ def environment(monkeypatch):
     client.networks.list.return_value = [network]
     monkeypatch.setattr(desktop, "VNCClient", FakeDisplayBackend)
     monkeypatch.setattr(desktop, "wait_desktop", lambda _: None)
-    monkeypatch.setattr(desktop, "prepare_case", lambda *args: None)
+    monkeypatch.setattr(
+        desktop, "prepare_case", lambda *args: {case.filename: case.initial.encode()}
+    )
     return client, container
 
 

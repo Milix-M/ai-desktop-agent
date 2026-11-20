@@ -23,6 +23,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import docker
+from docker.errors import NotFound
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits
@@ -80,6 +81,22 @@ async def cleanup_all(steps, result):
             return cancelled
         except asyncio.CancelledError:
             cancelled = True
+
+
+def remove_resources(resources, *, force=False):
+    failures = []
+    for resource in resources:
+        try:
+            resource.remove(**({"force": True} if force else {}))
+        except NotFound:
+            continue
+        except Exception as error:
+            failures.append((resource.id, error))
+    if failures:
+        message = "; ".join(f"{identity}: {error}" for identity, error in failures)
+        raise RuntimeError(message) from ExceptionGroup(
+            "evaluation resource cleanup failed", [error for _, error in failures]
+        )
 
 
 class RecordingDisplay:
@@ -191,7 +208,8 @@ def prepare_case(container, case, directory):
             info = tarfile.TarInfo(name)
             info.size, info.uid, info.gid, info.mode = len(data), uid, gid, 0o600
             output.addfile(info, io.BytesIO(data))
-    container.put_archive(directory, archive.getvalue())
+    if not container.put_archive(directory, archive.getvalue()):
+        raise RuntimeError("評価環境の初期ファイルを配置できませんでした")
     path = directory + "/" + case.filename
     if case.id in ("text-edit", "text-append"):
         command = ["mousepad", "--disable-server", path]
@@ -208,7 +226,7 @@ def prepare_case(container, case, directory):
         match = next((line.split()[0] for line in windows.splitlines() if needle in line), None)
         if match:
             exec_guest(container, ["xdotool", "windowactivate", "--sync", match])
-            return
+            return files
         time.sleep(0.1)
     raise RuntimeError("作業アプリのウィンドウが開きませんでした")
 
@@ -217,10 +235,10 @@ def wait_desktop(container):
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         container.reload()
-        if container.status == "exited":
+        if container.status in {"exited", "dead", "removing"}:
             raise RuntimeError("評価デスクトップが起動しませんでした")
         state = container.attrs.get("State", {})
-        if state.get("Health", {}).get("Status") == "healthy":
+        if container.status == "running" and state.get("Health", {}).get("Status") == "healthy":
             return
         time.sleep(0.2)
     raise RuntimeError("評価デスクトップの起動待ちが上限に達しました")
@@ -253,6 +271,7 @@ def summarize(results):
         "infrastructure_errors": sum(
             r["status"] not in {"evaluated", "interrupted", "running"}
             or bool(r.get("cleanup_errors"))
+            or bool(r.get("errors"))
             for r in results
         ),
         "model_requests": sum(item.get("requests", 0) for item in usage),
@@ -299,8 +318,10 @@ async def run_attempt(client, image, case, provider, limits, output, result):
         await run_display_call(display.connect, "127.0.0.1", port)
         directory = "/home/agent/Documents/evaluation-" + result["attempt_id"]
         result["instruction"] = case.instruction.format(directory=directory)
-        await run_display_call(prepare_case, container, case, directory)
+        expected = await run_display_call(prepare_case, container, case, directory)
         baseline = await run_display_call(collect_files, container, case, directory)
+        if baseline != {name: expected.get(name) for name in filenames(case)}:
+            raise RuntimeError("初期状態のファイルが準備結果と一致しません")
         if check_case(case, baseline)[0]:
             raise RuntimeError("操作前から完成しているため、評価を開始できません")
         await run_display_call(recorded.capture_raw)
@@ -385,8 +406,7 @@ async def run_attempt(client, image, case, provider, limits, output, result):
                     filters={"label": "ai-desktop-agent.evaluation=" + result["attempt_id"]},
                 )
             )
-            for item in owned:
-                item.remove(force=True)
+            remove_resources(owned, force=True)
 
         def remove_networks():
             owned = (
@@ -396,8 +416,7 @@ async def run_attempt(client, image, case, provider, limits, output, result):
                     filters={"label": "ai-desktop-agent.evaluation=" + result["attempt_id"]}
                 )
             )
-            for item in owned:
-                item.remove()
+            remove_resources(owned)
 
         steps.extend(
             [
@@ -533,7 +552,14 @@ async def run_suite(args):
     try:
         report["source"] = source_metadata()
         save()
-        client = await run_display_call(docker.from_env, timeout=15)
+
+        def connect_docker():
+            nonlocal client
+            # A cancelled await drains the worker but discards its return value.
+            # Retain ownership before returning so the client is still closed.
+            client = docker.from_env(timeout=15)
+
+        await run_display_call(connect_docker)
         image = await run_display_call(client.images.get, args.image)
         report["desktop_image"] = image.id
         for repetition in range(1, args.repeats + 1):
