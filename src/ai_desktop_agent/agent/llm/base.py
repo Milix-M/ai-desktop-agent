@@ -18,6 +18,10 @@ from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 
+class ModelResponseError(ValueError):
+    """The provider exhausted its retries without a usable model response."""
+
+
 class LLMProvider(ABC):
     """LLMプロバイダの抽象基底クラス。
 

@@ -1,8 +1,10 @@
 """OpenAICompatProvider と LLMProviderFactory のテスト。"""
 
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.llm.factory import create_llm_provider
@@ -12,6 +14,12 @@ from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 # ── OpenAICompatProvider ─────────────────────────────
+
+
+def valid_screenshot():
+    data = BytesIO()
+    Image.new("RGB", (1024, 768), "white").save(data, format="PNG")
+    return Screenshot(data.getvalue(), 1024, 768)
 
 
 class TestOpenAICompatProvider:
@@ -24,7 +32,7 @@ class TestOpenAICompatProvider:
 
     @staticmethod
     def _fake_screenshot() -> Screenshot:
-        return Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+        return valid_screenshot()
 
     def _make_mock_response(self, json_data: dict) -> MagicMock:
         """JSONデータを含むモックAPIレスポンスを作成。"""
@@ -379,8 +387,6 @@ class TestOpenAICompatProvider:
         """decide_next_action にスクリーンショットを渡せる。"""
         from unittest.mock import AsyncMock
 
-        from ai_desktop_agent.vm.screenshot import Screenshot
-
         provider._client.chat.completions.create = AsyncMock(
             return_value=self._make_mock_response(
                 {
@@ -394,7 +400,7 @@ class TestOpenAICompatProvider:
         )
         goal = Goal(description="ファイルを開く", intent="file_management")
         subtask = Subtask(id="s1", description="ファイルマネージャーを起動")
-        screenshot = Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+        screenshot = valid_screenshot()
 
         result = await provider.decide_next_action(goal, subtask, [], screenshot=screenshot)
         assert result.action.action_type == ActionType.LEFT_CLICK
@@ -411,7 +417,7 @@ class TestOpenAICompatProvider:
         )
         data = await provider._call(
             "prompt",
-            image_bytes=b"fake_png_data",
+            image_bytes=valid_screenshot().image_bytes,
         )
         assert data["action_type"] == "wait"
 
@@ -456,8 +462,8 @@ class TestOpenAICompatProvider:
         with pytest.raises(Exception, match="Unauthorized"):
             await provider._call("prompt", {"name": "s", "schema": {"type": "object"}})
         assert provider._structured_output is True
-        assert provider._client.chat.completions.create.call_count == 3
-        assert [call.args for call in provider_retry_sleep.await_args_list] == [(1.5,), (3.0,)]
+        assert provider._client.chat.completions.create.call_count == 1
+        provider_retry_sleep.assert_not_awaited()
 
     def test_parse_json_with_surrounding_text(self, provider):
         """説明文混じりの応答からJSONを抽出できる。"""
@@ -479,9 +485,12 @@ class TestOpenAICompatProvider:
         with pytest.raises(_json.JSONDecodeError):
             provider._parse_json("[1, 2, 3]")
 
-    def test_parse_json_object_in_array_is_rescued(self, provider):
-        """配列に包まれたオブジェクトは波括弧抽出で救済される。"""
-        assert provider._parse_json('[{"action_type": "wait"}]') == {"action_type": "wait"}
+    def test_parse_json_object_in_array_requires_a_new_model_response(self, provider):
+        """配列の文脈を捨てて操作オブジェクトだけを受理しない。"""
+        import json as _json
+
+        with pytest.raises(_json.JSONDecodeError):
+            provider._parse_json('[{"action_type": "wait"}]')
 
     # ── screenshot 除外（無駄ループ防止） ───────────────
 
@@ -561,8 +570,32 @@ class TestLLMProviderFactory:
         ):
             create_llm_provider()
 
-    def test_explicit_mock(self):
-        assert isinstance(create_llm_provider(provider="mock"), MockLLMProvider)
+    async def test_explicit_mock(self, tmp_path):
+        from ai_desktop_agent.server.session import TaskSession
+        from ai_desktop_agent.server.store import TaskStore
+        from ai_desktop_agent.vm.fake import FakeDisplayBackend
+
+        with (
+            patch.dict("os.environ", {"LLM_PROVIDER": "openai"}, clear=True),
+            patch("openai.AsyncOpenAI", side_effect=AssertionError("must remain offline")) as sdk,
+        ):
+            provider = create_llm_provider(provider="mock", model="offline-review")
+            assert provider.provider_name == "mock" and provider.model_name == "offline-review"
+            store = TaskStore(tmp_path)
+            session = TaskSession(
+                llm=provider,
+                display=FakeDisplayBackend(screen_width=96, screen_height=64),
+                store=store,
+                decision=None,
+            )
+            try:
+                assert await session.run("保存済み文書を確認する")
+                saved = TaskStore(tmp_path).load(session.id)
+                assert saved.state == "completed" and saved.success is True
+                assert provider.decide_call_count > 0 and not session.display.is_connected
+                sdk.assert_not_called()
+            finally:
+                await session.aclose()
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="未対応"):
@@ -731,7 +764,6 @@ class TestSanitizeParams:
             OpenAICompatProvider,
         )
         from ai_desktop_agent.agent.state import Goal, Subtask
-        from ai_desktop_agent.vm.screenshot import Screenshot
 
         with patch("openai.AsyncOpenAI", autospec=True):
             provider = OpenAICompatProvider(api_key="k")
@@ -750,7 +782,7 @@ class TestSanitizeParams:
         provider._client.chat.completions.create = AsyncMock(
             return_value=MagicMock(choices=[choice])
         )
-        ss = Screenshot(image_bytes=b"\x89PNGfake", width=1024, height=768)
+        ss = valid_screenshot()
         result = await provider.decide_next_action(
             Goal(description="t"), Subtask(id="s", description="d"), [], ss
         )
@@ -785,7 +817,6 @@ class TestTokenUsage:
         assert provider.total_prompt_tokens == 200
         assert provider.total_completion_tokens == 40
         assert provider.total_tokens == 240
-        assert provider.call_count == 2
 
     def test_record_usage_missing_is_safe(self):
         from unittest.mock import MagicMock

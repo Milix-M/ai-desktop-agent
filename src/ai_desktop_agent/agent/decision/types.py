@@ -81,10 +81,12 @@ class EvalMetrics:
     """評価結果の集計。"""
 
     verify_total: int = 0
+    verify_weak: int = 0
     verify_correct: int = 0
     verify_escalations: int = 0
     verify_high_conf_errors: int = 0  # 確信度>=高閾値での誤り（閾値運用の可否材料）
     recover_total: int = 0
+    recover_weak: int = 0
     recover_correct: int = 0
     recover_escalations: int = 0
     # コスト試算（USD）

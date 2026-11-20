@@ -21,13 +21,17 @@ import json
 import logging
 import math
 import os
+import re
+import time
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from openai import APIResponseValidationError, AsyncOpenAI
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import TaskLimitError, model_request
-from ai_desktop_agent.agent.llm.base import LLMProvider
+from ai_desktop_agent.agent.llm.base import LLMProvider, ModelResponseError
 from ai_desktop_agent.agent.llm.types import (
     ActionDecision,
     DecompositionResult,
@@ -46,6 +50,7 @@ from ai_desktop_agent.privacy import (
     redact,
     redact_data,
 )
+from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,7 @@ logger = logging.getLogger(__name__)
 #: 操作対象プラットフォーム。linux（既定）/ android。
 PLATFORM_LINUX = "linux"
 PLATFORM_ANDROID = "android"
+MAX_RETRY_WAIT_SECONDS = 60
 
 
 def _planning_prompt(platform: str) -> str:
@@ -704,6 +710,10 @@ class OpenAICompatProvider(LLMProvider):
     @staticmethod
     def _decomposition(data: dict, subtask_count: int) -> DecompositionResult:
         raw_subtasks = data.get("subtasks", [])
+        if not isinstance(raw_subtasks, list) or any(
+            not isinstance(subtask, dict) for subtask in raw_subtasks
+        ):
+            raise ValueError("subtasksはオブジェクトの配列で指定してください")
         subtasks = [
             Subtask(
                 id=st.get("id", f"step_{subtask_count + idx + 1}"),
@@ -807,7 +817,7 @@ ID: {current_subtask.id}
         else:
             action = self._parse_action(action_data)
         working_note = data.get("working_note")
-        params = self._clamp_params(action.action_type, action.params, screenshot)
+        params = self._clamp_params(action, screenshot)
         return ActionDecision(
             action=Action(action_type=action.action_type, params=params),
             repeats=repeats,
@@ -936,25 +946,23 @@ ID: {subtask.id}
         prompt = redact(prompt)
         system_prompt = redact(system_prompt or _SYSTEM_PROMPT)
         # メッセージ構築（座標精度のため detail: high で原解像度を維持）
-        if image_bytes:
-            b64 = base64.b64encode(self._to_jpeg(image_bytes)).decode("ascii")
-            user_content: Any = [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{b64}",
-                        "detail": "high",
-                    },
+        image_content = None
+        if image_bytes is not None:
+            encoded_image = await run_display_call(self._to_jpeg, image_bytes)
+            b64 = base64.b64encode(encoded_image).decode("ascii")
+            image_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64}",
+                    "detail": "high",
                 },
-            ]
-        else:
-            user_content = prompt
+            }
+        user_prompt = prompt
 
         use_schema = bool(json_schema) and self._structured_output
         if json_schema and not use_schema:
             # 既に非対応と判明している場合は最初からJSON指示付きで呼ぶ
-            user_content = self._with_json_instruction(user_content, json_schema)
+            user_prompt = self._with_json_instruction(prompt, json_schema)
 
         max_retries = 3
         empty_count = 0
@@ -964,7 +972,15 @@ ID: {subtask.id}
                     "model": self._model,
                     "messages": [
                         {"role": "system", "content": system_prompt or _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": user_prompt},
+                                image_content,
+                            ]
+                            if image_content is not None
+                            else user_prompt,
+                        },
                     ],
                 }
                 if self._completion_limit_only:
@@ -980,6 +996,7 @@ ID: {subtask.id}
                     kwargs["extra_headers"] = {"x-opencode-session": self.session_id}
 
                 async with model_request() as budget:
+                    self.call_count += 1
                     try:
                         response = await self._client.chat.completions.create(**kwargs)
                     except (json.JSONDecodeError, APIResponseValidationError):
@@ -1007,12 +1024,12 @@ ID: {subtask.id}
                 )
                 if attempt == max_retries - 1:
                     if empty_count >= max_retries:
-                        raise ValueError(
+                        raise ModelResponseError(
                             "応答が空です（空応答が連続）。モデルが画像付き"
                             "structured outputに対応していない可能性があります。"
                             "LLM_MODEL の変更を検討してください"
                         ) from e
-                    raise
+                    raise ModelResponseError(str(e)) from e
                 # 一時不調の可能性があるため待ってから再試行する
                 await asyncio.sleep(1.5 * (attempt + 1))
             except Exception as e:
@@ -1022,21 +1039,29 @@ ID: {subtask.id}
                         e,
                     )
                     self._structured_output = False
+                    if attempt == max_retries - 1 or self._retry_directive(e) == "false":
+                        raise
+                    delay = self._retry_delay(e, 0)
+                    if delay is None:
+                        raise
                     use_schema = False
-                    if json_schema is not None:
-                        user_content = self._with_json_instruction(user_content, json_schema)
+                    user_prompt = self._with_json_instruction(prompt, json_schema)
+                    if delay:
+                        await asyncio.sleep(delay)
                     continue
                 logger.exception("API 呼び出しエラー (attempt %d/%d)", attempt + 1, max_retries)
-                if attempt == max_retries - 1:
+                if not self._is_retryable_error(e) or attempt == max_retries - 1:
                     raise
-                await asyncio.sleep(1.5 * (attempt + 1))
-        return {}
+                delay = self._retry_delay(e, 1.5 * (attempt + 1))
+                if delay is None:
+                    raise
+                await asyncio.sleep(delay)
 
     @staticmethod
     def _to_jpeg(image_bytes: bytes, quality: int = 80) -> bytes:
         """PNG画像を同一解像度のJPEGに変換する（座標系不変・軽量化）。
 
-        変換に失敗したら元のバイト列をそのまま返す。
+        変換に失敗したら、不正な形式の画像を送信する前に拒否する。
         """
         try:
             import io
@@ -1047,21 +1072,76 @@ ID: {subtask.id}
                 buf = io.BytesIO()
                 img.convert("RGB").save(buf, format="JPEG", quality=quality)
                 return buf.getvalue()
-        except Exception:
-            logger.debug("JPEG変換に失敗、PNGのまま送信")
-            return image_bytes
+        except Exception as error:
+            raise ValueError("画面画像をJPEGに変換できません") from error
 
     @staticmethod
     def _is_unsupported_error(e: Exception) -> bool:
         """response_format 非対応を示すエラーかどうかを判定する。
 
         401（認証）や429（レート制限）はフォールバック対象外とし、
-        response_format 付きリクエストでの400/404/422系のみ対象とする。
+        400/404/422で対象パラメータの非対応を確認できた場合だけ切り替える。
         """
-        msg = str(e).lower()
-        if getattr(e, "status_code", None) in (400, 404, 422):
+        if getattr(e, "status_code", None) not in (400, 404, 422):
+            return False
+        param = getattr(e, "param", None)
+        schema_params = ("response_format", "response_format.type", "response_format.json_schema")
+        if param is not None and param not in schema_params:
+            return False
+        code = getattr(e, "code", None)
+        if code == "invalid_json_schema":
+            return False
+        if param in schema_params and code in (
+            "unsupported_parameter",
+            "unsupported_value",
+            "not_supported",
+        ):
             return True
-        return "response_format" in msg or "json_schema" in msg
+        body = getattr(e, "body", None)
+        message = body.get("message") if isinstance(body, dict) else str(e)
+        if not isinstance(message, str):
+            return False
+        feature = r"(?:\bresponse_format\b|\bjson_schema\b)"
+        before = r"(?:does not support|doesn't support|unsupported|unrecognized|unknown)"
+        between = r"(?:\s+(?:the|parameter|field|format|type|value))*[\s'\"`:.=-]*"
+        after = (
+            r"[\s'\"`:.()=-]*(?:(?:is|are)\s+)?"
+            r"(?:not (?:supported|available|implemented)|unsupported)"
+        )
+        return re.search(f"{before}{between}{feature}|{feature}{after}", message, re.I) is not None
+
+    @staticmethod
+    def _retry_directive(error: Exception) -> str | None:
+        headers = getattr(getattr(error, "response", None), "headers", {})
+        return headers.get("x-should-retry")
+
+    @classmethod
+    def _is_retryable_error(cls, error: Exception) -> bool:
+        directive = cls._retry_directive(error)
+        if directive in ("true", "false"):
+            return directive == "true"
+        status = getattr(error, "status_code", None)
+        return status is None or status in (408, 409, 429) or status >= 500
+
+    @staticmethod
+    def _retry_delay(error: Exception, default: float) -> float | None:
+        """Return the requested wait, or stop rather than retry before a long cooldown."""
+        headers = getattr(getattr(error, "response", None), "headers", {})
+        for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1)):
+            try:
+                delay = float(headers.get(name)) * scale
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(delay) and delay >= 0:
+                return delay if delay <= MAX_RETRY_WAIT_SECONDS else None
+        try:
+            date = parsedate_to_datetime(headers.get("retry-after"))
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=UTC)
+            delay = max(0, date.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return delay if delay <= MAX_RETRY_WAIT_SECONDS else None
 
     def _record_usage(self, response: Any) -> None:
         """API応答のトークン使用量を累積する（可観測性用）。"""
@@ -1069,11 +1149,15 @@ ID: {subtask.id}
             usage = getattr(response, "usage", None)
             if usage is None:
                 return
-            prompt = getattr(usage, "prompt_tokens", 0) or 0
-            completion = getattr(usage, "completion_tokens", 0) or 0
-            self.total_prompt_tokens += int(prompt)
-            self.total_completion_tokens += int(completion)
-            self.call_count += 1
+            prompt = getattr(usage, "prompt_tokens", None)
+            completion = getattr(usage, "completion_tokens", None)
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (prompt, completion)
+            ):
+                return
+            self.total_prompt_tokens += prompt
+            self.total_completion_tokens += completion
         except Exception:
             logger.debug("使用量記録に失敗", exc_info=True)
 
@@ -1083,23 +1167,14 @@ ID: {subtask.id}
         return self.total_prompt_tokens + self.total_completion_tokens
 
     @staticmethod
-    def _with_json_instruction(user_content: Any, json_schema: dict[str, Any]) -> Any:
+    def _with_json_instruction(prompt: str, json_schema: dict[str, Any]) -> str:
         """response_format の代わりにプロンプトへJSON指示を追記する。"""
         instruction = (
             "\n\n必ずJSONオブジェクトのみで返答してください"
             "（前後の説明文やコードフェンスは禁止）。"
             "以下のJSONスキーマに従うこと:\n" + json.dumps(json_schema, ensure_ascii=False)
         )
-        if isinstance(user_content, str):
-            return user_content + instruction
-        if isinstance(user_content, list):
-            updated = list(user_content)
-            for i, part in enumerate(updated):
-                if isinstance(part, dict) and part.get("type") == "text":
-                    updated[i] = {**part, "text": part.get("text", "") + instruction}
-                    break
-            return updated
-        return user_content
+        return prompt + instruction
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
@@ -1107,11 +1182,11 @@ ID: {subtask.id}
 
         通常JSONモードでは説明文が混ざることがあるため、
         全体→コードフェンス→先頭{〜末尾}の順で試す。
-        トップレベルが配列等の非オブジェクトは再試行可能な
-        JSONDecodeError として扱う（呼び出し側のリトライ対象）。
+        配列や文字列の内側からオブジェクトを取り出さない。
+        重複キーと不正な数値も再試行可能なJSONDecodeErrorで拒否する。
         """
         stripped = text.strip()
-        first_error: json.JSONDecodeError | None = None
+        parse_error = json.JSONDecodeError("JSONオブジェクトを抽出できません", stripped, 0)
 
         candidates = [stripped]
         if "```json" in stripped:
@@ -1122,9 +1197,11 @@ ID: {subtask.id}
             start = stripped.index("```") + 3
             end = stripped.find("```", start)
             candidates.append(stripped[start : end if end != -1 else None].strip())
-        start = stripped.find("{")
+        # A quoted or array-wrapped response is data, not prose surrounding an object.
+        openings = [stripped.find(marker) for marker in ("{", "[", '"')]
+        start = min((index for index in openings if index != -1), default=-1)
         end = stripped.rfind("}")
-        if start != -1 and end > start:
+        if start != -1 and stripped[start] == "{" and end > start:
             candidates.append(stripped[start : end + 1])
 
         def finite_float(value: str) -> float:
@@ -1136,23 +1213,32 @@ ID: {subtask.id}
         def reject_constant(value: str):
             raise ValueError("モデル応答にJSONで表現できない数値があります")
 
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("モデル応答に同じJSONキーが複数あります")
+                result[key] = value
+            return result
+
         for candidate in candidates:
             try:
                 result = json.loads(
-                    candidate, parse_float=finite_float, parse_constant=reject_constant
+                    candidate,
+                    parse_float=finite_float,
+                    parse_constant=reject_constant,
+                    object_pairs_hook=unique_object,
                 )
-            except ValueError as e:
-                if first_error is None:
-                    first_error = json.JSONDecodeError(str(e), candidate, 0)
+            except json.JSONDecodeError as error:
+                parse_error = error
                 continue
+            except ValueError as error:
+                # Never rescue a semantically invalid response by dropping its context.
+                raise json.JSONDecodeError(str(error), candidate, 0) from error
             if not isinstance(result, dict):
-                if first_error is None:
-                    first_error = json.JSONDecodeError(
-                        "JSONオブジェクトではありません", candidate, 0
-                    )
-                continue
+                raise json.JSONDecodeError("JSONオブジェクトではありません", candidate, 0)
             return result  # type: ignore[no-any-return]
-        raise first_error or ValueError(f"JSONを抽出できません: {text[:100]}")
+        raise parse_error
 
     @staticmethod
     def _sanitize_params(action_type: ActionType, params: dict[str, Any]) -> dict[str, Any]:
@@ -1182,23 +1268,15 @@ ID: {subtask.id}
         return {k: v for k, v in params.items() if k in allowed}
 
     @staticmethod
-    def _clamp_params(
-        action_type: ActionType, params: dict[str, Any], screenshot: Screenshot
-    ) -> dict[str, Any]:
-        """LLMが返した座標を画面内にクランプする。
+    def _clamp_params(action: Action, screenshot: Screenshot) -> dict[str, Any]:
+        """検証済みのアクションの座標を画面内にクランプする。
 
         範囲外座標は実行時にずれる原因になるため、ここで丸める。
-        region_select の幅・高さは最低16pxを保証する。
+        region_select の幅・高さは、画像の大きさを上限に最低16pxへ広げる。
         """
-        if not isinstance(params, dict):
-            return {}
-        clamped = dict(params)
+        clamped = dict(action.params or {})
+        action_type = action.action_type
         w, h = screenshot.width, screenshot.height
-
-        def _clamp_int(v: Any, lo: int, hi: int) -> int:
-            if type(v) is not int:
-                raise ValueError("座標は整数で指定してください")
-            return max(lo, min(v, hi))
 
         if action_type in (
             ActionType.MOUSE_MOVE,
@@ -1207,26 +1285,18 @@ ID: {subtask.id}
             ActionType.MIDDLE_CLICK,
             ActionType.DOUBLE_CLICK,
         ):
-            if "x" in clamped:
-                clamped["x"] = _clamp_int(clamped["x"], 0, max(0, w - 1))
-            if "y" in clamped:
-                clamped["y"] = _clamp_int(clamped["y"], 0, max(0, h - 1))
+            clamped["x"] = max(0, min(clamped["x"], w - 1))
+            clamped["y"] = max(0, min(clamped["y"], h - 1))
         elif action_type == ActionType.DRAG:
             for k in ("start_x", "end_x"):
-                if k in clamped:
-                    clamped[k] = _clamp_int(clamped[k], 0, max(0, w - 1))
+                clamped[k] = max(0, min(clamped[k], w - 1))
             for k in ("start_y", "end_y"):
-                if k in clamped:
-                    clamped[k] = _clamp_int(clamped[k], 0, max(0, h - 1))
+                clamped[k] = max(0, min(clamped[k], h - 1))
         elif action_type == ActionType.REGION_SELECT:
-            if "x" in clamped:
-                clamped["x"] = _clamp_int(clamped["x"], 0, max(0, w - 1))
-            if "y" in clamped:
-                clamped["y"] = _clamp_int(clamped["y"], 0, max(0, h - 1))
-            if "width" in clamped:
-                clamped["width"] = max(16, min(int(clamped["width"]), w))
-            if "height" in clamped:
-                clamped["height"] = max(16, min(int(clamped["height"]), h))
+            clamped["x"] = max(0, min(clamped["x"], w - 1))
+            clamped["y"] = max(0, min(clamped["y"], h - 1))
+            clamped["width"] = min(w, max(16, clamped["width"]))
+            clamped["height"] = min(h, max(16, clamped["height"]))
         return clamped
 
     @staticmethod
