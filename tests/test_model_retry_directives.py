@@ -175,13 +175,16 @@ async def test_schema_fallback_also_obeys_waits_and_no_retry_directives(
 
 
 @pytest.mark.parametrize("stop", ["deadline", "operator"])
-async def test_waiting_for_upstream_never_blocks_stop_or_task_deadline(tmp_path, monkeypatch, stop):
+async def test_waiting_for_upstream_never_blocks_stop_or_task_deadline(
+    tmp_path, monkeypatch, stop, advance_task_clock
+):
     entered = asyncio.Event()
     requests = []
 
     async def sleep(delay):
+        assert delay == 30
         entered.set()
-        await asyncio.sleep(delay)
+        await asyncio.Event().wait()
 
     monkeypatch.setattr(module, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": sleep})))
 
@@ -194,17 +197,18 @@ async def test_waiting_for_upstream_never_blocks_stop_or_task_deadline(tmp_path,
     provider = await llm_with_transport(handle)
     display = FakeDisplayBackend(32, 32)
     store = TaskStore(tmp_path)
-    limits = ExecutionLimits(max_seconds=0.15 if stop == "deadline" else 5)
+    limits = ExecutionLimits(max_seconds=30)
     session = TaskSession(llm=provider, display=display, store=store, limits=limits, decision=None)
     task = asyncio.create_task(session.run("報告を保存する"))
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 10)
         if stop == "operator":
             session.stop()
             with pytest.raises(asyncio.CancelledError):
-                await task
+                await asyncio.wait_for(asyncio.shield(task), 10)
         else:
-            assert await task is False
+            advance_task_clock(limits.max_seconds)
+            assert await asyncio.wait_for(asyncio.shield(task), 10) is False
         assert len(requests) == provider.call_count == 1
         record = TaskStore(tmp_path).load(session.id)
         assert record.state == "failed" and record.actions == []
