@@ -1,13 +1,12 @@
 # Clef決定モデルの検討
 
-- 出典はchot-incの解説記事とする。元出典はCloudflare BlogとDocsとHugging Faceとする。数値は提供元申告であり第三者再現なしとする
-- 状態は実装済みとする。既定は無効であり、DECISION_PROVIDERで切り替える。組込計画の基準はdocs/architecture.mdの意思決定層の節とする。提供元はWorkers AI直結（clef）とOpenRouter Decisions API経由（clef-openrouter）の2系統とし、後者のみLLM本体と別のAPIキーを使える
+Clefとの連携は実装済みで、既定では無効となる。`DECISION_PROVIDER` でWorkers AIの `clef` とOpenRouter Decisions APIの `clef-openrouter` を選ぶ。OpenRouter経由ではLLM本体と別のAPIキーを使える。[意思決定層の設計](../architecture.md#意思決定層)を参照する。
 
-応答の型と確率分布を検査し、不正な場合は実行制限の範囲でLLMに退避する。`decision_calls`には失敗・中断した試行も含む。
+応答の型と確率分布を検査し、不正なら実行上限の範囲でLLMに切り替える。`decision_calls` には失敗・中断した試行も含む。
 
 ## Clefの概要
 
-Cloudflareが公開した決定モデルである。Workers AI配置のcf/cloudflare/clefとclef-flash、重み公開を含む。位置づけは判断はClef、文章生成と実行はLLMとする。生成モデルの置換ではない。自由文を生成せず、入力stateと型付きquestionsに対し許可選択肢ごとの確率付き構造化データを返す。出力形式の揺らぎ対策は不要である。ベースモデルを凍結し、プレフィルの1回だけで選択肢を並列採点するため高速である。分類追加で再学習は不要とし、TypeSafe AIのJevと同じSystem One APIとの互換性がある。Brier損失で校正調整済みであり、確率の閾値設計を前提にする。例として0.9以上自動実行、0.6から0.9保留、未満上申とする。
+ClefはCloudflareが公開した決定モデルで、`state` と型付きの `questions` を受け取り、選択肢ごとの確率を構造化データで返す。TypeSafe AIのJevと同じSystem One APIに対応し、確率のしきい値を使って判断する。このアプリでは達成確認と回復戦略の選択に使い、計画・座標・操作内容の生成はLLMが担う。
 
 ## APIの型
 
@@ -19,17 +18,17 @@ Cloudflareが公開した決定モデルである。Workers AI配置のcf/cloudf
 
 ## 公称値
 
-提供元申告とする。
+Cloudflareの資料に基づく検討時の公称値で、第三者による再現結果は含まない。
 
 | 項目 | Clef | Clef-flash |
 |---|---|---|
-| 引数規模 | 27B | 9B |
+| パラメータ数 | 27B | 9B |
 | 文脈長 | 65,536 | 65,536 |
 | 単価の入力100万トークン | $0.24 | $0.09 |
 | 遅延中央値 | 209.3ms | 38.8ms |
 | 遅延p95 | 238.6ms | 122.4ms |
 
-どちらも画像入力に対応し、1要求最大4枚とする。評価ではJev Decision Index由来の10件中7件でClef系が最高と主張している。一方、課題により優劣は入れ替わる。例としてWhen2CallはJev勝ち、CLINC150とOOSはflash大敗とする。まずflashで評価するのが推奨されている。
+どちらも画像入力に対応する。提供元の評価ではJev Decision Indexに由来する10課題のうち7課題でClef系が最高となった。When2CallではJevが上回り、CLINC150とOOSではClef-flashが大差で負けた。提供元はClef-flashから評価することを勧めている。
 
 ## 制約
 
@@ -39,12 +38,10 @@ Cloudflareが公開した決定モデルである。Workers AI配置のcf/cloudf
 
 ## 適用可否
 
-現状はagent/llm/base.pyのLLMProviderがdecide_next_actionとverify_resultとrecover_from_errorを提供し、server/session.pyがEXECUTINGからVERIFYINGを経てRECOVERINGへ駆動する。結論として座標と動作JSON生成はLLM必須でClefは置換不可とする。一方、検証と回復の判断部分は適合度が高い。混合構成が妥当である。
-
 | 番号 | 組込点 | 置換対象 | 方式 |
 |---|---|---|---|
-| 1 | 回復戦略の選択 | _recover_phaseのLLM呼出 | choiceでRecoveryStrategyから選ぶ。flashの数十msで戦略確定する |
-| 2 | 達成検証 | _verify_subtask_phaseの画像付きLLM検証 | noulの達成可否とscoreの完全と部分と未達を使う。高確信で前進し、低確信で回復し、中間でLLM検証へ回す |
+| 1 | 回復戦略の選択 | `_recover_phase` のLLM呼び出し | `choice` で `RecoveryStrategy` を選ぶ |
+| 2 | 達成検証 | `_verify_subtask_phase` の画像付きLLM検証 | `noul` で達成の可否を、`score` で達成度を判断する。確信度が高ければ前進し、低ければ回復する。中間はLLMで再確認する |
 | 3 | 評価手順 | scripts/eval_clef.py | 保存済みタスク記録に目視ラベルを付け、Clef-flashからClefの順で精度と分布を測る |
 
 ## 導入前に評価する
