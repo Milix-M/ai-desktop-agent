@@ -118,6 +118,115 @@ def test_no_command_starts_after_cancellation(adb_script, tmp_path):
     assert not touched.exists()
 
 
+@pytest.mark.parametrize("validation", ["valid", "invalid", "raises"])
+async def test_inflight_target_validation_controls_the_command_and_reaps_it(
+    adb_script, tmp_path, monkeypatch, validation
+):
+    from ai_desktop_agent.server import adb_process
+
+    monkeypatch.setattr(adb_process, "TARGET_CHECK_INTERVAL", 0.01)
+    pid_file, release_file = tmp_path / "child.pid", tmp_path / "release"
+    adb_script(
+        "import os,time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pid_file) + '.tmp'!r}).write_text(str(os.getpid()))\n"
+        f"os.replace({str(pid_file) + '.tmp'!r},{str(pid_file)!r})\n"
+        f"while not Path({str(release_file)!r}).exists(): time.sleep(0.01)\n"
+    )
+    checks = 0
+
+    def current():
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            return True
+        if validation == "raises":
+            raise RuntimeError("target lookup failed")
+        if validation == "invalid":
+            return False
+        if checks >= 3:
+            release_file.touch()
+        return True
+
+    cancelled = threading.Event()
+    runner = AdbRunner(time.monotonic() + 5, cancelled.is_set, before_execute=current)
+    task = asyncio.create_task(asyncio.to_thread(runner.run, "guest:5555", "shell", "probe"))
+    try:
+        await wait_file(pid_file)
+        if validation == "raises":
+            with pytest.raises(RuntimeError, match="target lookup failed"):
+                await asyncio.wait_for(asyncio.shield(task), 3)
+        else:
+            assert await asyncio.wait_for(asyncio.shield(task), 3) is (validation == "valid")
+        runner.close()
+        assert not running(int(pid_file.read_text()))
+        assert runner.allowed() is (validation == "valid")
+        assert checks >= (3 if validation == "valid" else 2)
+    finally:
+        cancelled.set()
+        await asyncio.gather(task, return_exceptions=True)
+        runner.close()
+
+
+@pytest.mark.parametrize("validation", ["valid", "invalid", "raises", "timeout"])
+async def test_pending_target_validation_must_finish_before_the_next_command(
+    adb_script, tmp_path, monkeypatch, validation
+):
+    from ai_desktop_agent.server import adb_process
+
+    monkeypatch.setattr(adb_process, "TARGET_CHECK_INTERVAL", 0.01)
+    monkeypatch.setattr(adb_process, "TARGET_CHECK_TIMEOUT", 0.1)
+    commands, entered = tmp_path / "commands.jsonl", tmp_path / "checking"
+    adb_script(
+        "import json,sys,time\n"
+        "from pathlib import Path\n"
+        f"with open({str(commands)!r},'a') as log: log.write(json.dumps(sys.argv[1:])+'\\n')\n"
+        f"while not Path({str(entered)!r}).exists(): time.sleep(0.01)\n"
+    )
+    release = threading.Event()
+    checks = 0
+
+    def current():
+        nonlocal checks
+        checks += 1
+        if checks != 2:
+            return True
+        entered.touch()
+        assert release.wait(10), "test did not release the read-only target check"
+        if validation == "raises":
+            raise RuntimeError("pending target lookup failed")
+        return validation == "valid"
+
+    runner = AdbRunner(time.monotonic() + 5, lambda: False, before_execute=current)
+    try:
+        assert await asyncio.to_thread(runner.run, "guest:5555", "shell", "first") is True
+        if validation != "timeout":
+            release.set()
+        if validation == "raises":
+            with pytest.raises(RuntimeError, match="pending target lookup failed"):
+                await asyncio.to_thread(runner.run, "guest:5555", "shell", "second")
+        else:
+            assert await asyncio.to_thread(runner.run, "guest:5555", "shell", "second") is (
+                validation == "valid"
+            )
+        assert [json.loads(line)[-1] for line in commands.read_text().splitlines()] == (
+            ["first", "second"] if validation == "valid" else ["first"]
+        )
+    finally:
+        release.set()
+        await asyncio.to_thread(runner.close)
+    assert runner.allowed() is (validation == "valid")
+
+
+def test_a_discovered_but_unexecutable_adb_never_counts_as_success(adb_script):
+    executable = adb_script("pass\n")
+    executable.write_text("#!/missing/adb-interpreter\n")
+    runner = AdbRunner(time.monotonic() + 5, lambda: False)
+    assert runner.run("guest:5555", "shell", "true") is False
+    assert runner.query("guest:5555", "shell", "getprop") is None
+    assert runner.connect("guest:5555") is False
+
+
 async def test_task_submission_drains_initialization_before_connecting_to_the_vm(
     adb_script, tmp_path, monkeypatch
 ):

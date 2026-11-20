@@ -50,6 +50,7 @@ def _run_adb(serial: str, *args: str, timeout: float = ADB_TIMEOUT) -> bool:
             timeout=timeout,
             check=False,
             text=True,
+            errors="replace",
         )
         ok = proc.returncode == 0
         if not ok:
@@ -72,6 +73,7 @@ def _run_adb_out(serial: str, *args: str, timeout: float = ADB_TIMEOUT) -> str |
             timeout=timeout,
             check=False,
             text=True,
+            errors="replace",
         )
         if proc.returncode != 0:
             logger.debug("adb照会失敗: %s %s: %s", serial, args, proc.stderr[:200])
@@ -99,9 +101,10 @@ def _run_connect(serial: str, timeout: float = ADB_TIMEOUT) -> bool:
             timeout=timeout,
             check=False,
             text=True,
+            errors="replace",
         )
         out = f"{proc.stdout}\n{proc.stderr}".lower()
-        return "connected to" in out or "already connected" in out
+        return proc.returncode == 0 and ("connected to" in out or "already connected" in out)
     except (OSError, subprocess.SubprocessError):
         logger.debug("adb connect実行に失敗: %s", serial, exc_info=True)
         return False
@@ -293,9 +296,7 @@ def dismiss_dialogs(serial: str, runner=None) -> bool:
     """
     run = runner or _run_adb
     try:
-        # HOME→BACKの順でダイアログを閉じてホームへ
-        run(serial, "shell", "input", "keyevent", "3")
-        return True
+        return bool(run(serial, "shell", "input", "keyevent", "3"))
     except Exception:
         logger.debug("adb dialog-dismissに失敗", exc_info=True)
         return False

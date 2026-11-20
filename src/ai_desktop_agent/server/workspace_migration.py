@@ -22,16 +22,25 @@ logger = logging.getLogger(__name__)
 
 class WorkspaceUpgrade:
     def __init__(self, pool=None, root=None, backend=None):
-        self.pool = pool or VmPool()
-        self.client = self.pool._docker()
-        self.project = self.pool._project_name(self.client)
-        self.backend = backend or self.client.containers.get(socket.gethostname())
-        if self.pool._labels(self.backend).get("com.docker.compose.project") != self.project:
-            raise DockerUnavailableError("更新処理の所属プロジェクトを確認できません")
-        self.root = Path(root or os.environ.get("DATA_DIR", "/app/data"))
-        self.volumes = WorkspaceVolumes(self.client, self.project, self.backend.attrs["Image"])
-        self.backups = HomeBackups(self.root, self.project)
-        self.stopped = []
+        self._owns_pool = pool is None
+        self.pool = VmPool() if pool is None else pool
+        try:
+            self.client = self.pool._docker()
+            self.project = self.pool._project_name(self.client)
+            self.backend = backend or self.client.containers.get(socket.gethostname())
+            if self.pool._labels(self.backend).get("com.docker.compose.project") != self.project:
+                raise DockerUnavailableError("更新処理の所属プロジェクトを確認できません")
+            self.root = Path(root or os.environ.get("DATA_DIR", "/app/data"))
+            self.volumes = WorkspaceVolumes(self.client, self.project, self.backend.attrs["Image"])
+            self.backups = HomeBackups(self.root, self.project)
+            self.stopped = []
+        except BaseException:
+            self._close_pool()
+            raise
+
+    def _close_pool(self):
+        if self._owns_pool:
+            self.pool.close()
 
     def _stop(self, container):
         container.reload()
@@ -59,14 +68,17 @@ class WorkspaceUpgrade:
     @contextlib.contextmanager
     def transaction(self):
         # The CLI holds this lock until the calling shell finishes `compose up`.
-        with metadata_lock(self.root / f"workspace-update-{self.project}.lock"):
-            self.stopped = []
-            try:
-                self.volumes.reap_helpers()
-                yield self
-            except BaseException:
-                self._rollback()
-                raise
+        try:
+            with metadata_lock(self.root / f"workspace-update-{self.project}.lock"):
+                self.stopped = []
+                try:
+                    self.volumes.reap_helpers()
+                    yield self
+                except BaseException:
+                    self._rollback()
+                    raise
+        finally:
+            self._close_pool()
 
     def prepare(self, profile):
         service = "desktop" if profile == "container" else "vm"
@@ -153,16 +165,29 @@ class WorkspaceUpgrade:
                 network = self.client.networks.get(name)
             except NotFound:
                 network = self.client.networks.create(name, labels=old_labels, **config)
+            failures = []
             for container, endpoint in endpoints:
-                container.reload()
-                if name not in (container.attrs.get("NetworkSettings") or {}).get("Networks", {}):
-                    ipam = endpoint.get("IPAMConfig") or {}
-                    network.connect(
-                        container,
-                        aliases=endpoint.get("Aliases"),
-                        ipv4_address=ipam.get("IPv4Address"),
-                        ipv6_address=ipam.get("IPv6Address"),
-                    )
+                try:
+                    container.reload()
+                    if name not in (container.attrs.get("NetworkSettings") or {}).get(
+                        "Networks", {}
+                    ):
+                        ipam = endpoint.get("IPAMConfig") or {}
+                        network.connect(
+                            container,
+                            aliases=endpoint.get("Aliases"),
+                            ipv4_address=ipam.get("IPv4Address"),
+                            ipv6_address=ipam.get("IPv6Address"),
+                        )
+                except Exception as error:
+                    # Restore the other members even if one endpoint cannot be inspected
+                    # or reconnected. Keep every failure available to the operator.
+                    error.add_note(f"container={container.id} network={name}")
+                    failures.append(error)
+            if failures:
+                raise DockerUnavailableError(
+                    "更新後のネットワークへの再接続に失敗したコンテナがあります"
+                ) from ExceptionGroup("workspace network reconnection failed", failures)
 
     def backup(self, vm_id):
         info = self.pool.get_vm(vm_id)
@@ -173,14 +198,41 @@ class WorkspaceUpgrade:
             raise ValueError("バックアップ対象を1つに絞れません")
         source = targets[0]
         source.reload()
+        if source.status not in {"running", "paused", "exited", "created"}:
+            raise DockerUnavailableError(
+                "環境の状態が安定していません。起動・停止の完了後にバックアップしてください"
+            )
         running = source.status == "running"
-        if running:
-            source.pause()
+        failure = None
+        name = None
         try:
-            return self.backups.capture(source, vm_id)
+            if running:
+                # The daemon may pause the guest even if its response is lost.
+                source.pause()
+            name = self.backups.capture(source, vm_id)
+            return name
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             if running:
-                source.unpause()
+                try:
+                    try:
+                        source.unpause()
+                    except Exception:
+                        # A lost response or a rejected pause can mean it is already running.
+                        source.reload()
+                        if source.status != "running":
+                            raise
+                except BaseException as error:
+                    error.add_note(f"バックアップ後の環境再開に失敗: {vm_id} ({source.id})")
+                    if name is not None:
+                        error.add_note(f"保存済みバックアップ: {name}")
+                    if failure is not None:
+                        raise BaseExceptionGroup(
+                            "バックアップと環境の再開に失敗しました", [failure, error]
+                        ) from None
+                    raise
 
     def restore(self, name):
         _, metadata, _ = self.backups.verified(name)
