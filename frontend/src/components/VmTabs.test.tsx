@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import VmTabs from "@/components/VmTabs";
 import type { VmInfo } from "@/lib/types";
@@ -9,7 +9,62 @@ const VMS: VmInfo[] = [
   { id: "vm-ab12", name: "work", status: "running", health: "starting", vnc_port: 5910, ws_port: 6090, vnc_host: "x", managed: true },
 ];
 
+it("retains the draft when a scripted Enter arrives while creation becomes unavailable", async () => {
+  const onCreate = vi.fn();
+  const props = { vms: [], selectedId: null, onSelect: vi.fn(), onCreate, onDelete: vi.fn() };
+  const view = render(<VmTabs {...props} creating={false} />);
+  await userEvent.click(screen.getByRole("button", { name: "+ コンテナ追加" }));
+  const input = screen.getByRole("textbox", { name: "コンテナ名" });
+  fireEvent.change(input, { target: { value: "  調査用  " } });
+  view.rerender(<VmTabs {...props} creating={true} />);
+  expect(input).toBeDisabled();
+  // Native dispatchEvent is allowed for non-click events on a disabled input.
+  // Keep the real disabled DOM and React handler; do not call a saved handler.
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onCreate).not.toHaveBeenCalled();
+  expect(input).toHaveValue("  調査用  ");
+  view.rerender(<VmTabs {...props} creating={false} />);
+  await userEvent.click(screen.getByRole("button", { name: "作成する" }));
+  expect(onCreate).toHaveBeenCalledExactlyOnceWith("container", "調査用");
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+});
+
 describe("VmTabs", () => {
+  it.each([
+    { key: "Enter", isComposing: true },
+    { key: "Enter", keyCode: 229 },
+    { key: "Escape", isComposing: true },
+    { key: "Enter", repeat: true },
+  ])("keeps the name form during composition or a held key: %j", async (event) => {
+    const onCreate = vi.fn();
+    render(<VmTabs vms={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate}
+      onDelete={vi.fn()} creating={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "+ コンテナ追加" }));
+    const input = screen.getByRole("textbox", { name: "コンテナ名" });
+    fireEvent.change(input, { target: { value: "調査用" } });
+    fireEvent.keyDown(input, event);
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(input).toHaveValue("調査用");
+    expect(input).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith("container", "調査用");
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("cancels the name form with Escape and discards its draft", async () => {
+    const onCreate = vi.fn();
+    render(<VmTabs vms={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate}
+      onDelete={vi.fn()} creating={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "+ VM追加" }));
+    await userEvent.type(screen.getByRole("textbox"), "調査用{Escape}");
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "+ VM追加" }));
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "作成をやめる" }));
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   it("shows readiness and offers stop during an automatic restart", async () => {
     const onStop = vi.fn();
     render(<VmTabs vms={[{ ...VMS[1], status: "restarting" }]} selectedId="vm-ab12"

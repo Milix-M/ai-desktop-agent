@@ -7,6 +7,7 @@ import type { PendingSubmission } from "@/lib/types";
 
 interface Props {
   onSubmit: (instruction: string, allowVmRestart: boolean, requestId: string) => Promise<void>;
+  onSubmitStart?: (instruction: string) => void;
   disabled: boolean;
   initialValue?: string;
   onDraftChange?: (value: string) => void;
@@ -14,7 +15,7 @@ interface Props {
   submission?: { current: PendingSubmission | null };
 }
 
-export default function InstructionInput({ onSubmit, disabled, initialValue = "", onDraftChange, vmId = null, submission }: Props) {
+export default function InstructionInput({ onSubmit, onSubmitStart, disabled, initialValue = "", onDraftChange, vmId = null, submission }: Props) {
   const localSubmission = useRef<PendingSubmission | null>(null);
   const attemptRef = submission ?? localSubmission;
   const [value, setValue] = useState(initialValue);
@@ -43,7 +44,9 @@ export default function InstructionInput({ onSubmit, disabled, initialValue = ""
     pendingRef.current = true;
     setSubmitting(true);
     try {
+      onSubmitStart?.(trimmed);
       const requestId = await taskSubmissionRetry(attempt, Boolean(retryAsNew));
+      if (!mounted.current) return;
       if (attemptRef.current === attempt) {
         attempt = { ...attempt, requestId };
         attemptRef.current = attempt;

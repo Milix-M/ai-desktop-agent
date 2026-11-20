@@ -164,6 +164,7 @@ export default function VmTabs({ vms, selectedId, onSelect, onCreate, onDelete, 
             value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229 || e.repeat) return;
               if (e.key === "Enter") submitCreate();
               if (e.key === "Escape") {
                 setFormKind(null);

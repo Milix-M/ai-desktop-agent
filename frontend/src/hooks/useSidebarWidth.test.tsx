@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import {
   useSidebarWidth,
@@ -22,6 +22,7 @@ function Harness() {
 }
 
 describe("useSidebarWidth", () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(() => {
     window.localStorage.clear();
   });
@@ -57,5 +58,20 @@ describe("useSidebarWidth", () => {
     window.localStorage.setItem("sidebar-width", "500");
     render(<Harness />);
     expect(screen.getByTestId("w")).toHaveTextContent("500");
+  });
+
+  it("remains usable when browser storage is blocked", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new DOMException("blocked", "SecurityError"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new DOMException("quota", "QuotaExceededError"); });
+    render(<Harness />);
+    expect(screen.getByTestId("w")).toHaveTextContent("380");
+    const handle = screen.getByTestId("handle");
+    fireEvent.pointerMove(handle, { clientX: 1000, pointerId: 1 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(screen.getByTestId("w")).toHaveTextContent("380");
+    fireEvent.pointerDown(handle, { clientX: 1000, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 900, pointerId: 1 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(screen.getByTestId("w")).toHaveTextContent("480");
   });
 });
