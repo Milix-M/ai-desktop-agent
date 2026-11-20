@@ -45,6 +45,7 @@ def is_kvm_available(client: Any | None = None) -> bool:
     if os.path.exists(KVM_DEVICE):
         return True
     # コンテナ内からは見えないため、同じプロジェクトの実際のデバイス割当を見る。
+    owned = False
     try:
         from ai_desktop_agent.server.vm_pool import BASE_VM_SERVICE, VmPool
 
@@ -55,6 +56,7 @@ def is_kvm_available(client: Any | None = None) -> bool:
                 return False
             try:
                 client = docker.from_env()
+                owned = True
                 client.ping()
             except Exception:
                 return False
@@ -69,6 +71,12 @@ def is_kvm_available(client: Any | None = None) -> bool:
     except Exception:
         logger.debug("KVM利用可否の判定に失敗", exc_info=True)
         return False
+    finally:
+        if owned:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("KVM確認用のDocker接続を閉じられませんでした", exc_info=True)
 
 
 class KvmUnavailableError(ValueError):

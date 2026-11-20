@@ -44,14 +44,16 @@ def vnc_runtime():
 def desktop(vnc_runtime):
     client = docker.from_env(timeout=10)
     image = os.environ.get("DESKTOP_SMOKE_IMAGE", "ai-desktop-agent-desktop-smoke")
-    container = client.containers.run(
-        image,
-        detach=True,
-        ports={"5900/tcp": ("127.0.0.1", None)},
-        shm_size="1g",
-        labels={"ai-desktop-agent.smoke": uuid.uuid4().hex},
-    )
+    owner = uuid.uuid4().hex
+    container = None
     try:
+        container = client.containers.run(
+            image,
+            detach=True,
+            ports={"5900/tcp": ("127.0.0.1", None)},
+            shm_size="1g",
+            labels={"ai-desktop-agent.smoke": owner},
+        )
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             container.reload()
@@ -64,8 +66,20 @@ def desktop(vnc_runtime):
             time.sleep(0.5)
         pytest.fail("VNC did not become healthy: " + container.logs().decode())
     finally:
-        container.remove(force=True)
-        client.close()
+        try:
+            # Docker may accept creation before its HTTP response is lost.
+            owned = (
+                [container]
+                if container is not None
+                else client.containers.list(
+                    all=True, filters={"label": "ai-desktop-agent.smoke=" + owner}
+                )
+            )
+            for item in owned:
+                with contextlib.suppress(docker.errors.NotFound):
+                    item.remove(force=True)
+        finally:
+            client.close()
 
 
 def test_firefox_can_render_a_page_without_snap(desktop):

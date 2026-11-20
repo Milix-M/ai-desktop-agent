@@ -73,6 +73,7 @@ from ai_desktop_agent.server.vm_locks import AsyncKeyedLocks
 from ai_desktop_agent.server.vm_pool import VmPool
 from ai_desktop_agent.server.webhook import TaskWebhook, open_task_webhook
 from ai_desktop_agent.server.websocket_io import close_websocket
+from ai_desktop_agent.server.workspaces import IDENTIFIER_PATTERN
 from ai_desktop_agent.vm.async_io import (
     VmCreationBusyError,
     run_display_call,
@@ -111,7 +112,7 @@ def _default_create_session(display: DisplayBackend | None = None) -> TaskSessio
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Own the shared data before recovery, and retain ownership through shutdown."""
-    global _vm_creations
+    global _vm_creations, _pool
 
     ExecutionLimits.from_env()
     DesktopResources.from_env()
@@ -122,11 +123,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with _owned_lifespan(creations):
             yield
     finally:
+
+        async def close_services():
+            try:
+                await creations.close()
+            finally:
+                await run_vm_call(creations.pool.close)
+
         try:
-            await _drain_task(asyncio.create_task(creations.close()))
+            await _drain_task(asyncio.create_task(close_services()))
         finally:
             if _vm_creations is creations:
                 _vm_creations = None
+            if _pool is creations.pool:
+                _pool = None
 
 
 @asynccontextmanager
@@ -408,6 +418,9 @@ class VmInfoModel(BaseModel):
     managed: bool = True
     kind: str = "qemu"
     adb_port: int = 0
+
+
+VmId = Annotated[str, StringConstraints(pattern=rf"^{IDENTIFIER_PATTERN}$")]
 
 
 class CreateVmRequest(BaseModel):
@@ -833,7 +846,7 @@ async def get_vm_creation(job_id: str) -> JSONResponse:
 
 @app.delete("/vms/{vm_id}")
 @_serialize_vm_operation
-async def delete_vm(vm_id: str) -> dict[str, str]:
+async def delete_vm(vm_id: VmId) -> dict[str, str]:
     """VM/コンテナを削除する（上のタスクは停止する）。
 
     動的環境＋固定 vm/desktop/android が対象。
@@ -849,7 +862,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=503, detail="Dockerの応答を確認してください") from e
     if not ok:
         raise HTTPException(status_code=404, detail="vm not found")
     return {"status": "deleted"}
@@ -857,7 +870,7 @@ async def delete_vm(vm_id: str) -> dict[str, str]:
 
 @app.post("/vms/{vm_id}/stop", response_model=VmInfoModel)
 @_serialize_vm_operation
-async def stop_vm(vm_id: str) -> VmInfoModel:
+async def stop_vm(vm_id: VmId) -> VmInfoModel:
     """VM/コンテナを停止する（固定・動的とも可）。上のタスクは停止する。"""
     from fastapi import HTTPException
 
@@ -874,7 +887,7 @@ async def stop_vm(vm_id: str) -> VmInfoModel:
 
 @app.post("/vms/{vm_id}/start", response_model=VmInfoModel)
 @_serialize_vm_operation
-async def start_vm(vm_id: str) -> VmInfoModel:
+async def start_vm(vm_id: VmId) -> VmInfoModel:
     """VM/コンテナを起動する（固定・動的とも可）。
 
     KVM非対応環境での QEMU系（VM・Android）起動は409。
@@ -1092,10 +1105,11 @@ async def vm_status() -> VmStatus:
     """VMコンテナの状態を返す。Docker未利用時は 503。"""
     from fastapi import HTTPException
 
-    try:
-        info = await run_vm_call(_get_vm_controller().status)
-    except DockerUnavailableError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+    async with _controller_connection() as controller:
+        try:
+            info = await run_vm_call(controller.status)
+        except DockerUnavailableError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
     return VmStatus(
         running=info.running,
         status=info.status,
@@ -1117,16 +1131,16 @@ async def vm_restart() -> VmStatus:
 
     from ai_desktop_agent.server.kvm import KvmUnavailableError
 
-    controller = _get_vm_controller()
-    try:
-        vm_id = await run_vm_call(controller.target_vm_id)
-        async with _vm_operation(vm_id):
-            await _stop_sessions_for_vm(vm_id)
-            info = await run_vm_call(controller.restart, expected_vm_id=vm_id)
-    except DockerUnavailableError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    except KvmUnavailableError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    async with _controller_connection() as controller:
+        try:
+            vm_id = await run_vm_call(controller.target_vm_id)
+            async with _vm_operation(vm_id):
+                await _stop_sessions_for_vm(vm_id)
+                info = await run_vm_call(controller.restart, expected_vm_id=vm_id)
+        except DockerUnavailableError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except KvmUnavailableError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
     return VmStatus(
         running=info.running,
         status=info.status,
@@ -1137,6 +1151,17 @@ async def vm_restart() -> VmStatus:
 
 
 # ── WebSocket ─────────────────────────────────────────
+
+
+@asynccontextmanager
+async def _controller_connection():
+    controller = _get_vm_controller()
+    try:
+        yield controller
+    finally:
+        close = getattr(controller, "close", None)
+        if callable(close):
+            await run_vm_call(close)
 
 
 @app.websocket("/ws")

@@ -26,6 +26,7 @@ HOME = "/home/agent"
 LABEL_HOME = "ai-desktop-agent.workspace"
 LABEL_SEED = "ai-desktop-agent.seed-source"
 LABEL_HELPER = "ai-desktop-agent.workspace-helper"
+IDENTIFIER_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
 
 
 def workspace_operation(function):
@@ -44,7 +45,7 @@ def workspace_operation(function):
 
 
 def identifier(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value):
+    if not re.fullmatch(IDENTIFIER_PATTERN, value):
         raise ValueError("保存先の識別子が不正です")
     return value
 
