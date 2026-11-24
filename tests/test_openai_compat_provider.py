@@ -90,6 +90,53 @@ class TestOpenAICompatProvider:
             with pytest.raises(ValueError):
                 await provider.decide_next_action(*args)
 
+    @pytest.mark.parametrize(
+        ("key", "keys"),
+        [
+            ("ctrl+s", ["ctrl", "s"]),
+            ("Control + Shift + S", ["ctrl", "shift", "s"]),
+            ("Cmd+Esc", ["super", "escape"]),
+            ("Win+F12", ["super", "f12"]),
+            ("Alt+Return", ["alt", "enter"]),
+        ],
+    )
+    async def test_shortcut_in_model_key_press(self, provider, key, keys):
+        provider._call = AsyncMock(
+            return_value={"action_type": "key_press", "params": {"key": key}}
+        )
+        decision = await provider.decide_next_action(
+            Goal("保存"), Subtask("save", "保存"), [], self._fake_screenshot()
+        )
+        assert decision.action == Action(ActionType.KEY_COMBO, {"keys": keys})
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "ctrl+",
+            "ctrl++s",
+            "ctrl+a+b",
+            "a+s",
+            "ctrl+alt",
+            "ctrl+control+s",
+            "ctrl+unknown",
+            "ctrl+alt-delete",
+            "ctrl+\ns",
+            "Ｓhift+s",
+        ],
+    )
+    def test_ambiguous_shortcuts_are_rejected(self, provider, key):
+        with pytest.raises(ValueError):
+            provider._parse_action({"action_type": "key_press", "params": {"key": key}})
+
+    def test_literal_plus_and_manual_input_are_preserved(self, provider):
+        for action_type, params in (
+            (ActionType.KEY_PRESS, {"key": "+"}),
+            (ActionType.REQUEST_USER_INPUT, {"reason": "Ctrl+S"}),
+            (ActionType.TYPE, {"text": "Ctrl+S"}),
+        ):
+            parsed = provider._parse_action({"action_type": action_type.value, "params": params})
+            assert parsed == Action(action_type, params)
+
     async def test_gpt6_sends_supported_completion_limit(self):
         provider = OpenAICompatProvider(model="gpt-6.2-sol", api_key="test-key")
         try:
@@ -307,7 +354,10 @@ class TestOpenAICompatProvider:
             return_value=self._make_mock_response(
                 {
                     "strategy": "wait_and_retry",
-                    "actions": [{"action_type": "wait", "params": {"seconds": 1.0}}],
+                    "actions": [
+                        {"action_type": "wait", "params": {"seconds": 1.0}},
+                        {"action_type": "key_press", "params": {"key": "ctrl+s"}},
+                    ],
                     "reasoning": "再試行",
                     "recoverable": True,
                 }
@@ -321,6 +371,7 @@ class TestOpenAICompatProvider:
         result = await provider.recover_from_error(error, [], Subtask(id="s1", description="d"))
         assert result.strategy == "wait_and_retry"
         assert result.recoverable is True
+        assert result.actions[-1] == Action(ActionType.KEY_COMBO, {"keys": ["ctrl", "s"]})
 
     @pytest.mark.asyncio
     async def test_recover_from_error_give_up(self, provider):

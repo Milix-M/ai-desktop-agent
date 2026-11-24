@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image
 from vncdotool.client import KEYMAP
 
+from ai_desktop_agent.actions.keys import KEY_NAMES as _KEY_MAP
 from ai_desktop_agent.vm.base import DisplayBackend, held_input, validate_click_position
 from ai_desktop_agent.vm.screenshot import Screenshot
 
@@ -29,50 +30,6 @@ _BUTTON_RIGHT = 3
 # スクロールボタン
 _BUTTON_SCROLL_UP = 4
 _BUTTON_SCROLL_DOWN = 5
-
-# キー名マッピング: Actionキー名 → vncdotoolキー名
-_KEY_MAP: dict[str, str] = {
-    "enter": "enter",
-    "return": "enter",
-    "escape": "escape",
-    "esc": "escape",
-    "tab": "tab",
-    "space": "space",
-    "backspace": "backspace",
-    "delete": "delete",
-    "home": "home",
-    "end": "end",
-    "page_up": "page_up",
-    "page_down": "page_down",
-    "up": "up",
-    "down": "down",
-    "left": "left",
-    "right": "right",
-    "f1": "f1",
-    "f2": "f2",
-    "f3": "f3",
-    "f4": "f4",
-    "f5": "f5",
-    "f6": "f6",
-    "f7": "f7",
-    "f8": "f8",
-    "f9": "f9",
-    "f10": "f10",
-    "f11": "f11",
-    "f12": "f12",
-    "ctrl": "ctrl",
-    "control": "ctrl",
-    "alt": "alt",
-    "shift": "shift",
-    "super": "super",
-    "win": "super",
-    "cmd": "super",
-    "insert": "insert",
-    "print_screen": "print_screen",
-    # Android-x86 のウェイク用。公式docでは ESC / Menu / 矢印のみが
-    # スリープ復帰キーとして定義されている（Shift は復帰しない）。
-    "menu": "menu",
-}
 
 
 def _ensure_vncdotool_keymap() -> None:

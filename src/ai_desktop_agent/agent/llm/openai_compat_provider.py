@@ -29,6 +29,7 @@ from typing import Any
 
 from openai import APIResponseValidationError, AsyncOpenAI
 
+from ai_desktop_agent.actions.keys import parse_shortcut
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import TaskLimitError, model_request
 from ai_desktop_agent.agent.llm.base import LLMProvider, ModelResponseError
@@ -923,7 +924,12 @@ ID: {subtask.id}
         if not isinstance(data, dict) or not isinstance(data.get("action_type"), str):
             raise ValueError("モデル応答に有効なaction_typeが必要です")
         action_type = ActionType(data["action_type"])
-        return Action(action_type, cls._sanitize_params(action_type, data.get("params", {})))
+        action = Action(action_type, cls._sanitize_params(action_type, data.get("params", {})))
+        if action_type == ActionType.KEY_PRESS:
+            key = action.params["key"]
+            if "+" in key and key != "+":
+                return Action(ActionType.KEY_COMBO, {"keys": parse_shortcut(key)})
+        return action
 
     # ── 内部 ──────────────────────────────────────
 
