@@ -76,6 +76,20 @@ backend・frontend・desktop・QEMU・Android起動用のコンテナは、ビ�
 
 Mozilla版FirefoxとUbuntuのSnap版の比較による誤検出は、[確認済みのCVEとバージョン](../security/trivyignore.yaml)だけを期限付きで除外する。Firefoxのバージョンを更新するときは根拠を再確認する。ゲストOS、同梱ライブラリの網羅的な検査、未知の脆弱性はこの監査の対象外とする。
 
+### 2026年11月24日のHIGH検出
+
+コミット `79d28d1` の本番5イメージで、修正版が提供されていないHIGHは重複を除いて14件だった。13件はbackendに、1件はQEMU・Androidの両方に含まれる。引き続き全件を監査する。[対象コミットのCIと監査結果](https://github.com/Milix-M/ai-desktop-agent/actions/runs/45411307581)
+
+| 対象と件数 | アプリで確認した利用箇所 |
+| --- | --- |
+| backend の util-linux（4件） | イメージには `mount` と `nsenter` がある。作業環境のマウントとネットワークの設定にはDocker APIを使う。 |
+| backend の SQLite（3件）・OpenSSL（2件） | PythonからSQLiteを使える。タスク履歴はJSON、ホームのバックアップはtarで保存する。モデルAPIとWebhookのHTTPS通信ではTLSを使い、今回のOpenSSLの検出対象であるQUICは使っていない。 |
+| backend の libacl・ncurses（各1件） | libaclとncursesが含まれる。アプリのPythonコードは両者を直接呼び出していない。依存先を含む間接的な利用は未確認。 |
+| backend の systemd・Perl（各1件） | backendには該当パッケージ由来のライブラリとPerl本体がある。arm64イメージで確認したところ、対象の `systemd-homed` 実行ファイルとPerlモジュール `Archive::Tar` は含まれていなかった。 |
+| QEMU・Android の QEMU（共通の1件） | 対象はvirtio-gpu。両方の起動スクリプトでQEMU 8.2.2をTCG起動し、ゲストCPUを開始する前にQMPの `query-pci` で確認した。どちらの表示デバイスも標準VGA（PCI ID `1234:1111`）の1台だった。[Ubuntuの対象バージョン](https://ubuntu.com/security/CVE-2026-3886)・[QEMU標準VGAの仕様](https://www.qemu.org/docs/master/specs/standard-vga.html) |
+
+イメージや起動時のデバイス構成を変更した場合は、新しい監査結果と実行環境を照合する。frontendのAlpine向け監査は、未修正の脆弱性を網羅しない。[TrivyのAlpine対応範囲](https://trivy.dev/docs/latest/coverage/os/alpine/)
+
 ## 残る課題
 
 利用者ごとの権限分離、任意の秘密情報と画面のマスキング、危険操作の承認、アクションレート制限を追加する。請求実績との照合、QEMUとAndroidの実機検証も残る。[確認事項](production-readiness.md)で追跡する。
