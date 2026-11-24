@@ -99,12 +99,13 @@ main() {
     return 1
   fi
   exec {guard_out}<&-
-  if docker compose --profile "$profile" up -d "$@" "$environment" backend frontend; then
+  if docker compose --profile "$profile" up -d --wait-timeout 300 "$@" --wait "$environment" backend frontend; then
     printf 'commit\n' >&"$guard_in"
     exec {guard_in}>&-
     wait "$guard_process"
     trap - EXIT
   else
+    echo 'Startup did not complete. Check docker compose ps -a and docker compose logs backend frontend.' >&2
     return 1
   fi
 }

@@ -10,7 +10,7 @@ RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-re
     && rm -rf /var/lib/apt/lists/*
 
 # uv で依存解決
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN pip install --no-cache-dir uv && \
     uv sync --frozen --no-dev
 

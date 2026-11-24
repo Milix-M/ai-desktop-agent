@@ -12,6 +12,7 @@ from pathlib import Path
 import docker
 import httpx
 import pytest
+import yaml
 
 from ai_desktop_agent.server.vm_pool import VmPool
 from ai_desktop_agent.server.workspace_migration import WorkspaceUpgrade
@@ -141,6 +142,9 @@ def test_real_startup_script_preserves_a_legacy_home(tmp_path):
     labels = {LABEL_PROJECT: project, "com.docker.compose.project": project}
     backend_image = os.environ.get("BACKEND_SMOKE_IMAGE", "ai-desktop-agent-backend-smoke")
     desktop_image = os.environ.get("DESKTOP_SMOKE_IMAGE", "ai-desktop-agent-desktop-smoke")
+    production = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+    )["services"]
     data = tmp_path / "data"
     data.mkdir(mode=0o700)
     key = "local-smoke-key-" + uuid.uuid4().hex
@@ -157,7 +161,8 @@ def test_real_startup_script_preserves_a_legacy_home(tmp_path):
             },
             "backend": {
                 "image": backend_image,
-                "networks": {"default": {"gw_priority": 1}},
+                "networks": production["backend"]["networks"],
+                "healthcheck": production["backend"]["healthcheck"],
                 "labels": labels,
                 "environment": {
                     "COMPOSE_PROJECT_NAME": project,
@@ -168,8 +173,8 @@ def test_real_startup_script_preserves_a_legacy_home(tmp_path):
                 "volumes": [str(data) + ":/app/data", "/var/run/docker.sock:/var/run/docker.sock"],
             },
             "frontend": {
-                "image": backend_image,
-                "entrypoint": ["sleep", "infinity"],
+                "image": os.environ.get("FRONTEND_SMOKE_IMAGE", "ai-desktop-agent-frontend-smoke"),
+                "healthcheck": production["frontend"]["healthcheck"],
                 "labels": labels,
             },
         },
@@ -287,6 +292,9 @@ def test_real_startup_script_preserves_a_legacy_home(tmp_path):
         )
         assert result.returncode == 0, result.stdout + result.stderr
         current = client.containers.get(project + "-desktop-1")
+        for service in ("desktop", "backend", "frontend"):
+            container = client.containers.get(f"{project}-{service}-1")
+            assert container.attrs["State"]["Health"]["Status"] == "healthy"
         assert current.id != source.id
         result = current.exec_run(["cat", "/home/agent/report.txt"], user="agent")
         assert result.exit_code == 0 and result.output == b"saved after failed update"

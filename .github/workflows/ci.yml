@@ -2,6 +2,7 @@ name: CI
 
 # develop・PR・週次で実行
 on:
+  workflow_dispatch:
   push:
     branches: [develop]
   pull_request:

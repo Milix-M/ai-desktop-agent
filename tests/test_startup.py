@@ -102,6 +102,8 @@ else:
     assert record["vnc"] == "desktop" and record["kvm"] == "false"
     assert record["args"][-3:] == ["desktop", "backend", "frontend"]
     assert "container" in record["args"]
+    assert "--wait" in record["args"]
+    assert int(record["args"][record["args"].index("--wait-timeout") + 1]) > 0
 
 
 def guarded_startup(tmp_path, failure=""):
