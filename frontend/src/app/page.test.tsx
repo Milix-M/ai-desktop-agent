@@ -919,7 +919,7 @@ test("deleting an already missing history record completes locally and releases 
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-test("a history deletion failure remains visible while reading that record and can be retried", async () => {
+test("a history deletion failure remains visible after a concurrent history refresh and can be retried", async () => {
   vi.mocked(deleteTask).mockRejectedValueOnce(new ApiError(503, "保存先を確認してください"))
     .mockResolvedValueOnce({ status: "deleted" });
   render(<Home />);
@@ -927,6 +927,10 @@ test("a history deletion failure remains visible while reading that record and c
   await screen.findByText(/タスク: old completed task/);
   fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("保存先を確認してください");
+  vi.mocked(getTaskHistory).mockResolvedValueOnce([]);
+  const running = await getCurrentTask();
+  await act(async () => ws.handler?.({ type: "snapshot", tasks: [running] }));
+  expect(screen.getByRole("alert")).toHaveTextContent("保存先を確認してください");
   expect(screen.getByTitle("old completed task")).toBeVisible();
   expect(screen.getByText(/タスク: old completed task/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
