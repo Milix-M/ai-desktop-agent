@@ -170,6 +170,8 @@ EOF
     # ── パッケージ ──
     log "Phase 2: Installing core + KDE..."
     chroot "$TARGET" apt-get update
+    # debootstrap installs the release pocket. Apply updates to that base as well.
+    DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get upgrade -y --with-new-pkgs --no-install-recommends
     chroot "$TARGET" apt-get install -y --no-install-recommends \
         linux-image-generic initramfs-tools systemd-sysv udev dbus-user-session libpam-systemd network-manager \
         sudo curl wget

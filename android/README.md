@@ -71,7 +71,7 @@ backend常駐のAndroidProvisionerが未設定端末をADBのshell命令で初�
 
 設定開始時は接続先・コンテナID・保存領域の識別子をまとめて確認する。ADBコマンドの実行前と実行中にも対象を確認し、本体や保存領域の変更、照会失敗を検知すると中断する。同じ本体と保存領域を確認してから完了を記録する。
 
-仕組みはentrypointがdata.img不在時に空作成し、mkfs.ext4でシード同梱なし、-driveでvirtio接続、DATA=vdaを-appendに付与する。initrdのmount_dataが処理する。設定内容はADB投入で入れる。確認記録の2026-10-17では空data起動でADB device化・eth0自動取得・Home Launcher固定・日本時間・F-Droid導入を確認した。
+固定Androidは事前に用意した `android/android-data.img` を使う。ファイルがなければComposeは起動を止める。動的に追加したAndroidは環境ごとに専用のデータディスクを作る。どちらもゲストの `/dev/vda` を `/data` にマウントし、ADBで初期設定する。確認記録の2026-10-17では空data起動でADB device化・eth0自動取得・Home Launcher固定・日本時間・F-Droid導入を確認した。
 
 ## ネットワーク
 
@@ -113,7 +113,7 @@ QEMUのuser-netでゲスト5555番をコンテナのANDROID_ADB_PORT既定5555�
 
 抑止が間に合わない場合に備え、エージェントは黒画面検出時に公式手順準拠のESCとMenu 1秒超ホールドと中央タップを送る。TaskSession._capture_screenshotがvm_idのandroidとand始まりで切替、実送信はVNCClient.wake_androidとする。実機の深いスリープ3例では復帰しなかった。設定の節が本命で、本フォールバックはキーガード段階向けの最善努力と位置づける。
 
-手動で緩和したい場合のLive起動のため再起動ごと再設定は次の通りとする。
+端末で設定を変更するには、次の手順を使う。
 
 1. SettingsからDisplay、Sleepを最長30分に
 2. SettingsからSystem、Developer options、Stay awakeをONに。開発者向け項目が無ければAbout tabletのBuild numberを7回タップ

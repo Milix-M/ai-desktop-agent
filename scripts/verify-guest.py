@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+from ai_desktop_agent.server import android_adb
+from ai_desktop_agent.server.android_provision import AndroidProvisioner
 from ai_desktop_agent.vm.qga import QgaClient
 from ai_desktop_agent.vm.qmp import QmpClient
 from ai_desktop_agent.vm.vnc_client import VNCClient
@@ -46,6 +48,15 @@ def check_android(address: str, phase: str):
     adb("connect", serial)
     assert adb("-s", serial, "shell", "getprop", "sys.boot_completed") == "1"
     assert adb("-s", serial, "shell", "getprop", "ro.build.version.sdk") == "28"
+    if phase == "write":
+        assert AndroidProvisioner().provision_vm(address), "Android initialization failed"
+    assert (
+        adb("-s", serial, "shell", "getprop", "persist.sys.timezone")
+        == android_adb.DEFAULT_TIMEZONE
+    ), "Android time zone was not retained"
+    assert adb("-s", serial, "shell", "settings", "get", "system", "screen_off_timeout") == str(
+        android_adb.SCREEN_OFF_TIMEOUT_MAX_MS
+    ), "Android screen timeout was not retained"
     adb("-s", serial, "shell", "input", "keyevent", "KEYCODE_HOME")
     activity = adb("-s", serial, "shell", "dumpsys", "activity", "activities")
     assert any(

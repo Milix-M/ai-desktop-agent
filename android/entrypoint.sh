@@ -113,9 +113,8 @@ if [ -f "$ANDROID_KERNEL" ] && [ -f "$ANDROID_INITRD" ]; then
     # 全文は ANDROID_APPEND で上書き可（起動診断用）。
     # androidboot.hardware=android_x86 を付与すると起動ロゴで停止するため付けないこと。
     log "Direct kernel boot: $ANDROID_KERNEL"
-    # data.img の実体決定。ホスト側ファイル不在でvolumeが空ディレクトリ化
-    # していた場合（マウントポイントはrmdir不可）はコンテナ内に作る。
-    # いずれもゲストからは /dev/vda（DATA=vda）として見える。
+    # 固定環境はホストのdata.imgを使う。ディレクトリを渡した場合は起動を止める。
+    # 動的環境はコンテナごとのファイルを作り、/dev/vda（DATA=vda）で渡す。
     DATA_FILE="$ANDROID_DATA_IMG"
     if [ -d "$DATA_FILE" ]; then
         log "ERROR: $DATA_FILE is a directory; prepare a persistent disk before starting Android."

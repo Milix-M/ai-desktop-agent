@@ -22,9 +22,10 @@ cleanup() {
         echo "Guest smoke files: $work" >&2
     fi
     if [[ "$kind" == android && -f "$work/docker-compose.yml" ]]; then
-        "${compose[@]}" down
+        "${compose[@]}" down --rmi local
     else
         docker rm -f "$name" >/dev/null 2>&1
+        docker image rm "$project-linux" >/dev/null 2>&1
     fi
     if (( ! status )); then sudo rm -rf --one-file-system -- "$work"; fi
     exit "$status"
@@ -45,7 +46,6 @@ if [[ "$kind" == linux ]]; then
         uv run --frozen python scripts/verify-guest.py linux "$phase" "$work" "${port##*:}"
         docker rm -f "$name"
     done
-    docker image rm "$project-linux"
 else
     mkdir "$work/android" "$work/scripts"
     cp docker-compose.yml "$work/"
