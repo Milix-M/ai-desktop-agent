@@ -692,8 +692,7 @@ class TestAndroidDockerfile:
         設定内容は backend の機械的プロビジョニングが投入する。"""
         content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
         assert "mkfs.ext4" in content
-        # volumeの空ディレクトリ化に対する救済
-        assert "data-local.img" in content
+        assert "data-local.img" not in content
 
     def test_entrypoint_nic_knob(self):
         """NICモデル切替（既定virtio-net）。"""

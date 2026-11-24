@@ -1,0 +1,47 @@
+name: Guest boot
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/guest-boot.yml'
+      - 'vm/**'
+      - 'android/**'
+      - 'docker-compose.yml'
+      - 'scripts/**'
+      - 'src/ai_desktop_agent/vm/**'
+      - 'src/ai_desktop_agent/server/android*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-boot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: Boot ${{ matrix.guest }} on KVM
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - guest: linux
+            minutes: 60
+          - guest: android
+            minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+      - name: Locate Android platform tools
+        if: matrix.guest == 'android'
+        run: |
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+      - run: uv sync --frozen
+      - run: bash scripts/check-kvm-guest.sh "${{ matrix.guest }}"

@@ -118,8 +118,8 @@ if [ -f "$ANDROID_KERNEL" ] && [ -f "$ANDROID_INITRD" ]; then
     # いずれもゲストからは /dev/vda（DATA=vda）として見える。
     DATA_FILE="$ANDROID_DATA_IMG"
     if [ -d "$DATA_FILE" ]; then
-        log "WARN: $DATA_FILE is a directory (empty volume). using container-local file."
-        DATA_FILE=/android/data-local.img
+        log "ERROR: $DATA_FILE is a directory; prepare a persistent disk before starting Android."
+        exit 1
     fi
     if [ ! -f "$DATA_FILE" ]; then
         log "Creating empty data disk ($ANDROID_DATA_SIZE_MB MB)"

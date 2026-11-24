@@ -163,11 +163,29 @@ services:
       - USE_KVM=${USE_KVM:-auto}
       - ALLOW_TCG_VM=${ALLOW_TCG_VM:-false}
     volumes:
-      - ./android/android-x86_64.iso:/android/boot.iso:ro
-      - ./android/kernel:/android/kernel:ro
-      - ./android/initrd.img:/android/initrd.img:ro
-      # 永続dataイメージ（初回は空作成。backendの機械的プロビジョニングが設定する）
-      - ./android/android-data.img:/android/data.img
+      - type: bind
+        source: ./android/android-x86_64.iso
+        target: /android/boot.iso
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/kernel
+        target: /android/kernel
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/initrd.img
+        target: /android/initrd.img
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/android-data.img
+        target: /android/data.img
+        bind:
+          create_host_path: false
       # APK持ち込み（なければUSBなし。取得は ./scripts/fetch-apks.sh）
       - ./android/apks:/android/apks:ro
     restart: unless-stopped

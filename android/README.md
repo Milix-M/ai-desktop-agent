@@ -9,16 +9,38 @@ ISO自体は約1GBのためリポジトリに含めない。android/android-x86_
 ```bash
 # 例: Android-x86 9.0-r2
 curl -L -o android/android-x86_64.iso \
-  https://archive.org/download/android-x86_64-9.0-r2/android-x86_64-9.0-r2.iso
+  https://downloads.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso
+printf '%s  %s\n' f7eb8fc56f29ad5432335dc054183acf086c539f3990f0b6e9ff58bd6df4604e android/android-x86_64.iso | sha256sum -c -
 ```
 
 ## 起動用カーネルの抽出
 
-直起動用のkernel約7MBとinitrd.img約1MBをISOから取り出すと、grub待ち約60秒を省ける。なければISO起動に切り替わる。いずれもgit管理外とする。実測のGUI到達は約2から3分である。
+固定Androidの初回起動前に、カーネルと初期RAMディスクをISOから取り出す。ISOを更新したときも再実行する。
 
 ```bash
 python3 scripts/extract-android-kernel.py
 ```
+
+## 永続データを準備する
+
+固定Androidを初めて使うときは、リポジトリのルートで次のコマンドを実行する。`android/android-data.img` に設定とファイルを保存する。既存のイメージを使う場合はこの手順を省く。
+
+```bash
+./scripts/mk-android-data.sh
+```
+
+旧版で `android/android-data.img` がディレクトリになっている場合は、**コンテナを再作成する前に**次の手順で保存内容を取り出す。先にAndroid上の作業を保存して終了する。
+
+```bash
+docker compose --profile kvm stop android
+docker compose --profile kvm cp android:/android/data-local.img ./android/recovered-data.img
+# コピーに成功し、ext4と表示されることを確認する
+file ./android/recovered-data.img
+rmdir ./android/android-data.img
+mv -T ./android/recovered-data.img ./android/android-data.img
+```
+
+コピーに失敗した場合は旧コンテナとディレクトリを保持し、保存場所を確認する。
 
 ## 起動手順
 
@@ -30,14 +52,6 @@ docker compose --profile kvm up -d android
 ```
 
 操作画面でログインし、androidのタブを選ぶ。画面配信はバックエンドの認証付き接続を使い、VNC・ADBをホストへ直接公開しない。動的払い出しはPOST /vmsにkind androidを指定する。KVM必須とする。起動直後はホーム画面が出る。セットアップウィザードはSETUPWIZARD=0で無人通過する。isolinuxのnosetupと同一とする。VNC 1024x768で画面を見られることを確認済みとする。初回設定はbackendのADB投入で入り、手動タップは要らない。永続dataありでは再起動後も保たれる。
-
-## 永続データの扱い
-
-Live起動は/dataがtmpfsのため、再起動で設定が消える。設定はタイムゾーンとランチャー既定などとする。ext4イメージを用意するとゲストの/dataとして載り、設定が残る。存在しなければ起動時に空作成する。mkfs.ext4で行い、e2fsprogs同梱済みとする。動的払い出しはコンテナ内に自動作成する。使い捨てのため共有しない。
-
-```bash
-./scripts/mk-android-data.sh [サイズMB, 既定1024]   # 手動作成で通常は不要
-```
 
 ## 初期設定
 
