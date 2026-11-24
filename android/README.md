@@ -58,10 +58,12 @@ docker compose --profile kvm up -d android
 backend常駐のAndroidProvisionerが未設定端末をADBのshell命令で初期設定する。LLM不使用とする。VNCタップ列は使わない。空data.imgから起動し、同梱シードなしで機械的操作のみで設定する。対象は再起動を超えて/dataに残るものとする。
 
 - ホーム選択はset-home-activityでLauncherに固定する(9.0実機名。Pixel名QuickstepActivityは不可)
-- タイムゾーンはAsia/Tokyoとし、ホストJSTと一致する
+- タイムゾーンの自動設定をオフにし、日本時間（`Asia/Tokyo`）を選ぶ
 - ネットワークはEthernet既定(VIRT_WIFI=0)。eth0のまま残しEthernetTrackerがDHCPで10.0.2.15を自動取得する。Wi-Fi接続は必須としない(9.0の `cmd wifi` はshell権限で使えず、wlan0自体が無い構成のため)。Ethernet疎通があればwifi失敗でも成功扱いとする
 - スリープ抑止はSleep最大値とスクリーンセーバー無効、Stay awake維持とする。OS標準設定のみを使い、画面ロックの設定は変えず、定期キー送信もしない
 - F-Droidはadb installで導入し、以降はドロワー常駐とする(初回は120秒タイムアウト)
+
+初期設定はデータディスクごとに一度実行する。旧版で初期設定を完了した端末で日本時間を固定するには、「設定」→「システム」→「日付と時刻」でタイムゾーンの自動設定をオフにし、日本（東京）を選ぶ。
 
 設定命令はserver/android_adb.pyに置く。ADBへ接続できなければ次の巡回で再試行し、実行中のタスクがある環境は設定しない。ANDROID_PROVISION=0で自動設定を無効にする。
 
