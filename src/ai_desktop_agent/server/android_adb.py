@@ -176,7 +176,9 @@ def setup_timezone(serial: str, timezone: str = DEFAULT_TIMEZONE, runner=None) -
     """タイムゾーンを設定し、成功時Trueとする。"""
     run = runner or _run_adb
     try:
-        return bool(run(serial, "shell", "setprop", "persist.sys.timezone", timezone))
+        if not run(serial, "shell", "settings", "put", "global", "auto_time_zone", "0"):
+            return False
+        return bool(run(serial, "shell", "cmd", "alarm", "set-timezone", timezone))
     except Exception:
         logger.debug("adb timezone設定に失敗", exc_info=True)
         return False

@@ -50,13 +50,6 @@ def check_android(address: str, phase: str):
     assert adb("-s", serial, "shell", "getprop", "ro.build.version.sdk") == "28"
     if phase == "write":
         assert AndroidProvisioner().provision_vm(address), "Android initialization failed"
-    assert (
-        adb("-s", serial, "shell", "getprop", "persist.sys.timezone")
-        == android_adb.DEFAULT_TIMEZONE
-    ), "Android time zone was not retained"
-    assert adb("-s", serial, "shell", "settings", "get", "system", "screen_off_timeout") == str(
-        android_adb.SCREEN_OFF_TIMEOUT_MAX_MS
-    ), "Android screen timeout was not retained"
     adb("-s", serial, "shell", "input", "keyevent", "KEYCODE_HOME")
     activity = adb("-s", serial, "shell", "dumpsys", "activity", "activities")
     assert any(
@@ -65,8 +58,24 @@ def check_android(address: str, phase: str):
     marker = "/data/local/tmp/kvm-smoke.txt"
     if phase == "write":
         adb("-s", serial, "shell", f"echo {MARKER} > {marker} && sync")
-    else:
-        assert adb("-s", serial, "shell", "cat", marker) == MARKER
+    expected = {
+        "zone": android_adb.DEFAULT_TIMEZONE,
+        "auto_zone": "0",
+        "timeout": str(android_adb.SCREEN_OFF_TIMEOUT_MAX_MS),
+        "marker": MARKER,
+    }
+    actual = {
+        "zone": adb("-s", serial, "shell", "getprop", "persist.sys.timezone"),
+        "auto_zone": adb("-s", serial, "shell", "settings", "get", "global", "auto_time_zone"),
+        "timeout": adb("-s", serial, "shell", "settings", "get", "system", "screen_off_timeout"),
+        "marker": adb("-s", serial, "shell", f"if [ -f {marker} ]; then cat {marker}; fi"),
+    }
+    if actual != expected:
+        mounts = adb("-s", serial, "shell", "cat", "/proc/mounts").splitlines()
+        data_mount = [mount for mount in mounts if mount.split()[1] == "/data"]
+        raise ValueError(
+            f"Android persistence {phase}: expected {expected}, got {actual}, /data={data_mount}"
+        )
 
 
 def check_frame(host: str, port: int):
