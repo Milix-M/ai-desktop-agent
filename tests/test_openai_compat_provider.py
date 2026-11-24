@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
-from ai_desktop_agent.agent.llm.factory import create_llm_provider
+from ai_desktop_agent.agent.llm.factory import create_llm_provider, validate_llm_configuration
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.agent.llm.openai_compat_provider import OpenAICompatProvider
 from ai_desktop_agent.agent.state import ActionRecord, Goal, Subtask
@@ -562,6 +562,37 @@ class TestOpenAICompatProvider:
 class TestLLMProviderFactory:
     """create_llm_provider のテスト。"""
 
+    @pytest.mark.parametrize(
+        "provider,setting,value",
+        [
+            ("openai", "OPENAI_API_KEY", "sk-your-key-here"),
+            ("openrouter", "OPENROUTER_API_KEY", "sk-or-v1-your-key-here"),
+            ("anthropic", "ANTHROPIC_API_KEY", "sk-ant-your-key-here"),
+            ("opencode", "OPENCODE_API_KEY", "your-key-here"),
+            ("opencode-go", "OPENCODE_GO_API_KEY", "your-key-here"),
+            ("openai", "OPENAI_API_KEY", "  "),
+            ("openai", "OPENAI_API_KEY", "key with newline\n"),
+        ],
+    )
+    def test_preflight_and_client_reject_invalid_credentials(
+        self, monkeypatch, provider, setting, value
+    ):
+        monkeypatch.setenv("LLM_PROVIDER", provider)
+        monkeypatch.setenv(setting, value)
+        for operation in (validate_llm_configuration, create_llm_provider):
+            with pytest.raises(ValueError, match=setting) as error:
+                operation()
+            assert value not in str(error.value)
+
+    @pytest.mark.parametrize("provider", ["mock", "ollama", "openai"])
+    def test_valid_configuration_requires_no_model_client(self, monkeypatch, provider):
+        monkeypatch.setenv("LLM_PROVIDER", provider)
+        monkeypatch.setenv("OPENAI_API_KEY", "example-test-key")
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+        with patch("ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI") as sdk:
+            validate_llm_configuration()
+            sdk.assert_not_called()
+
     def test_default_is_openai_requires_key(self):
         """デフォルトプロバイダはopenai。APIキー未設定時はエラー。"""
         with (
@@ -709,11 +740,34 @@ class TestLLMProviderFactory:
 
     # ── ollama ───────────────────────────────────────
 
-    def test_ollama(self):
-        with patch("openai.AsyncOpenAI", autospec=True):
+    def test_ollama(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "cloud-only-key")
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        monkeypatch.delenv("LLM_MODEL", raising=False)
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI", autospec=True
+        ) as client:
             p = create_llm_provider(provider="ollama")
         assert p.provider_name == "openai_compat"
-        assert p.model_name == "llama3.2"
+        assert p.model_name == "qwen2.5vl:3b"
+        assert client.call_args.kwargs["api_key"] == "***"
+        assert client.call_args.kwargs["base_url"] == "http://localhost:11434/v1"
+
+    def test_ollama_custom_endpoint(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
+        monkeypatch.setenv("OLLAMA_API_KEY", "local-endpoint-key")
+        with patch(
+            "ai_desktop_agent.agent.llm.openai_compat_provider.AsyncOpenAI", autospec=True
+        ) as client:
+            create_llm_provider()
+            assert client.call_args.kwargs["base_url"] == "http://ollama:11434/v1"
+            assert client.call_args.kwargs["api_key"] == "local-endpoint-key"
+            create_llm_provider(base_url="http://localhost:8000/v1")
+            assert client.call_args.kwargs["base_url"] == "http://localhost:8000/v1"
+            create_llm_provider(provider="openrouter", api_key="router-only-key")
+            assert client.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
 
     # ── LLM_PROVIDER 環境変数 ─────────────────────────
 

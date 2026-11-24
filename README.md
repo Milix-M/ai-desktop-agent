@@ -6,15 +6,17 @@
 
 ## 起動する
 
-Docker Engine（API 1.48以降）とDocker Compose 2.34.0以降、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
+Docker Engine（API 1.48以降）とDocker Compose 2.34.0以降、画像入力に対応するモデルが必要になる。クラウドのモデルを使う場合はAPIキーを用意する。ローカルの1人利用を対象とする。
 
 QEMU VMを使う場合は、x86_64ホストの `/dev/kvm` とゲストファイルが必要になる。先に `sudo ./vm/build-vm-image.sh` を実行する。このスクリプトはホストにパッケージを導入し、テンプレート `vm/desktop.qcow2` を作成する。
 
 再構築しても既存VMのディスクは上書きせず、起動時に各ディスク内のカーネルとinitrdを読み出す。保存先には一時コピー用の空き容量が必要になる。読み出しに失敗すると元ディスクを変更せず起動を止める。構築失敗時は旧ファイルへの復元を試み、マウント解除や復元に失敗すると作業領域を残して保存先を表示する。
 
 ```bash
-cp .env.example .env
-# .envにLLM_PROVIDERと対応するAPIキーを設定する
+# 初回のみ。展開したフォルダーで実行する
+(umask 077; cp -n .env.example .env)
+realpath .env
+# 表示されたファイルを開く。OpenAIを使う場合は OPENAI_API_KEY に自分のキーを設定する
 ./scripts/up.sh
 ```
 
@@ -118,7 +120,9 @@ QEMU・AndroidのUnicode入力は未対応となる。非対応の接続では�
 | `opencode-go` | `OPENCODE_GO_API_KEY` |
 | `ollama` | 不要 |
 
-Ollamaの既定接続先は `http://localhost:11434/v1` で、バックエンドコンテナ内のlocalhostを指す。ホスト上のOllamaへつなぐ設定は別途必要になる。
+Ollamaを使う場合は、Ollamaを動かす環境で `ollama pull qwen2.5vl:3b` を実行し、アプリの `.env` に `LLM_PROVIDER=ollama` を設定する。別の画像対応モデルを使う場合は、取得したモデル名を `LLM_MODEL` に指定する。
+
+`OLLAMA_BASE_URL` には、バックエンドから接続できるOllamaのURLを `/v1` まで指定する。たとえば同じCompose管理ネットワークに `ollama` というサービスがある場合は `http://ollama:11434/v1` を使う。省略時の `http://localhost:11434/v1` はバックエンド自身を指す。
 
 モデル応答の型、サブタスクIDの重複、保存できない文字を検査し、問題があれば操作や完了判定に進まず履歴に理由を残す。
 

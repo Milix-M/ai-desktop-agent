@@ -11,6 +11,9 @@ from pathlib import Path
 
 from docker.errors import NotFound
 
+from ai_desktop_agent.agent.budget import ExecutionLimits
+from ai_desktop_agent.agent.llm.factory import validate_llm_configuration
+from ai_desktop_agent.server.desktop_resources import DesktopResources, desktop_runtime_from_env
 from ai_desktop_agent.server.networks import EnvironmentNetworks
 from ai_desktop_agent.server.persistence import metadata_lock
 from ai_desktop_agent.server.vm_control import DockerUnavailableError
@@ -259,6 +262,16 @@ def main():
 
     def interrupt(*_):
         raise KeyboardInterrupt
+
+    if args.command == "prepare":
+        # Check the new backend's effective environment before stopping a working desktop.
+        try:
+            validate_llm_configuration()
+            ExecutionLimits.from_env()
+            DesktopResources.from_env()
+            desktop_runtime_from_env()
+        except ValueError as error:
+            parser.exit(2, f"設定を確認してください: {error}\n")
 
     signal.signal(signal.SIGTERM, interrupt)
     upgrade = WorkspaceUpgrade()

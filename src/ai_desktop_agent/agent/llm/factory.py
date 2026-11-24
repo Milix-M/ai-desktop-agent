@@ -34,12 +34,42 @@ _PROVIDER_CONFIGS: dict[str, tuple[str, str, str | None]] = {
         "deepseek-v4.1-flash",
         "https://opencode.ai/zen/go/v1",
     ),
-    "ollama": ("OLLAMA_API_KEY", "llama3.2", "http://localhost:11434/v1"),
+    "ollama": ("OLLAMA_API_KEY", "qwen2.5vl:3b", "http://localhost:11434/v1"),
 }
 
 # Go が求める独自 User-Agent（乱用監視用）。Zen 側にも付与して無害。
 _USER_AGENT_HEADERS: dict[str, str] = {"User-Agent": "ai-desktop-agent/0.1.0"}
 _PROVIDERS_WITH_UA: frozenset[str] = frozenset({"opencode", "opencode-go"})
+
+
+_EXAMPLE_KEYS = {
+    "sk-your-key-here",
+    "sk-or-v1-your-key-here",
+    "sk-ant-your-key-here",
+    "your-key-here",
+}
+
+
+def _provider_key(provider: str, api_key: str | None = None) -> str:
+    if provider not in _PROVIDER_CONFIGS:
+        raise ValueError(
+            f"未対応のLLMプロバイダです。対応プロバイダ: {', '.join(_PROVIDER_CONFIGS)}, mock"
+        )
+    key_env = _PROVIDER_CONFIGS[provider][0]
+    value = api_key or os.environ.get(key_env)
+    if not value and provider == "ollama":
+        # Local inference only needs a placeholder for the OpenAI SDK.
+        return "***"
+    if not value or value in _EXAMPLE_KEYS or any(c.isspace() for c in value):
+        raise ValueError(f"{key_env} に実際のAPIキーを設定してください。")
+    return value
+
+
+def validate_llm_configuration() -> None:
+    """Validate local credentials before an update, without contacting a model service."""
+    provider = os.environ.get("LLM_PROVIDER", "openai")
+    if provider != "mock":
+        _provider_key(provider)
 
 
 def create_llm_provider(
@@ -60,24 +90,15 @@ def create_llm_provider(
     if provider == "mock":
         return MockLLMProvider(model=model or "mock-model")
 
-    if provider not in _PROVIDER_CONFIGS:
-        raise ValueError(
-            f"未対応のLLMプロバイダです: {provider}。対応プロバイダ: {', '.join(_PROVIDER_CONFIGS)}"
-        )
-
+    api_key = _provider_key(provider, api_key)
     from ai_desktop_agent.agent.llm.openai_compat_provider import (
         OpenAICompatProvider,
     )
 
-    key_env, default_model, default_base_url = _PROVIDER_CONFIGS[provider]
-
-    api_key = api_key or os.environ.get(key_env)
-    if not api_key and provider != "ollama":  # Ollama はローカルなので API キー不要
-        raise ValueError(
-            f"{key_env} が設定されていません。環境変数またはコンストラクタで指定してください。"
-        )
-
+    _, default_model, default_base_url = _PROVIDER_CONFIGS[provider]
     model = model or os.environ.get("LLM_MODEL") or default_model
+    if provider == "ollama":
+        base_url = base_url or os.environ.get("OLLAMA_BASE_URL")
     base_url = base_url or default_base_url
 
     if api_key:

@@ -56,7 +56,7 @@ main() {
   done
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   if [[ ! -f .env ]]; then
-    echo 'Create .env from .env.example and configure an LLM provider before starting.' >&2
+    printf 'Create %s/.env from .env.example and configure an LLM provider before starting.\n' "$PWD" >&2
     return 1
   fi
   local compose_version engine_api
@@ -112,7 +112,7 @@ main() {
   exec {original_out}<&-
   trap "close_upgrade_guard $guard_in $guard_process" EXIT
   if ! IFS= read -r marker <&"$guard_out" || [[ "$marker" != WORKSPACE_READY ]]; then
-    echo 'Workspace backup failed. The environment has not been replaced.' >&2
+    printf 'Workspace preparation failed. Check the preceding error and %s/.env.\n' "$PWD" >&2
     return 1
   fi
   exec {guard_out}<&-

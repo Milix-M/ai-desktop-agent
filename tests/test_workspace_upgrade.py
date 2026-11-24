@@ -19,6 +19,29 @@ from tests.test_vm_pool import _FakeContainer
 from tests.test_workspace_backup import environment as environment
 
 
+@pytest.mark.parametrize(
+    "provider,key,seconds,setting",
+    [
+        ("openai", "", "120", "OPENAI_API_KEY"),
+        ("openai", "sk-your-key-here", "120", "OPENAI_API_KEY"),
+        ("mock", "", "invalid", "TASK_MAX_SECONDS"),
+    ],
+)
+def test_bad_update_settings_leave_running_services_alone(
+    monkeypatch, capsys, provider, key, seconds, setting
+):
+    workspace = Mock()
+    monkeypatch.setattr(cli, "WorkspaceUpgrade", workspace)
+    monkeypatch.setattr(sys, "argv", ["workspace", "prepare", "--profile", "container"])
+    monkeypatch.setenv("LLM_PROVIDER", provider)
+    monkeypatch.setenv("OPENAI_API_KEY", key)
+    monkeypatch.setenv("TASK_MAX_SECONDS", seconds)
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+    assert result.value.code == 2 and setting in capsys.readouterr().err
+    workspace.assert_not_called()
+
+
 def mount_home(upgrade, source):
     volume = upgrade.volumes.ensure("desktop")
     source.attrs["Mounts"] = [{"Type": "volume", "Name": volume.name, "Destination": HOME}]
@@ -33,6 +56,7 @@ def test_prepare_cli_waits_for_commit_and_restores_a_paused_desktop_on_failure(
     source.status = "paused"
     monkeypatch.setattr(cli, "WorkspaceUpgrade", lambda: upgrade)
     monkeypatch.setattr(sys, "argv", ["workspace", "prepare", "--profile", "container"])
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
     install = Mock()
     monkeypatch.setattr(signal, "signal", install)
 
