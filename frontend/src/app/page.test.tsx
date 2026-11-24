@@ -927,10 +927,11 @@ test("a history deletion failure remains visible after a concurrent history refr
   await screen.findByText(/タスク: old completed task/);
   fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("保存先を確認してください");
-  vi.mocked(getTaskHistory).mockResolvedValueOnce([]);
+  vi.mocked(getTaskHistory).mockResolvedValueOnce([detail("another record")]);
   const running = await getCurrentTask();
   await act(async () => ws.handler?.({ type: "snapshot", tasks: [running] }));
   expect(screen.getByRole("alert")).toHaveTextContent("保存先を確認してください");
+  expect(screen.getByTitle("another record")).toBeVisible();
   expect(screen.getByTitle("old completed task")).toBeVisible();
   expect(screen.getByText(/タスク: old completed task/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "old completed taskを削除" }));
