@@ -571,6 +571,8 @@ class TestLLMProviderFactory:
             ("opencode", "OPENCODE_API_KEY", "your-key-here"),
             ("opencode-go", "OPENCODE_GO_API_KEY", "your-key-here"),
             ("openai", "OPENAI_API_KEY", "  "),
+            ("openai", "OPENAI_API_KEY", "キーを入力"),
+            ("openai", "OPENAI_API_KEY", "bad\x1bkey"),
             ("openai", "OPENAI_API_KEY", "key with newline\n"),
         ],
     )

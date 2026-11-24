@@ -61,7 +61,7 @@ def _provider_key(provider: str, api_key: str | None = None) -> str:
     if not value and provider == "ollama":
         # Local inference only needs a placeholder for the OpenAI SDK.
         return "***"
-    if not value or value in _EXAMPLE_KEYS or any(c.isspace() for c in value):
+    if not value or value in _EXAMPLE_KEYS or not all("!" <= char <= "~" for char in value):
         raise ValueError(f"{key_env} に実際のAPIキーを設定してください。")
     return value
 
