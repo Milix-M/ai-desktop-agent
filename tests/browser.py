@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 from websockets.asyncio.client import connect
 
-BROWSER = shutil.which("chromium") or shutil.which("google-chrome")
+BROWSER = shutil.which("google-chrome") or shutil.which("chromium")
 
 
 class Browser:
@@ -93,6 +93,36 @@ class Browser:
             await self.command("Input.dispatchKeyEvent", type="keyUp", key=key, code=code)
 
 
+async def wait_for_debugger(profile: Path, process) -> str:
+    """Wait for a usable page target on a newly started browser's debugging port."""
+    port_file = profile / "DevToolsActivePort"
+    last_status = "waiting for DevToolsActivePort"
+    try:
+        async with asyncio.timeout(60), httpx.AsyncClient(trust_env=False, timeout=3) as client:
+            while process.poll() is None:
+                try:
+                    port = port_file.read_text().partition("\n")[0]
+                except FileNotFoundError:
+                    port = ""
+                if port.isdigit():
+                    try:
+                        response = await client.get(f"http://127.0.0.1:{port}/json")
+                        response.raise_for_status()
+                        for target in response.json():
+                            url = target.get("webSocketDebuggerUrl")
+                            if target.get("type") == "page" and url:
+                                return url
+                        last_status = "no page target yet"
+                    except (httpx.HTTPError, json.JSONDecodeError) as error:
+                        last_status = type(error).__name__
+                await asyncio.sleep(0.1)
+        reason = f"exited with status {process.returncode}"
+    except TimeoutError:
+        reason = f"startup timed out ({last_status})"
+    log = (profile.parent / "browser.log").read_text(errors="replace")[-2000:]
+    raise RuntimeError(f"{BROWSER} {reason}\n{log}")
+
+
 @asynccontextmanager
 async def browser(directory: Path):
     profile = directory / "browser-profile"
@@ -113,15 +143,8 @@ async def browser(directory: Path):
             start_new_session=True,
         )
         try:
-            async with asyncio.timeout(15):
-                while not (profile / "DevToolsActivePort").exists():
-                    assert process.poll() is None, (directory / "browser.log").read_text()
-                    await asyncio.sleep(0.1)
-            port = (profile / "DevToolsActivePort").read_text().splitlines()[0]
-            async with httpx.AsyncClient(trust_env=False) as client:
-                targets = (await client.get(f"http://127.0.0.1:{port}/json")).json()
-            page = next(target for target in targets if target["type"] == "page")
-            async with connect(page["webSocketDebuggerUrl"], proxy=None) as socket:
+            debugger_url = await wait_for_debugger(profile, process)
+            async with connect(debugger_url, proxy=None) as socket:
                 instance = Browser(socket)
                 await instance.command("Page.enable")
                 await instance.command("Network.enable")
