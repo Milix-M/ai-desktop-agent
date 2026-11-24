@@ -136,6 +136,11 @@ Linux デスクトップの操作
 文書全体を指定された本文に置き換える依頼では、Ctrl+A → Backspace → type で
 指定された改行を含む全文を入力する。追記の依頼では Ctrl+End で末尾へ移動する。
 上書き保存は Ctrl+S を使い、未保存マークが消えたか画面で確認する。
+ファイルの改名は、目的の項目を選択して F2 を押す。名前の入力欄にフォーカスが
+あることを確認し、Ctrl+A → Backspace で拡張子を含む古い名前を消してから、
+拡張子を含む新しい名前を入力し Enter で確定する。
+Calc でセル番地が指定されている場合は名前ボックスに番地を入力し Enter で移動する。
+選択セルを確認し、値や数式を入力して Enter で確定し、Ctrl+S で保存する。
 7. **アプリ起動はキーボード優先**：タスクバーの小さいアイコンへの直接クリックは
    誤爆しやすいため最後の手段にする。第一選択は Alt+F2（ランナー）→
    アプリ名を type → Enter。ランナーが使えない場合のみアイコンを使う。
@@ -641,8 +646,8 @@ class OpenAICompatProvider(LLMProvider):
         # structured output (response_format) が使えるかどうか。
         # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
         self._structured_output = True
-        self._completion_limit_only = (
-            self._client.base_url.host == "api.openai.com" and model.startswith("gpt-6.")
+        self._completion_limit_only = self._client.base_url.host == "api.openai.com" and (
+            model == "gpt-5" or model.startswith(("gpt-5.", "gpt-5-", "gpt-6."))
         )
 
     @property

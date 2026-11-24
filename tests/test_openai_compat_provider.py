@@ -137,8 +137,9 @@ class TestOpenAICompatProvider:
             parsed = provider._parse_action({"action_type": action_type.value, "params": params})
             assert parsed == Action(action_type, params)
 
-    async def test_gpt6_sends_supported_completion_limit(self):
-        provider = OpenAICompatProvider(model="gpt-6.2-sol", api_key="test-key")
+    @pytest.mark.parametrize("model", ["gpt-5", "gpt-5-mini", "gpt-5.4", "gpt-6.2-sol"])
+    async def test_sends_supported_completion_limit(self, model):
+        provider = OpenAICompatProvider(model=model, api_key="test-key")
         try:
             send = AsyncMock(return_value=self._make_mock_response({"ok": True}))
             provider._client.chat.completions.create = send
