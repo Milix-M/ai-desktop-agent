@@ -6,7 +6,7 @@
 
 ## 起動する
 
-Docker Engine（API 1.48以降）とDocker Compose 2.33.1以降、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
+Docker Engine（API 1.48以降）とDocker Compose 2.34.0以降、画像入力に対応するLLMのAPIキーが必要になる。ローカルの1人利用を対象とする。
 
 QEMU VMを使う場合は、x86_64ホストの `/dev/kvm` とゲストファイルが必要になる。先に `sudo ./vm/build-vm-image.sh` を実行する。このスクリプトはホストにパッケージを導入し、テンプレート `vm/desktop.qcow2` を作成する。
 
@@ -195,7 +195,7 @@ docker build -t ai-desktop-agent-frontend-smoke frontend
 RUN_DESKTOP_SMOKE=1 uv run pytest -m desktop_integration tests/integration/
 ```
 
-CIでは対応下限のCompose 2.33.1で実デスクトップを検査する。通常の単体テストではこの検査をスキップする。
+CIでは対応下限のCompose 2.34.0で実デスクトップを検査する。通常の単体テストではこの検査をスキップする。
 
 モデルの比較手順と結果の見方は[定型作業を評価する](docs/desktop-evaluation.md)を参照する。
 

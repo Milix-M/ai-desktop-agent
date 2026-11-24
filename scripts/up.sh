@@ -37,6 +37,12 @@ close_upgrade_guard() {
   wait "$process" 2>/dev/null || true
 }
 
+version_at_least() {
+  [[ "$1" =~ ^v?([0-9]+)\.([0-9]+)([.-]|$) ]] || return 1
+  local major=$((10#${BASH_REMATCH[1]})) minor=$((10#${BASH_REMATCH[2]}))
+  (( major > $2 || (major == $2 && minor >= $3) ))
+}
+
 main() {
   local argument
   for argument in "$@"; do
@@ -51,6 +57,17 @@ main() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   if [[ ! -f .env ]]; then
     echo 'Create .env from .env.example and configure an LLM provider before starting.' >&2
+    return 1
+  fi
+  local compose_version engine_api
+  compose_version="$(docker compose version --short)"
+  if ! version_at_least "$compose_version" 2 34; then
+    echo "Docker Compose 2.34.0 or later is required for gw_priority (found $compose_version)." >&2
+    return 1
+  fi
+  engine_api="$(docker version --format '{{.Server.APIVersion}}')"
+  if ! version_at_least "$engine_api" 1 48; then
+    echo "Docker Engine API 1.48 or later is required for gw_priority (found $engine_api)." >&2
     return 1
   fi
   local settings key value mode profile environment runtime=""

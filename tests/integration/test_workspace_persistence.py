@@ -290,7 +290,9 @@ def test_real_startup_script_preserves_a_legacy_home(tmp_path):
             text=True,
             timeout=120,
         )
-        assert result.returncode == 0, result.stdout + result.stderr
+        if result.returncode:
+            backend = client.containers.get(project + "-backend-1")
+            pytest.fail(result.stderr + backend.logs(tail=40).decode(errors="replace"))
         current = client.containers.get(project + "-desktop-1")
         for service in ("desktop", "backend", "frontend"):
             container = client.containers.get(f"{project}-{service}-1")

@@ -55,7 +55,7 @@ class EnvironmentNetworks:
         if endpoint.get("GwPriority", 0) < 1:
             raise DockerUnavailableError(
                 "管理ネットワークのgw_priorityを1以上にしてください。"
-                "Docker API 1.48以降・Compose 2.33.1以降が必要です"
+                "Docker API 1.48以降・Compose 2.34.0以降が必要です"
             )
         address = endpoint.get("IPAddress") or endpoint.get("GlobalIPv6Address", "")
         try:
