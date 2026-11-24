@@ -742,6 +742,7 @@ class TestLLMProviderFactory:
 
     def test_ollama(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "cloud-only-key")
+        monkeypatch.setenv("TASK_REQUEST_TIMEOUT_SECONDS", "480")
         monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
         monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
         monkeypatch.delenv("LLM_MODEL", raising=False)
@@ -752,6 +753,7 @@ class TestLLMProviderFactory:
         assert p.provider_name == "openai_compat"
         assert p.model_name == "qwen2.5vl:3b"
         assert client.call_args.kwargs["api_key"] == "***"
+        assert client.call_args.kwargs["timeout"] == 480
         assert client.call_args.kwargs["base_url"] == "http://localhost:11434/v1"
 
     def test_ollama_custom_endpoint(self, monkeypatch):

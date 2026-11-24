@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ai_desktop_agent.actions.primitives import Action
+from ai_desktop_agent.agent.budget import default_subtask_timeout
 from ai_desktop_agent.validation import validate_text
 
 
@@ -106,7 +107,7 @@ class Subtask:
     description: str
     expected_outcome: str = ""
     max_retries: int = 3
-    timeout_seconds: float = 60.0
+    timeout_seconds: float = field(default_factory=default_subtask_timeout)
 
     def __post_init__(self) -> None:
         for name in ("id", "description", "expected_outcome"):

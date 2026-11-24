@@ -26,9 +26,10 @@ class ExecutionLimits:
     max_cost_usd: Decimal | None = None
     input_usd_per_million: Decimal | None = None
     output_usd_per_million: Decimal | None = None
+    subtask_timeout_seconds: float = 60
 
     def __post_init__(self):
-        for name in ("max_seconds", "request_timeout_seconds"):
+        for name in ("max_seconds", "request_timeout_seconds", "subtask_timeout_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name}は有限の正数にしてください")
@@ -58,6 +59,7 @@ class ExecutionLimits:
         fields = {
             "max_seconds": ("TASK_MAX_SECONDS", float),
             "request_timeout_seconds": ("TASK_REQUEST_TIMEOUT_SECONDS", float),
+            "subtask_timeout_seconds": ("TASK_SUBTASK_TIMEOUT_SECONDS", float),
             "max_requests": ("TASK_MAX_REQUESTS", int),
             "max_tokens": ("TASK_MAX_TOKENS", int),
             "max_cost_usd": ("TASK_MAX_COST_USD", Decimal),
@@ -82,6 +84,13 @@ class ExecutionLimits:
 _current: contextvars.ContextVar["TaskBudget | None"] = contextvars.ContextVar(
     "task_budget", default=None
 )
+
+
+def default_subtask_timeout() -> float:
+    budget = _current.get()
+    return (
+        budget.limits.subtask_timeout_seconds if budget else ExecutionLimits.subtask_timeout_seconds
+    )
 
 
 class TaskBudget:

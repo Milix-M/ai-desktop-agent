@@ -9,6 +9,7 @@ import logging
 import os
 from typing import Any
 
+from ai_desktop_agent.agent.budget import ExecutionLimits
 from ai_desktop_agent.agent.llm.base import LLMProvider
 from ai_desktop_agent.agent.llm.mock import MockLLMProvider
 from ai_desktop_agent.privacy import install_log_redaction, protect, protect_url
@@ -110,4 +111,10 @@ def create_llm_provider(
     extra: dict[str, Any] = {}
     if provider in _PROVIDERS_WITH_UA:
         extra["default_headers"] = dict(_USER_AGENT_HEADERS)
-    return OpenAICompatProvider(model=model, api_key=api_key, base_url=base_url, **extra)
+    return OpenAICompatProvider(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=ExecutionLimits.from_env().request_timeout_seconds,
+        **extra,
+    )
