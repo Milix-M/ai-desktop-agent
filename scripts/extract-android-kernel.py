@@ -13,6 +13,8 @@ ISO直起動でも動作するが、カーネル直起動の方がgrub待ち（�
 from __future__ import annotations
 
 import struct
+import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -91,31 +93,29 @@ def main() -> int:
         print(f"ISOがありません: {iso}", file=sys.stderr)
         print("先に android/README.md の手順でISOを取得してください", file=sys.stderr)
         return 1
-    found = find_root_files(iso)
-    targets = {"kernel": "kernel", "initrd.img": "initrd.img"}
-    for iso_name, dest_name in targets.items():
-        if iso_name not in found:
-            print(f"ISO内に {iso_name} が見つかりません: {sorted(found)}", file=sys.stderr)
-            return 1
-        extent, size = found[iso_name]
-        extract(iso, iso_name, extent, size, ANDROID_DIR / dest_name)
-    # initrd に ADB-over-TCP 有効化をパッチする（seedなし/VNCなし用）。
-    # 素の initrd ではゲストadbdがTCPを開かず backend 到達不能のため必須。
+    names = ("kernel", "initrd.img")
     try:
-        import subprocess
-
-        r = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "scripts" / "patch-android-initrd.py")],
-            capture_output=True,
-            text=True,
-        )
-        print(r.stdout.strip())
-        if r.returncode != 0:
-            print(r.stderr.strip(), file=sys.stderr)
-    except Exception as e:
-        print(f"initrdパッチに失敗: {e}", file=sys.stderr)
+        found = find_root_files(iso)
+        with tempfile.TemporaryDirectory(dir=ANDROID_DIR) as temp:
+            staging = Path(temp)
+            for name in names:
+                if name not in found or found[name][1] == 0:
+                    raise ValueError(f"ISO内に {name} がありません")
+                dest = ANDROID_DIR / name
+                if dest.exists() and not dest.is_file():
+                    raise ValueError(f"出力先が通常のファイルではありません: {dest}")
+                extract(iso, name, *found[name], staging / name)
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/patch-android-initrd.py"),
+                 str(staging / "initrd.img")],
+                check=True,
+            )
+            for name in names:
+                (staging / name).replace(ANDROID_DIR / name)
+    except (ValueError, OSError, struct.error, subprocess.CalledProcessError) as error:
+        print(f"起動ファイルを準備できません: {error}", file=sys.stderr)
         return 1
-    print("完了。entrypointはカーネル直起動を使います（なければISO起動にフォールバック）")
+    print("Androidの起動ファイルを準備しました")
     return 0
 
 

@@ -80,7 +80,9 @@ def test_startup_uses_compose_configuration_and_does_not_print_other_settings(tm
     docker.write_text("""#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
-if sys.argv[1:]==['compose','config','--environment']:
+if sys.argv[1:]==['compose','version','--short']: print('2.34.0')
+elif sys.argv[1:2]==['version']: print('1.48')
+elif sys.argv[1:]==['compose','config','--environment']:
     print('USE_KVM=false\\nOPENAI_API_KEY=never-print-this-value')
 elif 'ai_desktop_agent.server.workspace_migration' in sys.argv:
     print('WORKSPACE_READY',flush=True)
@@ -102,6 +104,8 @@ else:
     assert record["vnc"] == "desktop" and record["kvm"] == "false"
     assert record["args"][-3:] == ["desktop", "backend", "frontend"]
     assert "container" in record["args"]
+    assert "--wait" in record["args"]
+    assert int(record["args"][record["args"].index("--wait-timeout") + 1]) > 0
 
 
 def guarded_startup(tmp_path, failure=""):
@@ -119,7 +123,9 @@ from pathlib import Path
 args=sys.argv[1:]
 def log(event):
     with Path(os.environ['STARTUP_EVENTS']).open('a') as out: out.write(event+'\\n')
-if args==['compose','config','--environment']:
+if args==['compose','version','--short']: print(os.getenv('TEST_COMPOSE_VERSION','2.34.0'))
+elif args[:1]==['version']: print(os.getenv('TEST_ENGINE_API','1.48'))
+elif args==['compose','config','--environment']:
     print('USE_KVM=false')
     if os.environ.get('STARTUP_RUNTIME'): print('DESKTOP_RUNTIME='+os.environ['STARTUP_RUNTIME'])
 elif args[:1]==['info']:
@@ -150,6 +156,25 @@ elif 'up' in args:
         "STARTUP_FAILURE": failure,
     }
     return startup, events, env
+
+
+@pytest.mark.parametrize(
+    "setting,value,message",
+    [
+        ("TEST_COMPOSE_VERSION", "2.33.1", "Docker Compose 2.34.0"),
+        ("TEST_ENGINE_API", "1.47", "Docker Engine API 1.48"),
+    ],
+)
+def test_unsupported_network_configuration_is_rejected_before_migration(
+    tmp_path, setting, value, message
+):
+    startup, events, env = guarded_startup(tmp_path)
+    env[setting] = value
+    result = subprocess.run(
+        ["bash", str(startup)], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode != 0 and message in result.stderr
+    assert not events.exists() and not Path(str(events) + ".build").exists()
 
 
 def test_update_refreshes_base_images_and_os_packages_before_migration(tmp_path):

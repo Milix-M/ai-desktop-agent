@@ -60,7 +60,7 @@ Pythonの結果は `coverage.xml`、画面の結果は `frontend/coverage/` に�
 
 ## 実デスクトップを確認する
 
-ローカルのLinux Docker Engine（API 1.48以降）とDocker Compose 2.33.1以降が必要です。ブラウザの手動入力を検査するには、ホストにChromiumまたはGoogle Chromeも用意します。
+ローカルのLinux Docker Engine（API 1.48以降）とDocker Compose 2.34.0以降が必要です。ブラウザの手動入力を検査するには、ホストにChromiumまたはGoogle Chromeも用意します。
 
 テストはローカルのDockerソケットと一時ディレクトリをマウントし、一時コンテナ・ネットワーク・ボリュームを作成します。マウントの検査では `SYS_ADMIN` とAppArmor制限の解除を使うため、開発用Docker環境で実行してください。リモートDockerは対象外です。
 
@@ -73,7 +73,7 @@ docker build -t ai-desktop-agent-frontend-smoke frontend
 RUN_DESKTOP_SMOKE=1 uv run --frozen pytest -m desktop_integration tests/integration/
 ```
 
-実行には5種類すべてのイメージが必要です。`RUN_DESKTOP_SMOKE=1` がなければ実デスクトップ検査を、ブラウザがなければ手動入力のブラウザ検査をスキップします。CIはブラウザを確認し、対応下限のCompose 2.33.1を使います。
+実行には5種類すべてのイメージが必要です。`RUN_DESKTOP_SMOKE=1` がなければ実デスクトップ検査を、ブラウザがなければ手動入力のブラウザ検査をスキップします。CIはブラウザを確認し、対応下限のCompose 2.34.0を使います。
 
 Firefoxの描画、VNC入力後のファイル内容（日本語・絵文字・長文）、手動入力からの再開、環境間の通信遮断、バックエンド再作成後の復旧、更新後のファイル保持とバックアップの復元を確認します。実LLMの判断精度、KVM上のゲスト起動、実Androidの動作は対象外です。[モデルを比較する手順](desktop-evaluation.md)を参照してください。
 
@@ -86,6 +86,19 @@ RUN_DESKTOP_SMOKE=1 DESKTOP_CONTAINER_COVERAGE_DIR="$coverage_root/container" \
 ```
 
 指定先に `container.coverage`、`container-coverage.json`、測定データの `raw/` が残ります。強制終了で保存できなかった実行は含みません。ローカルではホストの結果と自動合算せず、CIでは合算した結果を `desktop-coverage` に保存します。
+
+## KVMでゲストの起動とデータの保持を確認する
+
+`/dev/kvm` を使える x86_64 の Linux テスト機に、Docker Compose、uv、sudo を用意します。Ubuntu の検査はホストにイメージ構築用のパッケージをインストールします。Android の検査には `adb` と `mkfs.ext4` も必要です。リポジトリのルートから、確認するゲストのコマンドを実行してください。
+
+```bash
+./scripts/check-kvm-guest.sh linux
+./scripts/check-kvm-guest.sh android
+```
+
+Ubuntu はテンプレートを構築し、KDE の起動と Firefox のバージョンを確認します。Android は Android-x86 9.0-r2 の ISO を取得して SHA-256 を照合し、ホーム画面と初期設定を調べます。どちらも VNC で画面を取得し、ゲストにファイルを書き込みます。同じディスクでコンテナを再作成し、ファイルを読み戻せると成功です。失敗時はログに表示された作業ディレクトリでディスクと起動ファイルを確認できます。
+
+ゲストや起動スクリプトに関わる変更を含む PR では、[Guest boot](../.github/workflows/guest-boot.yml) が両方の検査を実行します。
 
 ## 依存の脆弱性を確認する
 

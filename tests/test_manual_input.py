@@ -270,11 +270,19 @@ async def test_input_release_finishes_before_agent_continues_or_session_exits(
         await asyncio.gather(session._task, return_exceptions=True)
 
 
-async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path):
-    session = manual_session(tmp_path, limits=ExecutionLimits(max_seconds=0.2))
+async def test_time_budget_also_expires_while_waiting_for_manual_input(tmp_path, monkeypatch):
+    from ai_desktop_agent.agent import budget
+
+    limits = ExecutionLimits(max_seconds=10)
+    session = manual_session(tmp_path, limits=limits)
     session._capture_screenshot = AsyncMock(return_value=session.display.capture_screen())
     await session.start_async("ログインする")
     await wait_for_manual(session)
+    # Expire the real scheduled timer only after the request is waiting for input.
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: real_time() + limits.max_seconds + 1)
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=loop.time))
     assert not await asyncio.wait_for(session._task, 2)
     record = session._store.load(session.id)
     assert record.stop_reason == "duration_limit" and record.state == "failed"

@@ -4,10 +4,14 @@ Dockerfile / entrypoint.sh / build-vm-image.sh の構文と
 必須項目が正しいことを確認する。Dockerビルドは行わない。
 """
 
+import importlib.util
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -535,19 +539,20 @@ class TestAndroidCompose:
             "android サービスは /dev/kvm をマウントする必要があります"
         )
 
-    def test_android_iso_volume(self):
-        android = self._compose_data()["services"]["android"]
-        volumes = android.get("volumes", [])
-        assert any("boot.iso" in str(v) for v in volumes), (
-            "android はISOを /android/boot.iso にマウントする必要があります"
-        )
-
-    def test_android_data_volume(self):
-        android = self._compose_data()["services"]["android"]
-        volumes = android.get("volumes", [])
-        assert any("android-data.img" in str(v) for v in volumes), (
-            "永続dataイメージのvolumeマウントが必要です"
-        )
+    def test_android_boot_assets_must_be_existing_files(self):
+        volumes = self._compose_data()["services"]["android"]["volumes"]
+        bindings = {mount["target"]: mount for mount in volumes if isinstance(mount, dict)}
+        targets = {
+            "/android/boot.iso": "./android/android-x86_64.iso",
+            "/android/kernel": "./android/kernel",
+            "/android/initrd.img": "./android/initrd.img",
+            "/android/data.img": "./android/android-data.img",
+        }
+        for target, source in targets.items():
+            mount = bindings[target]
+            assert mount["type"] == "bind" and mount["source"] == source
+            assert mount["bind"]["create_host_path"] is False
+            assert mount.get("read_only", False) == (target != "/android/data.img")
 
     def test_android_apks_volume(self):
         android = self._compose_data()["services"]["android"]
@@ -574,10 +579,43 @@ class TestAndroidScripts:
         result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
 
-    def test_mk_data_creates_ext4(self):
-        content = (PROJECT_ROOT / "scripts" / "mk-android-data.sh").read_text()
-        assert "mkfs.ext4" in content
-        assert "android-data.img" in content
+    @pytest.mark.skipif(shutil.which("mkfs.ext4") is None, reason="requires e2fsprogs")
+    def test_mk_data_keeps_an_existing_disk_or_mount_directory(self, tmp_path):
+        scripts = tmp_path / "scripts"
+        android = tmp_path / "android"
+        scripts.mkdir()
+        android.mkdir()
+        script = shutil.copy2(PROJECT_ROOT / "scripts/mk-android-data.sh", scripts)
+        image = android / "android-data.img"
+        subprocess.run([script, "8"], check=True, capture_output=True)
+        original = image.read_bytes()
+        assert original[1080:1082] == b"\x53\xef"  # ext4 superblock signature
+        assert subprocess.run([script, "16"], capture_output=True).returncode != 0
+        assert image.read_bytes() == original
+        image.unlink()
+        image.mkdir()
+        assert subprocess.run([script, "8"], capture_output=True).returncode != 0
+        assert image.is_dir() and not list(image.iterdir())
+
+    def test_failed_android_initrd_patch_preserves_both_boot_files(self, tmp_path, monkeypatch):
+        script = PROJECT_ROOT / "scripts/extract-android-kernel.py"
+        spec = importlib.util.spec_from_file_location("extract_android_kernel", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        iso = tmp_path / "bad.iso"
+        iso.write_bytes(b"new kernel" + bytes(2038) + b"not gzipped")
+        kernel = tmp_path / "kernel"
+        initrd = tmp_path / "initrd.img"
+        kernel.write_bytes(b"previous kernel")
+        initrd.write_bytes(b"previous initrd")
+        monkeypatch.setattr(module, "ANDROID_DIR", tmp_path)
+        monkeypatch.setattr(
+            module, "find_root_files", lambda _: {"kernel": (0, 10), "initrd.img": (1, 11)}
+        )
+        monkeypatch.setattr(sys, "argv", [str(script), str(iso)])
+        assert module.main() == 1
+        assert kernel.read_bytes() == b"previous kernel"
+        assert initrd.read_bytes() == b"previous initrd"
 
     def test_data_img_gitignored(self):
         content = (PROJECT_ROOT / ".gitignore").read_text()
@@ -692,8 +730,7 @@ class TestAndroidDockerfile:
         設定内容は backend の機械的プロビジョニングが投入する。"""
         content = (self.ANDROID_DIR / "entrypoint.sh").read_text()
         assert "mkfs.ext4" in content
-        # volumeの空ディレクトリ化に対する救済
-        assert "data-local.img" in content
+        assert "data-local.img" not in content
 
     def test_entrypoint_nic_knob(self):
         """NICモデル切替（既定virtio-net）。"""

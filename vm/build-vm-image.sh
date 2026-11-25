@@ -170,19 +170,30 @@ EOF
     # ── パッケージ ──
     log "Phase 2: Installing core + KDE..."
     chroot "$TARGET" apt-get update
+    # debootstrap installs the release pocket. Apply updates to that base as well.
+    DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get upgrade -y --with-new-pkgs --no-install-recommends
     chroot "$TARGET" apt-get install -y --no-install-recommends \
-        linux-image-generic initramfs-tools udev dbus network-manager \
+        linux-image-generic initramfs-tools systemd-sysv udev dbus-user-session libpam-systemd network-manager \
         sudo curl wget
+    # Install the actual browser in the image; the Ubuntu snap installer needs a running system.
+    chroot "$TARGET" apt-get install -y --no-install-recommends gnupg
+    chroot "$TARGET" /bin/bash -eu <<'MOZILLA'
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc
+fingerprint=$(gpg --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc | awk -F: '$1 == "fpr" {print $10; exit}')
+test "$fingerprint" = 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3
+echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
+printf 'Package: firefox*\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n\nPackage: firefox\nPin: release o=Ubuntu\nPin-Priority: -1\n' > /etc/apt/preferences.d/mozilla
+apt-get update
+MOZILLA
     chroot "$TARGET" apt-get install -y --no-install-recommends \
+        xserver-xorg x11-xserver-utils fonts-noto-cjk \
         plasma-desktop plasma-workspace kwin-x11 sddm konsole \
         firefox xdotool wmctrl xauth dolphin \
         qemu-guest-agent
     # guest agent は初回起動時に systemd が自動起動する。
     # QEMU 側の virtio-serial チャネルは entrypoint.sh で付与する。
-    # 注意: Ubuntu 24.04 の firefox パッケージは snap 移行用のスタブ。
-    # chroot 内では snapd が動かないため実体が入らない。初回起動後に
-    # ゲスト内で `sudo snap install firefox` を実行すること。
-    # （将来的には Mozilla Team PPA からの firefox-esr 導入を検討）
+    chroot "$TARGET" firefox --version
     chroot "$TARGET" apt-get clean
     rm -rf "$TARGET/var/lib/apt/lists/"* "$TARGET/usr/share/doc/"* \
            "$TARGET/usr/share/man/"* "$TARGET/var/cache/apt/archives/"*

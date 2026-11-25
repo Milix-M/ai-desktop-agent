@@ -37,6 +37,12 @@ close_upgrade_guard() {
   wait "$process" 2>/dev/null || true
 }
 
+version_at_least() {
+  [[ "$1" =~ ^v?([0-9]+)\.([0-9]+)([.-]|$) ]] || return 1
+  local major=$((10#${BASH_REMATCH[1]})) minor=$((10#${BASH_REMATCH[2]}))
+  (( major > $2 || (major == $2 && minor >= $3) ))
+}
+
 main() {
   local argument
   for argument in "$@"; do
@@ -50,7 +56,18 @@ main() {
   done
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   if [[ ! -f .env ]]; then
-    echo 'Create .env from .env.example and configure an LLM provider before starting.' >&2
+    printf 'Create %s/.env from .env.example and configure an LLM provider before starting.\n' "$PWD" >&2
+    return 1
+  fi
+  local compose_version engine_api
+  compose_version="$(docker compose version --short)"
+  if ! version_at_least "$compose_version" 2 34; then
+    echo "Docker Compose 2.34.0 or later is required for gw_priority (found $compose_version)." >&2
+    return 1
+  fi
+  engine_api="$(docker version --format '{{.Server.APIVersion}}')"
+  if ! version_at_least "$engine_api" 1 48; then
+    echo "Docker Engine API 1.48 or later is required for gw_priority (found $engine_api)." >&2
     return 1
   fi
   local settings key value mode profile environment runtime=""
@@ -95,16 +112,17 @@ main() {
   exec {original_out}<&-
   trap "close_upgrade_guard $guard_in $guard_process" EXIT
   if ! IFS= read -r marker <&"$guard_out" || [[ "$marker" != WORKSPACE_READY ]]; then
-    echo 'Workspace backup failed. The environment has not been replaced.' >&2
+    printf 'Workspace preparation failed. Check the preceding error and %s/.env.\n' "$PWD" >&2
     return 1
   fi
   exec {guard_out}<&-
-  if docker compose --profile "$profile" up -d "$@" "$environment" backend frontend; then
+  if docker compose --profile "$profile" up -d --wait-timeout 300 "$@" --wait "$environment" backend frontend; then
     printf 'commit\n' >&"$guard_in"
     exec {guard_in}>&-
     wait "$guard_process"
     trap - EXIT
   else
+    echo 'Startup did not complete. Check docker compose ps -a and docker compose logs backend frontend.' >&2
     return 1
   fi
 }

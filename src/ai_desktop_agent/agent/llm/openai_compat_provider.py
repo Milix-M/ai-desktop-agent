@@ -29,6 +29,7 @@ from typing import Any
 
 from openai import APIResponseValidationError, AsyncOpenAI
 
+from ai_desktop_agent.actions.keys import parse_shortcut
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import TaskLimitError, model_request
 from ai_desktop_agent.agent.llm.base import LLMProvider, ModelResponseError
@@ -131,6 +132,18 @@ _SYSTEM_PROMPT = (
     _COMMON_ACTION_PROMPT
     + """
 Linux デスクトップの操作
+対象のエディタにフォーカスがあるときは、カーソルを移動せずキーボードで編集する。
+文書全体を指定された本文に置き換える依頼では、Ctrl+A → Backspace → type で
+指定された改行を含む全文を入力する。追記の依頼では Ctrl+End で末尾へ移動する。
+上書き保存は Ctrl+S を使い、未保存マークが消えたか画面で確認する。
+ファイルの改名は、目的の項目を選択して F2 を押す。名前の入力欄にフォーカスが
+あることを確認し、Ctrl+A → Backspace で拡張子を含む古い名前を消してから、
+拡張子を含む新しい名前を入力し Enter で確定する。
+Calc の先頭付近は Ctrl+Home で A1 に戻り、行・列の差だけ矢印キーで移動する。
+同じ矢印の繰り返しには repeat_navigation を使う。遠いセルは Ctrl+Shift+F5 で
+名前ボックスに移動し、Ctrl+A → Backspace で元の番地を消して新しい番地を入力し Enter。
+セル番地をシートに貼り付けない。名前ボックスの番地が目的のセルと一致したら、
+そのセルの値または数式だけを入力する。Enter で確定し、Ctrl+S で保存する。
 7. **アプリ起動はキーボード優先**：タスクバーの小さいアイコンへの直接クリックは
    誤爆しやすいため最後の手段にする。第一選択は Alt+F2（ランナー）→
    アプリ名を type → Enter。ランナーが使えない場合のみアイコンを使う。
@@ -141,7 +154,7 @@ Linux デスクトップの操作
    ネットワーク不可等で導入できない場合は、試した手順を reasoning に残した上で
    完了を宣言する（推測での完了宣言はしない）。
 
-画面解像度: 1024x768。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
+解像度は毎ターンの画面情報を使う。座標は左上が (0,0)、右方向が +x、下方向が +y です。"""
 )
 
 _ANDROID_PROMPT = """
@@ -546,6 +559,7 @@ _recovery_variants.append(
 )
 _SCHEMA_ACTION = {
     "name": "action_decision",
+    "strict": True,
     "schema": {
         "type": "object",
         "properties": {
@@ -636,8 +650,8 @@ class OpenAICompatProvider(LLMProvider):
         # structured output (response_format) が使えるかどうか。
         # 非対応エラーが出たら False に倒し、通常JSONモードで続行する。
         self._structured_output = True
-        self._completion_limit_only = (
-            self._client.base_url.host == "api.openai.com" and model.startswith("gpt-6.")
+        self._completion_limit_only = self._client.base_url.host == "api.openai.com" and (
+            model == "gpt-5" or model.startswith(("gpt-5.", "gpt-5-", "gpt-6."))
         )
 
     @property
@@ -923,7 +937,12 @@ ID: {subtask.id}
         if not isinstance(data, dict) or not isinstance(data.get("action_type"), str):
             raise ValueError("モデル応答に有効なaction_typeが必要です")
         action_type = ActionType(data["action_type"])
-        return Action(action_type, cls._sanitize_params(action_type, data.get("params", {})))
+        action = Action(action_type, cls._sanitize_params(action_type, data.get("params", {})))
+        if action_type == ActionType.KEY_PRESS:
+            key = action.params["key"]
+            if "+" in key and key != "+":
+                return Action(ActionType.KEY_COMBO, {"keys": parse_shortcut(key)})
+        return action
 
     # ── 内部 ──────────────────────────────────────
 

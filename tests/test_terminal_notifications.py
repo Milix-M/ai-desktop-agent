@@ -216,6 +216,38 @@ async def test_terminal_notifications_outliving_the_execution_deadline_preserve_
         await asyncio.gather(session._task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("expire", [False, True], ids=["initial-save", "deadline-during-save"])
+async def test_durable_admission_is_released_before_observers(tmp_path, monkeypatch, expire):
+    session = make_session(tmp_path, "success", seconds=0.2 if expire else 60)
+    original = session._persist
+
+    async def persist(*args, **kwargs):
+        if expire and session.loop.state == AgentState.UNDERSTANDING:
+            await asyncio.Event().wait()  # Interrupted by the real execution deadline.
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(session, "_persist", persist)
+    entered, release = asyncio.Event(), asyncio.Event()
+    observed = AgentState.FAILED if expire else AgentState.UNDERSTANDING
+
+    async def observe(state, _):
+        if state == observed:
+            entered.set()
+            await release.wait()
+
+    session.on_state_change(observe)
+    admission = asyncio.create_task(session.start_async("inspect the report"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(asyncio.shield(admission), 2)
+        assert TaskStore(tmp_path).load(session.id).state == observed.value
+        assert not session._task.done()
+    finally:
+        release.set()
+        await admission
+        await session._task
+
+
 @pytest.mark.parametrize("interruption", ["stop", "deadline"])
 async def test_terminal_write_is_still_part_of_execution_and_must_finish_before_success(
     tmp_path, monkeypatch, interruption, session_retry_sleep

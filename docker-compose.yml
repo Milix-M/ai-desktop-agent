@@ -70,12 +70,28 @@ services:
     networks:
       default:
         gw_priority: 1
+        aliases: [backend-management]
     cap_drop: [NET_RAW]
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:8081:8081"
+    healthcheck:
+      # The API listens only on its management interface, including during upgrades.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import http.client
+          conn = http.client.HTTPConnection("backend-management", 8081, timeout=2)
+          conn.request("GET", "/health")
+          raise SystemExit(conn.getresponse().status != 200)
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
     env_file:
       - .env
     environment:
@@ -110,6 +126,21 @@ services:
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:3000:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const http = require("node:http");
+          http.get({hostname: process.env.HOSTNAME, port: 3000, path: "/"}, res => {
+            res.resume();
+            process.exitCode = res.statusCode === 200 ? 0 : 1;
+          }).on("error", () => { process.exitCode = 1; });
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
     restart: unless-stopped
 
   # ── Android端末（Android-x86 on QEMU。VNC操作は通常VMと同一） ──
@@ -132,11 +163,29 @@ services:
       - USE_KVM=${USE_KVM:-auto}
       - ALLOW_TCG_VM=${ALLOW_TCG_VM:-false}
     volumes:
-      - ./android/android-x86_64.iso:/android/boot.iso:ro
-      - ./android/kernel:/android/kernel:ro
-      - ./android/initrd.img:/android/initrd.img:ro
-      # 永続dataイメージ（初回は空作成。backendの機械的プロビジョニングが設定する）
-      - ./android/android-data.img:/android/data.img
+      - type: bind
+        source: ./android/android-x86_64.iso
+        target: /android/boot.iso
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/kernel
+        target: /android/kernel
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/initrd.img
+        target: /android/initrd.img
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./android/android-data.img
+        target: /android/data.img
+        bind:
+          create_host_path: false
       # APK持ち込み（なければUSBなし。取得は ./scripts/fetch-apks.sh）
       - ./android/apks:/android/apks:ro
     restart: unless-stopped

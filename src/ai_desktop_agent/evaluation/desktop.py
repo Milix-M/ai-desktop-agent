@@ -24,6 +24,8 @@ from pathlib import Path
 
 import docker
 from docker.errors import NotFound
+from requests.exceptions import ConnectionError as DockerConnectionError
+from requests.exceptions import ReadTimeout
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits
@@ -291,8 +293,27 @@ async def run_attempt(client, image, case, provider, limits, output, result):
     recorded = RecordingDisplay(display, output)
     started = time.monotonic()
     labels = {"ai-desktop-agent.evaluation": result["attempt_id"]}
+    uncertain_allocation = None
+
+    def allocate(kind, operation, *args, **kwargs):
+        nonlocal uncertain_allocation
+        # This CLI owns its Docker client and runs attempts sequentially. Allow
+        # slower creation while retaining the short timeout for reads and cleanup.
+        previous_timeout = client.api.timeout
+        client.api.timeout = 60
+        try:
+            return operation(*args, **kwargs)
+        except (ReadTimeout, DockerConnectionError):
+            # The daemon can finish creating the resource after losing the response.
+            uncertain_allocation = kind
+            raise
+        finally:
+            client.api.timeout = previous_timeout
+
     try:
         network = await run_display_call(
+            allocate,
+            "network",
             client.networks.create,
             "agent-eval-" + result["attempt_id"],
             driver="bridge",
@@ -300,6 +321,8 @@ async def run_attempt(client, image, case, provider, limits, output, result):
         )
         result["network_id"] = network.id
         container = await run_display_call(
+            allocate,
+            "container",
             client.containers.run,
             image,
             detach=True,
@@ -396,26 +419,27 @@ async def run_attempt(client, image, case, provider, limits, output, result):
             ("display", lambda: run_display_call(display.disconnect)),
         ]
 
+        def find_owned(kind, collection, **kwargs):
+            label = "ai-desktop-agent.evaluation=" + result["attempt_id"]
+            deadline = time.monotonic() + 30
+            while True:
+                resources = collection.list(filters={"label": label}, **kwargs)
+                if resources or uncertain_allocation != kind:
+                    return resources
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"割当結果を確認できません。Dockerのラベル: {label}")
+                time.sleep(1)
+
         def remove_containers():
-            # A cancelled allocation may finish after the awaiting assignment was cancelled.
             owned = (
                 [container]
                 if container is not None
-                else client.containers.list(
-                    all=True,
-                    filters={"label": "ai-desktop-agent.evaluation=" + result["attempt_id"]},
-                )
+                else find_owned("container", client.containers, all=True)
             )
             remove_resources(owned, force=True)
 
         def remove_networks():
-            owned = (
-                [network]
-                if network is not None
-                else client.networks.list(
-                    filters={"label": "ai-desktop-agent.evaluation=" + result["attempt_id"]}
-                )
-            )
+            owned = [network] if network is not None else find_owned("network", client.networks)
             remove_resources(owned)
 
         steps.extend(

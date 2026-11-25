@@ -6,14 +6,15 @@
 
 ## 起動する
 
-Docker Engine（API 1.48以降）、Docker Compose 2.33.1以降、画像入力に対応するLLMが必要になる。アプリはローカルでの1人利用を想定している。操作画面とAPIはホスト内から接続し、インターネットには公開しない。
+Docker Engine（API 1.48以降）、Docker Compose 2.34.0以降、画像入力に対応するLLMが必要になる。アプリはローカルでの1人利用を想定している。操作画面とAPIはホスト内から接続し、インターネットには公開しない。
 
 1. リポジトリを取得し、設定ファイルを用意する。
 
    ```bash
    git clone https://github.com/Milix-M/ai-desktop-agent.git
    cd ai-desktop-agent
-   cp .env.example .env
+   (umask 077; cp -n .env.example .env)
+   realpath .env
    ```
 2. `.env` に `LLM_PROVIDER` と、必要な場合は対応するAPIキーを設定する。利用できる提供元は[LLMを選ぶ](#llmを選ぶ)を参照する。
 3. リポジトリのルートで起動する。
@@ -60,7 +61,11 @@ Docker Engine（API 1.48以降）、Docker Compose 2.33.1以降、画像入力�
 | `opencode-go` | `OPENCODE_GO_API_KEY` |
 | `ollama` | 不要 |
 
-Ollamaの既定接続先 `http://localhost:11434/v1` はバックエンドコンテナ内を指す。ホスト上のOllamaにつなぐには別途設定が必要となる。
+OpenAIでGPT-5.4を使う場合は、`.env` に `LLM_PROVIDER=openai`、`LLM_MODEL=gpt-5.4`、`OPENAI_API_KEY` を設定する。実機検証ではサブタスクごとの待ち時間を `TASK_SUBTASK_TIMEOUT_SECONDS=180` に設定した。
+
+Ollamaを使う場合は、Ollamaを動かす環境で `ollama pull qwen2.5vl:3b` を実行し、アプリの `.env` に `LLM_PROVIDER=ollama` を設定する。別の画像対応モデルを使う場合は、取得したモデル名を `LLM_MODEL` に指定する。
+
+`OLLAMA_BASE_URL` には、バックエンドから接続できるOllamaのURLを `/v1` まで指定する。たとえば同じCompose管理ネットワークに `ollama` というサービスがある場合は `http://ollama:11434/v1` を使う。省略時の `http://localhost:11434/v1` はバックエンド自身を指す。
 
 ## 実行上限を変える
 
@@ -70,6 +75,7 @@ Ollamaの既定接続先 `http://localhost:11434/v1` はバックエンドコン
 | --- | --- |
 | `TASK_MAX_SECONDS` | 1800秒 |
 | `TASK_REQUEST_TIMEOUT_SECONDS` | 1送信の応答待ち120秒 |
+| `TASK_SUBTASK_TIMEOUT_SECONDS` | サブタスクごとに60秒 |
 | `TASK_MAX_REQUESTS` | 500送信 |
 | `TASK_MAX_TOKENS` | 入出力合計100000トークン |
 

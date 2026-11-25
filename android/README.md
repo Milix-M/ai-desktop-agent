@@ -8,7 +8,8 @@ Android-x86のISO（約1 GB）を `android/android-x86_64.iso` に置く。次�
 
 ```bash
 curl -L -o android/android-x86_64.iso \
-  https://archive.org/download/android-x86_64-9.0-r2/android-x86_64-9.0-r2.iso
+  https://downloads.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso
+printf '%s  %s\n' f7eb8fc56f29ad5432335dc054183acf086c539f3990f0b6e9ff58bd6df4604e android/android-x86_64.iso | sha256sum -c -
 ```
 
 ## 起動用ファイルを取り出す
@@ -19,9 +20,30 @@ ISOから `android/kernel` と `android/initrd.img` を取り出す。スクリ�
 python3 scripts/extract-android-kernel.py
 ```
 
+## 永続データを準備する
+
+固定Androidを初めて使うときは、リポジトリのルートで次のコマンドを実行する。`android/android-data.img` に設定とファイルを保存する。既存のイメージを使う場合はこの手順を省く。
+
+```bash
+./scripts/mk-android-data.sh
+```
+
+旧版で `android/android-data.img` がディレクトリになっている場合は、**コンテナを再作成する前に**次の手順で保存内容を取り出す。先にAndroid上の作業を保存して終了する。
+
+```bash
+docker compose --profile kvm stop android
+docker compose --profile kvm cp android:/android/data-local.img ./android/recovered-data.img
+# コピーに成功し、ext4と表示されることを確認する
+file ./android/recovered-data.img
+rmdir ./android/android-data.img
+mv -T ./android/recovered-data.img ./android/android-data.img
+```
+
+コピーに失敗した場合は旧コンテナとディレクトリを保持し、保存場所を確認する。
+
 ## 起動する
 
-[アプリの初期設定](../README.md#起動する)を済ませ、`.env` の `USE_KVM` が `false` なら `auto` に戻す。Androidは通常の起動対象に含まれないため、固定の `android` サービスを追加で起動する。コンテナを作り直しても固定環境のデータを残すには、起動前に `./scripts/mk-android-data.sh` でホストに保存用イメージを作る。
+[アプリの初期設定](../README.md#起動する)を済ませ、`.env` の `USE_KVM` が `false` なら `auto` に戻す。Androidは通常の起動対象に含まれないため、固定の `android` サービスを追加で起動する。固定環境では事前に用意したデータディスクを使う。
 
 ```bash
 ./scripts/up.sh
@@ -39,6 +61,8 @@ docker compose --profile kvm up -d android
 ## 初期設定を確認する
 
 バックエンドは起動したAndroidをADBで検出し、ホームアプリ、タイムゾーン（`Asia/Tokyo`）、スリープ設定を適用する。通信には既定でEthernetのDHCPを使う。ADBに接続できない場合は次の巡回で再試行する。タスク開始や環境の停止・起動・削除があると設定を中断し、未完の設定を改めて試す。自動設定を無効にするには `ANDROID_PROVISION=0` を指定する。
+
+旧版で初期設定を済ませた端末では、［設定］→［システム］→［日付と時刻］でタイムゾーンの自動設定をオフにし、日本（東京）を選ぶ。
 
 設定記録は既定で `data/android-provision.json` に保存する。固定ディスクはUUIDで識別し、ディスクを使わない構成と動的環境ではコンテナIDを使う。識別子が変わると再設定する。設定記録の破損を検出すると、元のファイルを残して設定を止める。バックアップから記録を復元する。
 

@@ -115,7 +115,7 @@ flowchart LR
 | 環境 | 起動と保存 |
 | --- | --- |
 | 固定 `desktop`、追加コンテナ | XfceとTigerVNC。KVM不要。固定環境と新しい追加環境は環境専用ボリュームに `/home/agent` を保存する |
-| 固定 `vm`、追加QEMU | QEMUとKVMでKDEを起動する。固定は `vm/instances/default.qcow2`、新しい追加VMは `vm/overlays/環境ID/disk.qcow2` に独立したディスクを持つ |
+| 固定 `vm`、追加QEMU | QEMUとKVMでKDEを起動する。ゲスト作成時にMozillaの署名付きAPTリポジトリからFirefoxを導入する。固定は `vm/instances/default.qcow2`、新しい追加VMは `vm/overlays/環境ID/disk.qcow2` に独立したディスクを持つ |
 | 固定 `android`、追加Android | QEMUでAndroid-x86を起動する。[Androidの準備と保存先](../android/README.md)を参照する |
 
 [VmPool](../src/ai_desktop_agent/server/vm_pool.py) は動的環境を全種別合計8台まで払い出す。固定環境は停止・削除後も保存先を残す。追加VM・Androidの保存先を自動検出できない場合は、ホスト上のリポジトリの絶対パスを `VM_HOST_DIR` に、ISOの絶対パスを `ANDROID_ISO_HOST` に指定する。追加VMで実行イメージの更新が必要なら `./scripts/up.sh` を実行する。`VM_IMAGE_REF` を指定している場合は対応するイメージへ更新する。

@@ -60,7 +60,10 @@ class TestSetupTimezone:
             return True
 
         assert android_adb.setup_timezone("android:5555", runner=runner) is True
-        assert any("persist.sys.timezone" in " ".join(a) for a in calls)
+        assert calls == [
+            ("shell", "settings", "put", "global", "auto_time_zone", "0"),
+            ("shell", "cmd", "alarm", "set-timezone", "Asia/Tokyo"),
+        ]
 
 
 class TestSetupWifi:

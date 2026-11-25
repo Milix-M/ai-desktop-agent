@@ -57,6 +57,7 @@ async def llm_with_transport(handler):
         ("TASK_MAX_SECONDS", "0"),
         ("TASK_MAX_SECONDS", "nan"),
         ("TASK_REQUEST_TIMEOUT_SECONDS", "inf"),
+        ("TASK_SUBTASK_TIMEOUT_SECONDS", "-1"),
         ("TASK_MAX_REQUESTS", "-1"),
         ("TASK_MAX_REQUESTS", "1.5"),
         ("TASK_MAX_TOKENS", ""),
@@ -404,3 +405,12 @@ async def test_malformed_success_response_cannot_trigger_unmetered_retries():
         assert len(sent) == 1 and budget.snapshot()["usage_complete"] is False
     finally:
         await llm.aclose()
+
+
+async def test_subtasks_use_the_active_default_and_keep_explicit_timeouts(monkeypatch):
+    monkeypatch.setenv("TASK_SUBTASK_TIMEOUT_SECONDS", "720")
+    budget = TaskBudget(ExecutionLimits.from_env())
+    async with budget.activate(lambda: None):
+        assert Subtask("first", "slow model").timeout_seconds == 720
+        assert Subtask("second", "bounded", timeout_seconds=10).timeout_seconds == 10
+    assert Subtask("outside", "standard default").timeout_seconds == 60

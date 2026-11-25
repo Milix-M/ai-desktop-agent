@@ -5,10 +5,12 @@ import tarfile
 import threading
 import uuid
 import zipfile
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from requests.exceptions import ReadTimeout
 
 from ai_desktop_agent.actions.primitives import Action, ActionType
 from ai_desktop_agent.agent.budget import ExecutionLimits
@@ -362,6 +364,51 @@ async def test_cancelling_during_allocation_cleans_up_the_container_created_afte
     container.remove.assert_called_once_with(force=True)
     client.networks.create.return_value.remove.assert_called_once()
     assert json.loads((tmp_path / "result.json").read_text())["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("kind", ["container", "network"])
+async def test_daemon_can_publish_a_resource_after_allocation_times_out(
+    environment, tmp_path, kind
+):
+    client, _ = environment
+    client.api.timeout = 15
+    collection = client.containers if kind == "container" else client.networks
+    allocate = collection.run if kind == "container" else collection.create
+    owned = allocate.return_value
+
+    def timeout(*args, **kwargs):
+        assert client.api.timeout == 60
+        raise ReadTimeout("daemon response timed out")
+
+    allocate.side_effect = timeout
+    collection.list.side_effect = [[], [owned]]
+    result = {"attempt_id": "late-attempt", "status": "running"}
+    await desktop.run_attempt(
+        client, "image-id", CASES[0], MockLLMProvider(), ExecutionLimits(), tmp_path, result
+    )
+    assert result["status"] == "setup_error" and "cleanup_errors" not in result
+    assert client.api.timeout == 15
+    assert collection.list.call_count == 2
+    for call in collection.list.call_args_list:
+        assert call.kwargs["filters"] == {"label": "ai-desktop-agent.evaluation=late-attempt"}
+    owned.remove.assert_called_once_with(**({"force": True} if kind == "container" else {}))
+
+
+async def test_uncertain_allocation_is_reported_if_ownership_cannot_be_confirmed(
+    environment, tmp_path, monkeypatch
+):
+    client, _ = environment
+    client.containers.run.side_effect = ReadTimeout("read timed out")
+    client.containers.list.return_value = []
+    clock = Mock(wraps=desktop.time)
+    clock.monotonic.side_effect = count(step=31).__next__
+    monkeypatch.setattr(desktop, "time", clock)
+    result = {"attempt_id": "unconfirmed", "status": "running"}
+    await desktop.run_attempt(
+        client, "image-id", CASES[0], MockLLMProvider(), ExecutionLimits(), tmp_path, result
+    )
+    assert "ai-desktop-agent.evaluation=unconfirmed" in result["cleanup_errors"][0]
+    client.networks.create.return_value.remove.assert_called_once()
 
 
 def test_missing_model_configuration_fails_before_starting_docker(tmp_path, monkeypatch):

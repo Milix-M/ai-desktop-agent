@@ -142,6 +142,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   const latestSessionOrder = useRef(0);
   const generation = useRef(new ServerGeneration());
   const deletedTaskIds = useRef(new Set<string>());
+  const unconfirmedDeletion = useRef<string | null>(null);
   const mounted = useRef(true);
   const creationController = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -299,7 +300,14 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
     const serverVersion = generation.current.version;
     try {
       const items = await getTaskHistory();
-      if (mounted.current && requestVersion === historyLoadVersion.current && serverVersion === generation.current.version) setHistory(items);
+      if (!mounted.current || requestVersion !== historyLoadVersion.current || serverVersion !== generation.current.version) return;
+      // Keep the retry button when the server deleted the record but its reply was lost.
+      const retryId = unconfirmedDeletion.current;
+      setHistory(previous => {
+        if (!retryId || items.some(item => item.id === retryId)) return items;
+        const retryItem = previous.find(item => item.id === retryId);
+        return retryItem ? [...items, retryItem] : items;
+      });
     } catch {
       // 履歴なしでも継続
     }
@@ -328,6 +336,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
     const result = generation.current.accept(serverId, startedAt);
     if (result === "reset") {
       deletedTaskIds.current.clear();
+      unconfirmedDeletion.current = null;
       setStatusSynchronized(false);
       latestSessionOrder.current = 0;
       initialSnapshotSeen.current = false;
@@ -776,6 +785,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
               restoreVersion.current++;
               historyLoadVersion.current++;
               if (detailRequestId.current === taskId) selectionVersion.current++;
+              unconfirmedDeletion.current = taskId;
               try {
                 await deleteTask(taskId);
               } catch (error) {
@@ -785,6 +795,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
                 }
               }
               if (!mounted.current || generation.current.version !== serverVersion) return;
+              unconfirmedDeletion.current = null;
               deletedTaskIds.current.add(taskId);
               historyLoadVersion.current++;
               if (detailRequestId.current === taskId) {

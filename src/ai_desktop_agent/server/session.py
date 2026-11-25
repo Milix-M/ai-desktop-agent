@@ -304,6 +304,8 @@ class TaskSession:
         else:
             self._budget.set_subtask(subtask.id, subtask.timeout_seconds, subtask.description)
         await self._persist()
+        if self.loop.state == AgentState.UNDERSTANDING:
+            self._started.set()
         if not self.loop.is_done:
             await self._notify(self._on_state_change, self.loop.state, self.loop.context)
 
@@ -400,7 +402,6 @@ class TaskSession:
         except StorageError as error:
             self._startup_error = error
             raise
-        self._started.set()
         understanding, decomposition = await self.llm.initial_plan(goal, platform=self._platform())
         self._budget.check()
         goal.intent = understanding.intent
@@ -446,8 +447,15 @@ class TaskSession:
                 asyncio.create_task(self._persist(success=False, final_failure=True)),
                 ignore_cancellation=True,
             )
-        except StorageError:
+        except StorageError as error:
+            if not self._started.is_set() and self._startup_error is None:
+                self._startup_error = error
             logger.exception("失敗状態の保存もできませんでした")
+        else:
+            # A deadline can interrupt the initial save. Once the failure is durable,
+            # its observers may wait for the admission response without a deadlock.
+            if self._startup_error is None:
+                self._started.set()
         # A failed disk must not prevent the UI from receiving the terminal state.
         await self._notify_terminal(False, error_message)
 

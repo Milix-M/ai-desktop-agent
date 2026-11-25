@@ -12,20 +12,19 @@ cd "$(dirname "$0")/.."
 SIZE_MB="${1:-1024}"
 IMG="android/android-data.img"
 
-if [ -d "$IMG" ]; then
-    # composeのvolumeマウントが空ディレクトリを作っていた場合の救済
-    rmdir "$IMG" 2>/dev/null || {
-        echo "ERROR: $IMG が空でないディレクトリです。手動で確認してください"
-        exit 1
-    }
+if [[ ! "$SIZE_MB" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: サイズは正の整数（MiB）で指定してください" >&2
+    exit 1
 fi
-if [ -e "$IMG" ]; then
-    echo "ERROR: $IMG は既に存在します（作り直す場合は削除してから実行）"
+if [ -e "$IMG" ] || [ -L "$IMG" ]; then
+    echo "ERROR: $IMG は既に存在します。既存の保存内容を確認してください" >&2
     exit 1
 fi
 
-# 通常ファイルへのmkfsはroot不要
-mkfs.ext4 -L android-data -F "$IMG" "${SIZE_MB}M"
+# Publish only a complete filesystem. Concurrent initializations cannot replace it.
+tmp=$(mktemp "$(dirname "$IMG")/.android-data.XXXXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+truncate -s "${SIZE_MB}M" "$tmp"
+mkfs.ext4 -q -L android-data -F "$tmp"
+ln -T -- "$tmp" "$IMG"
 ls -lh "$IMG"
-echo "作成しました。次回起動から /data としてマウントされます。"
-echo "初回はエージェント等でタイムゾーン・ランチャー既定を設定してください。"

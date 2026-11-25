@@ -2,6 +2,7 @@ name: CI
 
 # develop・PR・週次で実行
 on:
+  workflow_dispatch:
   push:
     branches: [develop]
   pull_request:
@@ -91,6 +92,26 @@ jobs:
 
       - name: Run tests with coverage
         run: uv run --frozen --extra mcp pytest -m 'not desktop_integration' --cov=ai_desktop_agent --cov-branch --cov-report=xml --cov-report=term-missing tests/
+
+      - name: Build and verify Python distributions
+        run: |
+          uv build --out-dir "$RUNNER_TEMP/python-dist"
+          python - <<'PYTHON'
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          dist = Path(os.environ["RUNNER_TEMP"]) / "python-dist"
+          with tarfile.open(next(dist.glob("*.tar.gz"))) as archive:
+              roots = {PurePosixPath(name).parts[1] for name in archive.getnames()
+                       if len(PurePosixPath(name).parts) > 1}
+          assert {"src", "LICENSE", "README.md", "pyproject.toml"} <= roots
+          assert roots <= {"src", "LICENSE", "README.md", "pyproject.toml", "PKG-INFO", ".gitignore"}, roots
+          with zipfile.ZipFile(next(dist.glob("*.whl"))) as wheel:
+              assert "ai_desktop_agent/server/app.py" in wheel.namelist()
+              assert any(name.endswith(".dist-info/licenses/LICENSE") for name in wheel.namelist())
+          PYTHON
 
       - name: Upload coverage to artifact
         uses: actions/upload-artifact@v4
@@ -233,8 +254,8 @@ jobs:
           COMPOSE_TEST_DIR: ${{ runner.temp }}/agent-compose
         run: |
           mkdir -p "$COMPOSE_TEST_DIR/cli-plugins"
-          curl -fsSL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64 -o "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
-          curl -fsSL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64.sha256 -o "$COMPOSE_TEST_DIR/checksum"
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.34.0/docker-compose-linux-x86_64 -o "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.34.0/docker-compose-linux-x86_64.sha256 -o "$COMPOSE_TEST_DIR/checksum"
           digest="$(awk '{print $1}' "$COMPOSE_TEST_DIR/checksum")"
           printf '%s  %s\n' "$digest" "$COMPOSE_TEST_DIR/cli-plugins/docker-compose" | sha256sum --check --status
           chmod +x "$COMPOSE_TEST_DIR/cli-plugins/docker-compose"
