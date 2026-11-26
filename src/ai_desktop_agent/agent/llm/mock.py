@@ -83,6 +83,7 @@ class MockLLMProvider(LLMProvider):
         is_zoomed: bool = False,
         zoom_origin: tuple[int, int] | None = None,
         zoom_scale: float = 1.0,
+        targets: list[dict] | None = None,
         platform: str = "linux",
     ) -> ActionDecision:
         self._decide_calls.append((goal, current_subtask, len(action_history)))

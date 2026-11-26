@@ -119,10 +119,10 @@ function post(body?: object): RequestInit {
     : { method: "POST" };
 }
 
-export async function createTask(instruction: string, vmId?: string | null, allowVmRestart?: boolean, requestId?: string): Promise<TaskStatus> {
+export async function createTask(instruction: string, vmId?: string | null, allowVmRestart?: boolean, requestId?: string, workspace?: string): Promise<TaskStatus> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
-  const init = post({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false });
+  const init = post({ instruction, vm_id: vmId ?? null, allow_vm_restart: allowVmRestart ?? false, ...(workspace ? { workspace } : {}) });
   if (requestId) init.headers = { ...init.headers, "Idempotency-Key": requestId };
   try {
     return parseTaskStatus(await request<unknown>("/tasks", { ...init, signal: controller.signal }), vmId);

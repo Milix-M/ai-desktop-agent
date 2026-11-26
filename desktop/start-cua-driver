@@ -1,0 +1,14 @@
+#!/bin/sh
+# docker exec does not inherit the D-Bus address of the running Xfce session.
+set -eu
+export DISPLAY=:0 XAUTHORITY=/home/agent/.Xauthority CUA_DRIVER_TELEMETRY_DISABLED=1
+pid=$(pgrep -o -u agent -x xfwm4)
+address=$(tr '\000' '\n' < "/proc/$pid/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+case "$address" in unix:*) export DBUS_SESSION_BUS_ADDRESS="$address" ;; *) exit 1 ;; esac
+if [ "${0##*/}" = read-gui-tables ]; then
+    exec timeout -k 1 5 /usr/bin/python3 /usr/local/lib/ai-desktop-agent/read-tables.py "$@"
+fi
+if [ "${0##*/}" = start-calc-cells ]; then
+    exec timeout -k 1 40 /usr/bin/python3 /usr/local/lib/ai-desktop-agent/calc-cells.py
+fi
+exec "$HOME/.local/share/ai-desktop-agent/cua-driver-0.54.0" mcp --direct

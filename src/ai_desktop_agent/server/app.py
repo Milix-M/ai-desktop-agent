@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -70,7 +71,7 @@ from ai_desktop_agent.server.vm_creations import (
     VmCreationService,
 )
 from ai_desktop_agent.server.vm_locks import AsyncKeyedLocks
-from ai_desktop_agent.server.vm_pool import VmPool
+from ai_desktop_agent.server.vm_pool import KIND_CONTAINER, VmPool
 from ai_desktop_agent.server.webhook import TaskWebhook, open_task_webhook
 from ai_desktop_agent.server.websocket_io import close_websocket
 from ai_desktop_agent.server.workspaces import IDENTIFIER_PATTERN
@@ -382,6 +383,7 @@ class CreateTaskRequest(BaseModel):
     vm_id: str | None = None  # 省略時は稼働中の既定VM
     allow_vm_restart: bool = False  # エージェント判断でのVM再起動を許可
     replace_running: bool = True
+    workspace: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class TaskStatus(BaseModel):
@@ -430,6 +432,7 @@ class VmInfoModel(BaseModel):
     managed: bool = True
     kind: str = "qemu"
     adb_port: int = 0
+    workspace_tools: bool = False
 
 
 VmId = Annotated[str, StringConstraints(pattern=rf"^{IDENTIFIER_PATTERN}$")]
@@ -586,6 +589,8 @@ async def _submission_claim(key: str, req: CreateTaskRequest):
     def acquire():
         nonlocal claim
         payload = req.model_dump()
+        if req.workspace is None:
+            del payload["workspace"]
         if req.replace_running:
             # Preserve fingerprints written before replacement was configurable.
             del payload["replace_running"]
@@ -635,18 +640,54 @@ async def _start_task_on_vm(req, vm, claim: SubmissionClaim | None = None):
     display = None
     session = None
 
+    hybrid = (
+        os.environ.get("CUA_DRIVER_ENABLED", "").lower() == "true" and vm.kind == KIND_CONTAINER
+    )
+    container_id = None
+    if req.workspace is not None and (
+        not hybrid
+        or any(
+            not part or part in {".", ".."} or any(ord(c) < 32 for c in part)
+            for part in req.workspace.split("/")
+        )
+    ):
+        raise HTTPException(status_code=422, detail="Documents内の作業フォルダーを指定してください")
+
     def connect():
-        nonlocal display
+        nonlocal display, container_id
+        if hybrid:
+            container_id = get_pool().instance_id(vm.id)
         display = _connect_vm_display(vm)
+
+    scoped_driver = None
 
     def create():
         nonlocal session
         session = _create_session(display)
+        if container_id and get_pool().instance_id(vm.id) == container_id:
+            from ai_desktop_agent.vm.cua import CuaDesktop
+
+            session.executor.cua = scoped_driver or CuaDesktop(container_id)
+        elif req.workspace is not None:
+            raise HTTPException(status_code=409, detail="対象の環境が変更されました")
 
     try:
         # Keep ownership even if cancellation discards the worker's return value.
         # run_display_call drains the worker before this scope releases anything.
         await run_display_call(connect)
+        if req.workspace is not None:
+            from ai_desktop_agent.vm.cua import CuaDesktop, DriverError
+
+            if not container_id:
+                raise HTTPException(status_code=409, detail="対象のコンテナを確認できません")
+            scoped_driver = CuaDesktop(container_id)
+            try:
+                await scoped_driver.select_workspace(req.workspace)
+            except (DriverError, ValueError, TimeoutError, OSError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="指定フォルダーを開けません。場所とファイル数を確認してください",
+                ) from exc
         # The running task may start a manual handoff while VNC is connecting.
         _check_task_replacement(previous)
         for running in previous:
@@ -760,7 +801,11 @@ async def list_vms() -> list[VmInfoModel]:
 
     try:
         await run_vm_call(get_pool().isolate_environments)
-        return [VmInfoModel(**v.to_dict()) for v in await run_vm_call(get_pool().list_vms)]
+        enabled = os.environ.get("CUA_DRIVER_ENABLED", "").lower() == "true"
+        return [
+            VmInfoModel(**v.to_dict(), workspace_tools=enabled and v.kind == KIND_CONTAINER)
+            for v in await run_vm_call(get_pool().list_vms)
+        ]
     except DockerUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 

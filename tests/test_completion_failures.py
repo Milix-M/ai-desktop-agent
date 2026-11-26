@@ -129,9 +129,10 @@ async def test_verification_failure_is_not_restarted_after_provider_exhaustion_a
     )
 
 
+@pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("eventual_success", [False, True])
 async def test_a_valid_negative_verdict_retains_bounded_recovery_and_can_later_complete(
-    tmp_path, eventual_success, session_retry_sleep
+    tmp_path, eventual_success, hybrid, session_retry_sleep
 ):
     requests = []
 
@@ -151,8 +152,15 @@ async def test_a_valid_negative_verdict_retains_bounded_recovery_and_can_later_c
     script_pre_verification(provider)
     store = TaskStore(tmp_path)
     session = TaskSession(llm=provider, display=FakeDisplayBackend(), store=store, decision=None)
+    if hybrid:
+        session.executor.cua = SimpleNamespace(
+            disabled=False,
+            observe=AsyncMock(return_value=[]),
+            invalidate=lambda: None,
+            aclose=AsyncMock(),
+        )
     assert await session.run("inspect the visible result") is eventual_success
-    assert provider.recover_from_error.await_count == 1 and len(requests) == 2
+    assert provider.recover_from_error.await_count == (0 if hybrid else 1) and len(requests) == 2
     record = store.load(session.id)
     assert record.state == ("completed" if eventual_success else "failed")
     assert record.stop_reason == (None if eventual_success else "verification_failed")
@@ -342,3 +350,53 @@ async def test_verification_request_timeout_stops_the_sdk_call_without_restartin
     record = session._store.load(session.id)
     assert len(calls) == 1 and record.stop_reason == "request_timeout"
     assert record.error_message and provider.recover_from_error.await_count == 0
+
+
+def test_successful_background_actions_do_not_require_a_repaint(tmp_path):
+    import hashlib
+
+    from ai_desktop_agent.agent.state import ActionRecord
+    from ai_desktop_agent.vm.screenshot import Screenshot
+
+    session = TaskSession(
+        llm=MockLLMProvider(),
+        display=FakeDisplayBackend(),
+        store=TaskStore(tmp_path),
+        decision=None,
+    )
+    image = Screenshot(b"same frame", 20, 20)
+    session._prev_turn_hash = hashlib.sha256(image.image_bytes).hexdigest()
+    session.loop.context.action_history.append(
+        ActionRecord(Action(ActionType.NOTE_READ, {"title": "progress"}), True)
+    )
+    assert not session._is_screen_unchanged(image)
+    session.loop.context.action_history.append(
+        ActionRecord(Action(ActionType.LEFT_CLICK, {"x": 4, "y": 4}), True)
+    )
+    assert session._is_screen_unchanged(image)
+
+
+async def test_invalid_workspace_batch_is_corrected_before_dispatch(tmp_path):
+    from ai_desktop_agent.actions.primitives import WorkspaceBatchError
+    from ai_desktop_agent.agent.state import Goal
+    from ai_desktop_agent.vm.screenshot import Screenshot
+
+    provider = MockLLMProvider()
+    provider.decide_next_action = AsyncMock(
+        side_effect=[
+            WorkspaceBatchError("duplicate source"),
+            ActionDecision(Action(ActionType.WAIT, {"seconds": 0}), "", 1.0, ""),
+        ]
+    )
+    session = TaskSession(
+        llm=provider, display=FakeDisplayBackend(), store=TaskStore(tmp_path), decision=None
+    )
+    goal = Goal(description="File the documents")
+    session.loop.start(goal)
+    result = await session._decide_action(Subtask("s1", "inspect"), Screenshot(b"frame", 20, 20))
+    assert result.action.action_type == ActionType.WAIT
+    assert (
+        "duplicate source" in provider.decide_next_action.await_args.kwargs["goal"].constraints[-1]
+    )
+    assert not goal.constraints
+    assert not session.loop.context.action_history

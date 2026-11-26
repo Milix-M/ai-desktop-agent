@@ -86,7 +86,10 @@ class ActionDecision:
 
     working_note: str = ""  # 空文字なら既存のメモを維持する
 
+    gui_evidence: str = ""  # 完了判定時に実行器が提供する読み戻し記録
+
     def __post_init__(self) -> None:
+        validate_text(self.gui_evidence, "gui_evidence")
         if not isinstance(self.action, Action):
             raise ValueError("actionはActionで指定してください")
         validate_text(self.expected_effect, "expected_effect")

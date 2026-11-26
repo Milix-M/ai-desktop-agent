@@ -1,7 +1,8 @@
 # 軽量コンテナ実行環境（QEMU不要のVNCデスクトップ）
 # QEMU VM (vm サービス) の代替となる既定の作業環境。
 # Xfce + TigerVNC で、backend は通常のVNCクライアントで操作する。
-FROM ubuntu:24.04
+ARG CUA_DRIVER_ENABLED=false
+FROM ubuntu:24.04 AS desktop-false
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8
@@ -29,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mousepad \
     tigervnc-standalone-server \
     tigervnc-common \
+    at-spi2-core \
     dbus-x11 \
     x11-xserver-utils \
     firefox \
@@ -53,6 +55,10 @@ RUN mkdir -p /home/agent/.vnc \
     && chmod +x /home/agent/.vnc/xstartup \
     && chown -R agent:agent /home/agent/.vnc
 
+COPY licenses/Cua-Driver-MIT.txt /usr/share/doc/ai-desktop-agent/Cua-Driver-MIT.txt
+COPY --chmod=755 install-cua-driver start-cua-driver /usr/local/bin/
+ENV NO_AT_BRIDGE=0
+
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -64,3 +70,14 @@ HEALTHCHECK --interval=10s --retries=10 --timeout=3s --start-period=30s \
     CMD nc -z localhost 5900 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+# Calc exposes its native controls through AT-SPI when using the GTK VCL plugin.
+FROM desktop-false AS desktop-true
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-gtk3 python3-gi gir1.2-atspi-2.0 \
+    && rm -rf /var/lib/apt/lists/*
+COPY calc-cells.py read-tables.py workspace-files.py /usr/local/lib/ai-desktop-agent/
+RUN ln -s /usr/local/bin/start-cua-driver /usr/local/bin/start-calc-cells \
+    && ln -s /usr/local/bin/start-cua-driver /usr/local/bin/read-gui-tables
+ENV SAL_USE_VCLPLUGIN=gtk3 SAL_FORCE_ACCESSIBILITY=1
+
+FROM desktop-${CUA_DRIVER_ENABLED} AS runtime

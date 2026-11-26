@@ -6,6 +6,7 @@ WORKDIR /app
 ARG PACKAGE_REFRESH=manual
 RUN : "$PACKAGE_REFRESH" && apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
+    docker-cli \
     android-tools-adb \
     && rm -rf /var/lib/apt/lists/*
 

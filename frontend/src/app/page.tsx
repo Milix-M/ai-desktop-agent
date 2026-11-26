@@ -558,11 +558,11 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
   }, [addLog, selectedVmId, updateView]);
 
   const handleSubmit = useCallback(
-    async (instruction: string, allowVmRestart: boolean, requestId: string) => {
+    async (instruction: string, allowVmRestart: boolean, requestId: string, workspace?: string) => {
       const vmId = selectedVmId;
       const serverVersion = generation.current.version;
       try {
-        const result = await createTask(instruction, vmId, allowVmRestart, requestId);
+        const result = await createTask(instruction, vmId, allowVmRestart, requestId, ...(workspace ? [workspace] : []));
         if (acceptServer(result.server_id, serverVersion) === "ignored") {
           throw new Error("接続先の更新により受付結果を確認できません。同じ内容で再送してください");
         }
@@ -748,6 +748,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             initialValue={draft.current}
             onDraftChange={(value) => { draft.current = value; }}
             vmId={selectedVmId}
+            allowWorkspace={selectedVm?.workspace_tools}
             submission={submission}
           />
 

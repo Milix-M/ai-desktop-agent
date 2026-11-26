@@ -11,6 +11,7 @@ from enum import StrEnum
 
 from ai_desktop_agent.actions.primitives import Action
 from ai_desktop_agent.agent.budget import default_subtask_timeout
+from ai_desktop_agent.agent.notebook import TaskNotebook
 from ai_desktop_agent.validation import validate_text
 
 
@@ -146,6 +147,34 @@ class Goal:
     constraints: list[str] = field(default_factory=list)
     expected_output: str = ""
     working_note: str = ""  # このタスクの画面で読み取り、後続操作で使う値
+    window_notes: list[str] = field(default_factory=list)
+    table_context: str = ""
+    calc_note: str = ""
+    notebook: TaskNotebook = field(default_factory=TaskNotebook)
+    completed_steps: list[str] = field(default_factory=list)
+
+    def note_before_switch(self):
+        if self.working_note and self.working_note not in self.window_notes:
+            # Retain the first source and the two most recent handoffs.
+            self.window_notes.append(self.working_note[:400])
+            if len(self.window_notes) > 3:
+                del self.window_notes[1]
+
+    def reading_notes(self):
+        return "\n".join(
+            dict.fromkeys(
+                note
+                for note in [
+                    *self.window_notes,
+                    self.working_note,
+                    self.calc_note,
+                    self.table_context,
+                    self.notebook.context(),
+                    "\n".join(self.completed_steps[-12:]),
+                ]
+                if note
+            )
+        )
 
 
 @dataclass

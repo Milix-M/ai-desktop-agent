@@ -272,3 +272,11 @@ it("a fresh page reuses the persisted identity and requires an explicit new exec
   await vi.waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(""));
   expect(onSubmit.mock.calls[2][2]).not.toBe(onSubmit.mock.calls[0][2]);
 });
+
+it("submits the explicitly selected folder with the task", async () => {
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  render(<InstructionInput onSubmit={onSubmit} disabled={false} allowWorkspace initialValue="仕分け" />);
+  fireEvent.change(screen.getByLabelText("Documents 内の対象フォルダー"), { target: { value: "April" } });
+  fireEvent.click(screen.getByRole("button", { name: "実行" }));
+  await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("仕分け", false, expect.any(String), "April"));
+});

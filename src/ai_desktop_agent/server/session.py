@@ -22,7 +22,13 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from ai_desktop_agent.actions.executor import ActionExecutor
-from ai_desktop_agent.actions.primitives import CLICK_ACTIONS, Action, ActionType
+from ai_desktop_agent.actions.primitives import (
+    CLICK_ACTIONS,
+    CUA_ACTIONS,
+    Action,
+    ActionType,
+    WorkspaceBatchError,
+)
 from ai_desktop_agent.agent.budget import ExecutionLimits, TaskBudget, TaskLimitError
 from ai_desktop_agent.agent.decision.provider import (
     DecisionProvider,
@@ -117,6 +123,16 @@ EMPTY_RETRY_SHORT_ATTEMPTS = 2  # 前ターンも失敗時の試行上限（障�
 
 
 RESTART_SETTLE_SECONDS = 60.0  # VM再起動後の起動待ち秒数
+# These actions return data or an executor receipt without requiring a repaint.
+NONVISUAL_ACTIONS = {
+    ActionType.NOTE_SAVE,
+    ActionType.NOTE_READ,
+    ActionType.SOURCE_READ,
+    ActionType.TABLE_QUERY,
+    ActionType.WORKSPACE_READ,
+    ActionType.WORKSPACE_MOVE,
+    ActionType.SUBTASK_COMPLETE,
+}
 STUCK_REPEAT_COUNT = 3  # 同一アクション連続とみなす回数
 STUCK_WAIT_SECONDS = 2.0  # 足踏み検出時の待機秒数
 SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
@@ -124,8 +140,14 @@ SETTLE_TIMEOUT = 5.0  # 画面安定待ちの上限秒数
 ANDROID_WAKE_HOLD_SECONDS = 1.1
 
 # 画面を変える可能性のあるアクション（実行後に安定待ちする）
+SCREEN_CLICK_ACTIONS = CLICK_ACTIONS | {ActionType.ELEMENT_CLICK}
 VISUAL_ACTIONS: frozenset = frozenset(
     {
+        ActionType.ELEMENT_CLICK,
+        ActionType.FOCUS_WINDOW,
+        ActionType.CALC_WRITE,
+        ActionType.TABLE_FILL,
+        ActionType.TABLE_TYPE,
         ActionType.LEFT_CLICK,
         ActionType.RIGHT_CLICK,
         ActionType.MIDDLE_CLICK,
@@ -216,6 +238,7 @@ class TaskSession:
         # サブタスクごとの検証失敗回数
         self._verify_failures: dict[str, int] = {}
         # 回復・再決定に引き継ぐエラー情報
+        self._previous_table_scroll = None
         self._pending_error: ErrorContext | None = None
         # 前ターンの画面ハッシュ（無変化検出用）
         self._prev_turn_hash: str | None = None
@@ -488,7 +511,7 @@ class TaskSession:
             await asyncio.to_thread(self.display.disconnect)
         except Exception:
             logger.exception("VNC接続の解放に失敗")
-        for provider in (self.llm, self.decision):
+        for provider in (self.executor.cua, self.llm, self.decision):
             close = getattr(provider, "aclose", None)
             if callable(close):
                 try:
@@ -580,6 +603,8 @@ class TaskSession:
                     "intent": goal.intent,
                     "target_application": goal.target_application,
                     "constraints": list(goal.constraints),
+                    "notes": dict(goal.notebook.entries),
+                    "completed_steps": list(goal.completed_steps),
                 }
                 if goal
                 else {}
@@ -699,6 +724,8 @@ class TaskSession:
             or low_confidence
             or self._is_repeat_click(decision.action)
         ):
+            if self.executor.cua is not None:
+                self.executor.cua.invalidate()
             original = decision
             region = (
                 decision
@@ -719,6 +746,9 @@ class TaskSession:
                 await self._emit_error(self._pending_error.error_message)
                 await self._emit_state_change()
                 return
+
+        if self.executor.cua is not None and decision.action.action_type not in CUA_ACTIONS:
+            self.executor.cua.invalidate()
 
         # A zoom response can choose a session-only action too. Apply the same
         # restart permission and audit path after every decision source.
@@ -757,7 +787,7 @@ class TaskSession:
             capture_raw = getattr(self.display, "capture_raw", None)
             self._last_before_raw = (
                 await run_display_call(capture_raw)
-                if action.action_type in CLICK_ACTIONS and callable(capture_raw)
+                if action.action_type in SCREEN_CLICK_ACTIONS and callable(capture_raw)
                 else None
             )
         except Exception:
@@ -777,9 +807,12 @@ class TaskSession:
         # 低速VMでの早すぎる再観測（＝同じ操作の繰返し原因）を防ぐ。
         if action.action_type in VISUAL_ACTIONS:
             settled = await self.executor.wait_for_still(SETTLE_TIMEOUT)
-            if action.action_type in CLICK_ACTIONS:
+            if action.action_type in SCREEN_CLICK_ACTIONS:
                 self._settled_click = settled
-        elif action.action_type in (ActionType.WAIT, ActionType.MOUSE_MOVE):
+        elif action.action_type in NONVISUAL_ACTIONS or action.action_type in (
+            ActionType.WAIT,
+            ActionType.MOUSE_MOVE,
+        ):
             # 待機自体が待機・移動は画面を変えないため追加待機なし
             pass
         else:
@@ -810,12 +843,28 @@ class TaskSession:
             raise StorageError(self._storage_error)
         self._budget.check()
         started = time.monotonic()
+        note_error = ""
         try:
-            if action.action_type == ActionType.REQUEST_USER_INPUT:
+            if action.action_type in (ActionType.NOTE_SAVE, ActionType.NOTE_READ):
+                notebook = self.loop.context.goal.notebook
+                try:
+                    if action.action_type == ActionType.NOTE_SAVE:
+                        notebook.save(**action.params)
+                    else:
+                        notebook.recall(action.params["title"].strip())
+                    success = True
+                except ValueError as exc:
+                    success, note_error = False, str(exc)
+            elif action.action_type == ActionType.REQUEST_USER_INPUT:
                 await self._request_user_input(action)
                 success = True
             else:
                 success = await self.executor.execute(action)
+                if (
+                    action.action_type in (ActionType.CALC_WRITE, ActionType.TABLE_FILL)
+                    and self.loop.context.goal
+                ):
+                    self.loop.context.goal.calc_note = self.executor.calc_note
         except asyncio.CancelledError:
             # Cancellation drains any display worker first; preserve a possibly partial action.
             self.loop.record_action(
@@ -830,7 +879,7 @@ class TaskSession:
         self.loop.record_action(
             action,
             success,
-            error=self.executor.last_error if not success else "",
+            error=(note_error or self.executor.last_error) if not success else "",
             reasoning=reasoning,
             confidence=confidence,
             duration_ms=(time.monotonic() - started) * 1000,
@@ -1166,7 +1215,8 @@ class TaskSession:
         if decision.action.action_type != ActionType.SUBTASK_COMPLETE:
             return False
         return not any(
-            r.action.action_type != ActionType.SUBTASK_COMPLETE
+            r.action.action_type
+            not in (ActionType.SUBTASK_COMPLETE, ActionType.NOTE_SAVE, ActionType.NOTE_READ)
             for r in self._actions_since_subtask_start()
         )
 
@@ -1181,6 +1231,9 @@ class TaskSession:
     def _is_screen_unchanged(self, screenshot: Screenshot) -> bool:
         """前ターンの画面と同一かどうか（低速VMの無変化検出用）。"""
         if self._prev_turn_hash is None or not self.loop.context.action_history:
+            return False
+        last = self.loop.context.action_history[-1]
+        if last.success and last.action.action_type in NONVISUAL_ACTIONS:
             return False
         return _image_hash(screenshot.image_bytes) == self._prev_turn_hash
 
@@ -1249,7 +1302,11 @@ class TaskSession:
                 error_message=last.error_message or "アクションの実行に失敗",
                 retry_count=0,
             )
-            self.loop.verify_failed()
+            if last.action.action_type in CUA_ACTIONS:
+                # Delivery may have succeeded. Reobserve before allowing another input.
+                self.loop.verify_success()
+            else:
+                self.loop.verify_failed()
             await self._emit_state_change()
             return
 
@@ -1259,7 +1316,7 @@ class TaskSession:
             return
 
         # クリック系アクションの場合、追加の画面検証を行う
-        if last.action.action_type in CLICK_ACTIONS:
+        if last.action.action_type in SCREEN_CLICK_ACTIONS:
             verified = await self._verify_click_effect(last)
             if not verified:
                 self._pending_error = ErrorContext(
@@ -1267,12 +1324,53 @@ class TaskSession:
                     error_message="クリック後の画面変化を確認できませんでした",
                     retry_count=0,
                 )
-                self.loop.verify_failed()
+                if last.action.action_type == ActionType.ELEMENT_CLICK:
+                    self.loop.verify_success()  # Reobserve before any retry.
+                else:
+                    self.loop.verify_failed()
                 await self._emit_state_change()
                 return
 
         self.loop.verify_success()
         await self._emit_state_change()
+
+    def _calc_readback_evidence(self):
+        # Only credit the last batch while no intervening edit could invalidate it.
+        save_sent = False
+        for record in reversed(self.loop.context.action_history[:-1]):
+            action = record.action
+            if not record.success:
+                break
+            if action.action_type == ActionType.KEY_COMBO and [
+                k.lower() for k in action.params["keys"]
+            ] == ["ctrl", "s"]:
+                save_sent = True
+                continue
+            if action.action_type in (
+                ActionType.WAIT,
+                ActionType.WAIT_FOR_STILL,
+                ActionType.FOCUS_WINDOW,
+            ):
+                continue
+            if action.action_type == ActionType.TABLE_QUERY:
+                continue
+            if action.action_type == ActionType.TABLE_FILL and self.loop.context.goal:
+                return self.loop.context.goal.calc_note
+            if action.action_type == ActionType.CALC_WRITE:
+                cells = {cell["address"]: cell["value"] for cell in action.params["cells"]}
+                saved = " この後にCtrl+Sを送信済み。保存状態は画面で確認。" if save_sent else ""
+                if action.params.get("save"):
+                    saved = (
+                        " 同じ既存文書にCtrl+Sを送信しました。"
+                        "その後も同じ文書が前面にあり、保存ダイアログへの移行は観測されませんでした。"
+                    )
+                return (
+                    "Calcの編集欄・表示値を確定後に照合済み。"
+                    + saved
+                    + json.dumps(cells, ensure_ascii=False, separators=(",", ":"))[:2400]
+                )
+            break
+        return ""
 
     async def _verify_subtask_phase(self, record) -> None:
         """subtask_complete の妥当性をLLMに画像判定させる。
@@ -1286,11 +1384,22 @@ class TaskSession:
 
         try:
             screenshot = await self._capture_screenshot()
+            evidence = self._calc_readback_evidence()
+            cua = self.executor.cua
+            if cua and getattr(cua, "workspace", None):
+                try:
+                    evidence = "\n".join(filter(None, [evidence, await cua.workspace_evidence()]))
+                except (RuntimeError, OSError, TimeoutError, ValueError):
+                    logger.info("現在のファイル一覧を取得できませんでした")
             decision = ActionDecision(
                 action=record.action,
                 expected_effect="",
                 confidence=record.confidence,
                 reasoning=record.reasoning,
+                gui_evidence=evidence,
+                working_note=self.loop.context.goal.reading_notes()
+                if self.loop.context.goal
+                else "",
             )
             result: VerificationResult | None = None
             # 決定モデルを試す（処理順3番目の完了確認）。中間・失敗時はLLMに退避。
@@ -1299,7 +1408,12 @@ class TaskSession:
                     self.decision_calls += 1
                     judged = await self.decision.verify_completion(
                         expected_outcome=subtask.expected_outcome,
-                        evidence_text=record.reasoning,
+                        evidence_text="\n".join(
+                            filter(
+                                None,
+                                (record.reasoning, decision.gui_evidence, decision.working_note),
+                            )
+                        ),
                         confidence_hint=record.confidence,
                         image_bytes=screenshot.image_bytes,
                     )
@@ -1352,6 +1466,11 @@ class TaskSession:
             output = parse_task_output(params.get("summary"), params.get("data_json"))
             if output is not None:
                 self._outputs.append(output)
+            if self.loop.context.goal:
+                detail = params.get("summary") or subtask.description
+                self.loop.context.goal.completed_steps.append(
+                    f"確認済み [{subtask.id}] {redact(detail)[:300]}"
+                )
             self._pending_error = None
             self.loop.verify_subtask_done()
             await self._emit_state_change()
@@ -1382,7 +1501,12 @@ class TaskSession:
             ),
             retry_count=fails,
         )
-        self.loop.verify_failed()
+        if self.executor.cua is not None and not self.executor.cua.disabled:
+            # A rejected completion needs fresh GUI evidence. The recovery planner
+            # receives no screen and can otherwise rewrite already verified work.
+            self.loop.verify_success()  # Return to EXECUTING on the same subtask.
+        else:
+            self.loop.verify_failed()
         await self._emit_state_change()
 
     async def _verify_click_effect(self, record) -> bool:
@@ -1564,7 +1688,11 @@ class TaskSession:
                 self.loop.recover_retry()
                 await self._execute_vm_restart(ActionDecision(action, "", 1.0, plan.reasoning))
                 return False
-            if action.action_type in (ActionType.REGION_SELECT, ActionType.SUBTASK_COMPLETE):
+            if action.action_type in (
+                ActionType.REGION_SELECT,
+                ActionType.SUBTASK_COMPLETE,
+                *CUA_ACTIONS,
+            ):
                 break
             success = await self._execute_recorded_action(action, plan.reasoning)
             await self._emit_action(action, success)
@@ -1593,22 +1721,59 @@ class TaskSession:
         max_attempts = (
             EMPTY_RETRY_SHORT_ATTEMPTS if self._consec_empty_decides > 0 else MAX_EMPTY_RETRIES + 1
         )
+        targets = await self.executor.cua.observe() if self.executor.cua is not None else []
+        if self.loop.context.goal and self.executor.cua is not None:
+            memory = getattr(self.executor.cua, "table_memory", None)
+            if memory is not None:
+                sources = getattr(self.executor.cua, "sources", None)
+                self.loop.context.goal.table_context = "\n".join(
+                    filter(
+                        None,
+                        [
+                            memory.context(),
+                            sources.context() if sources else "",
+                            self.executor.cua.workspace_context()
+                            if getattr(self.executor.cua, "workspace", None)
+                            else "",
+                        ],
+                    )
+                )
+        decision_goal = self.loop.context.goal or Goal(description="")
         last_error: Exception | None = None
         for attempt in range(max_attempts):
             try:
                 decision = await self.llm.decide_next_action(
-                    goal=self.loop.context.goal or Goal(description=""),
+                    goal=decision_goal,
                     current_subtask=subtask,
                     action_history=self.loop.context.action_history,
                     screenshot=screenshot,
                     error_context=error_context,
                     platform=self._platform(),
+                    **({"targets": targets} if targets else {}),
                 )
                 self._budget.check()
                 if decision.working_note and self.loop.context.goal:
                     self.loop.context.goal.working_note = decision.working_note
+                if (
+                    decision.action.action_type == ActionType.FOCUS_WINDOW
+                    and self.loop.context.goal
+                ):
+                    self.loop.context.goal.note_before_switch()
                 self._consec_empty_decides = 0
-                return decision
+                return self._read_after_stalled_scroll(decision, screenshot, targets)
+            except WorkspaceBatchError as error:
+                if attempt >= min(2, max_attempts - 1):
+                    raise
+                self._budget.check()
+                decision_goal = replace(
+                    decision_goal,
+                    constraints=[
+                        *decision_goal.constraints,
+                        f"直前に提案した一括操作は実行前に却下されました。{error} "
+                        "一覧で移動が済んでいれば次の作業に進んでください。",
+                    ],
+                )
+                last_error = error
             except ValueError as e:
                 retryable = not isinstance(e, ModelResponseError) and (
                     isinstance(e, json.JSONDecodeError) or "応答が空" in str(e)
@@ -1625,6 +1790,44 @@ class TaskSession:
                 )
                 await asyncio.sleep(2.0 * (attempt + 1))
         raise last_error or ValueError("応答が空です")
+
+    def _read_after_stalled_scroll(self, decision, screenshot, targets):
+        """Use the loaded rows when scrolling the same table leaves its viewport unchanged."""
+        previous = self._previous_table_scroll
+        self._previous_table_scroll = None
+        if decision.action.action_type != ActionType.SCROLL:
+            return decision
+        ref = next((t["ref"] for t in targets if t["action"] == "table_query"), None)
+        if not ref or not self.executor.cua.table_memory.foreground:
+            return decision
+        memory = self.executor.cua.table_memory
+        if len(memory.foreground) != 1:
+            return decision
+        import io
+
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(screenshot.image_bytes)) as image:
+                w, h = image.size
+                viewport = image.crop((0, h // 5, w, 9 * h // 10)).convert("L").resize((224, 120))
+                signature = viewport.tobytes()
+        except (ValueError, OSError):
+            return decision
+        key = memory.foreground[0]
+        self._previous_table_scroll = (key, decision.action.params["direction"], signature)
+        if previous != self._previous_table_scroll:
+            return decision
+        table = list(memory.tables).index(key) + 1
+        return ActionDecision(
+            action=Action(
+                ActionType.TABLE_QUERY,
+                {"ref": ref, "sql": f"SELECT * FROM t{table} ORDER BY rowid"},
+            ),
+            expected_effect="表示範囲外も含めて取得済みの表を照会する",
+            confidence=1.0,
+            reasoning="スクロール後も同じ表示のため、取得済みの行を直接照会します。",
+        )
 
     async def _capture_screenshot(self) -> Screenshot:
         """現在のVM画面をキャプチャする（オーバーレイ付き）。
@@ -1753,6 +1956,8 @@ class TaskSession:
 
     def pause(self) -> asyncio.Task | None:
         if self.loop.state == AgentState.EXECUTING:
+            if self.executor.cua is not None:
+                self.executor.cua.invalidate()
             self.loop.pause()
             return self._notify_control_change()
 

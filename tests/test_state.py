@@ -197,3 +197,11 @@ class TestAgentContext:
         ctx = AgentContext()
         ctx.retry_counts["s1:left_click"] = 2
         assert ctx.retry_counts["s1:left_click"] == 2
+
+
+def test_switch_notes_keep_original_source_and_recent_readings():
+    goal = Goal(description="転記")
+    for note in ("受付表", "金額", "集計", "照合"):
+        goal.working_note = note
+        goal.note_before_switch()
+    assert goal.reading_notes().splitlines() == ["受付表", "集計", "照合"]
