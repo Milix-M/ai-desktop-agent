@@ -1,6 +1,6 @@
-# Reviewed 2026-11-26. Mozilla's signed deb has no Ubuntu Snap epoch.
+# Reviewed 2026-11-27. Mozilla's signed deb has no Ubuntu Snap epoch.
 # Ubuntu compares it with 1:1snap1-0ubuntu1 and reports these old Firefox CVEs.
-# Scope is exact: package + version + CVE, with a fixed review deadline.
+# Scope is exact: package + version + CVE, with a time-limited review deadline.
 # Retain unfiltered results and suppressed findings in the CI artifacts.
 vulnerabilities:
   - &expat

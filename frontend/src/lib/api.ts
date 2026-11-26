@@ -1,6 +1,6 @@
-import type { TaskDetail, TaskHistoryItem, TaskStatus, VmInfo, VmStatus } from "./types";
+import type { ScheduleEnvironmentKind, TaskDetail, TaskHistoryItem, TaskStatus, VmInfo, VmStatus } from "./types";
 import { parseTaskStatus } from "./task-protocol";
-import { parseAcknowledgement, parseLogin, parseTaskDetail, parseTaskHistory, parseVmInfo, parseVms, parseVmStatus } from "./api-protocol";
+import { parseAcknowledgement, parseLogin, parseSchedule, parseSchedules, parseTaskDetail, parseTaskHistory, parseVmInfo, parseVms, parseVmStatus } from "./api-protocol";
 import { forgetVmCreation, vmCreationRetry, type CreationKind } from "./vm-creation-retries";
 
 const BACKEND_URL =
@@ -310,4 +310,17 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
 
 export async function deleteTask(taskId: string): Promise<{ status: string }> {
   return parseAcknowledgement(await request<unknown>(`/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" }), "deleted");
+}
+
+export async function getSchedules(signal: AbortSignal) {
+  return parseSchedules(await request<unknown>("/schedules", { signal }));
+}
+
+export async function addSchedule(vmId: string | null, instruction: string, runAt: number, interval: number, requestId: string, vmKind: ScheduleEnvironmentKind | null = null) {
+  const payload = { vm_id: vmId, vm_kind: vmKind, instruction, run_at: runAt, interval, request_id: requestId };
+  return parseSchedule(await request<unknown>("/schedules", post(payload)), requestId);
+}
+
+export async function deleteSchedule(id: string) {
+  return parseAcknowledgement(await request<unknown>(`/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }), "deleted");
 }

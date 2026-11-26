@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import VncViewer from "@/components/VncViewer";
 import { isVmReady } from "@/lib/vm-readiness";
+import SchedulePanel from "@/components/SchedulePanel";
 import InstructionInput from "@/components/InstructionInput";
 import StatusPanel from "@/components/StatusPanel";
 import ControlPanel from "@/components/ControlPanel";
@@ -694,6 +695,11 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
 
   const vncUrl = getVncWsUrl(selectedVm?.id);
 
+  function selectHistoryTask(taskId: string) {
+    navigationVersion.current++;
+    void showTaskDetail(taskId);
+  }
+
   return (
     <div className="app-container">
       <VmTabs
@@ -752,6 +758,10 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             submission={submission}
           />
 
+          <CollapsibleSection title="スケジュール">
+            <SchedulePanel key={selectedVm?.id} vmId={selectedVm?.id ?? null} onSelectTask={selectHistoryTask} />
+          </CollapsibleSection>
+
           <StatusPanel
             state={state}
             subtaskIndex={subtaskIndex}
@@ -779,7 +789,7 @@ function DesktopWorkspace({ sessionActions, draft, submission }: {
             items={history}
             selectedId={selectedTaskId}
             detailError={detailError}
-            onSelect={(taskId) => { navigationVersion.current++; void showTaskDetail(taskId); }}
+            onSelect={selectHistoryTask}
             onDelete={async (taskId) => {
               const serverVersion = generation.current.version;
               navigationVersion.current++;

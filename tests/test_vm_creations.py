@@ -406,3 +406,80 @@ async def test_a_delayed_queued_read_cannot_reenqueue_a_completed_creation(manag
     finished = await service.wait(accepted.id)
     assert finished.state == "succeeded", finished
     assert len(client.containers.runs) == 1
+
+
+@pytest.mark.parametrize("kind", ["qemu", "container", "android"])
+async def test_disposable_receipt_owns_only_its_allocation(managed, kind, tmp_path, monkeypatch):
+    service, pool, client = managed
+    iso = tmp_path / "android.iso"
+    iso.write_bytes(b"iso")
+    monkeypatch.setenv("ANDROID_ISO_HOST", str(iso))
+    monkeypatch.setenv("ANDROID_IMAGE_REF", "test-android-image")
+    accepted = await service.submit(KEY, "使い捨て", kind, disposable=True)
+    finished = await service.wait(accepted.id)
+    assert finished.state == "succeeded", finished.error
+    identity = pool.get_scheduled_instance(finished.vm_id, finished.id)
+    assert identity.info.kind == kind
+    assert pool.get_scheduled_instance(finished.vm_id, "unrelated") is None
+    pool.remove_scheduled_vm(finished.vm_id, identity.container_id, "unrelated")
+    pool.remove_scheduled_vm(finished.vm_id, "replaced-container-id", finished.id)
+    assert pool.get_vm(finished.vm_id) is not None
+    pool.remove_scheduled_vm(finished.vm_id, identity.container_id, finished.id)
+    assert pool.get_vm(finished.vm_id) is None
+    assert not client.volumes.items
+
+
+async def test_disposable_creation_recovery_leaves_an_unrelated_vm_alone(managed):
+    service, pool, _ = managed
+    saved = receipt(state="running").model_copy(update={"disposable": True})
+    pool.create_vm(name="既存環境", vm_id=saved.vm_id, kind=saved.kind)
+    service.store.write(saved)
+    await service.start()
+    assert (await service.get(saved.id)).state == "failed"
+    assert pool.get_vm(saved.vm_id).name == "既存環境"
+
+
+@pytest.mark.parametrize("delete_while_booting", [True, False])
+async def test_disposable_schedule_reclaims_an_unused_environment(
+    managed, tmp_path, monkeypatch, delete_while_booting
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from ai_desktop_agent.server import app as server
+    from ai_desktop_agent.server import schedules
+
+    service, pool, client = managed
+    now = 100
+    monkeypatch.setattr(schedules, "time", SimpleNamespace(time=lambda: now))
+    monkeypatch.setattr(server, "_pool", pool)
+    monkeypatch.setattr(server, "_vm_creations", service)
+    monkeypatch.setattr(server, "_sessions", {})
+    submit = AsyncMock(side_effect=HTTPException(502, "VNC接続失敗"))
+    monkeypatch.setattr(server, "create_task", submit)
+    scheduler = schedules.Scheduler(
+        server._submit_scheduled_task, tmp_path, retire=server._retire_scheduled_environment
+    )
+    scheduler.initialize()
+    monkeypatch.setattr(server.app.state, "scheduler", scheduler, raising=False)
+    item = await scheduler.add(
+        schedules.CreateSchedule(vm_kind="container", instruction="確認", run_at=200)
+    )
+    now = 200
+    await scheduler.dispatch_due()
+    run = await scheduler.reserve_environment(item)
+    if delete_while_booting:
+        await scheduler.remove(item.id)
+    receipt = await service.wait("creation-" + server.key_digest(run.creation_key))
+    assert receipt.state == "succeeded"
+    await scheduler.dispatch_due()
+    if delete_while_booting:
+        submit.assert_not_called()
+    else:
+        [finished] = await scheduler.list_all()
+        assert finished.last_error == "VNC接続失敗" and finished.next_run is None
+    await scheduler.retire_finished()
+    assert not client.volumes.items
+    assert pool.get_vm(run.vm_id) is None

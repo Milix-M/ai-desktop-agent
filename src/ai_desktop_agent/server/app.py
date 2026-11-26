@@ -9,6 +9,7 @@ import contextlib
 import inspect
 import logging
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -49,7 +50,15 @@ from ai_desktop_agent.server.browser_access import (
 )
 from ai_desktop_agent.server.desktop_resources import DesktopResources, desktop_runtime_from_env
 from ai_desktop_agent.server.persistence import DeletionError, StorageError
+from ai_desktop_agent.server.readiness import is_ready
 from ai_desktop_agent.server.request_limits import RequestBodyLimitMiddleware
+from ai_desktop_agent.server.schedules import (
+    CreateSchedule,
+    DisposableRun,
+    EnvironmentStartingError,
+    Schedule,
+    Scheduler,
+)
 from ai_desktop_agent.server.session import TaskSession, _drain_task
 from ai_desktop_agent.server.store import TaskRecord, TaskStore
 from ai_desktop_agent.server.submissions import (
@@ -183,7 +192,16 @@ async def _owned_lifespan(creations: VmCreationService) -> AsyncIterator[None]:
         try:
             await creations.start()
             await provisioner.start()
-            yield
+            scheduler = Scheduler(_submit_scheduled_task, retire=_retire_scheduled_environment)
+            await run_display_call(scheduler.initialize)
+            app.state.scheduler = scheduler
+            worker = asyncio.create_task(scheduler.run())
+            try:
+                yield
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                del app.state.scheduler
         finally:
             try:
                 await _drain_task(asyncio.create_task(_shutdown_backend(provisioner)))
@@ -546,6 +564,63 @@ def _serialize_vm_operation(fn):
     return submit
 
 
+async def _submit_scheduled_task(item: Schedule, key: str) -> str:
+    vm_id = item.vm_id
+    if item.vm_kind:
+        scheduler = app.state.scheduler
+        run = await scheduler.reserve_environment(item)
+        try:
+            receipt = await get_vm_creations().submit(
+                run.creation_key, "予約実行 · " + run.vm_id, item.vm_kind, disposable=True
+            )
+        except VmCreationBusyError as error:
+            raise EnvironmentStartingError() from error
+        if receipt.state in {"queued", "running"}:
+            raise EnvironmentStartingError()
+        if receipt.state == "failed":
+            raise HTTPException(receipt.error_status, receipt.error)
+        if not receipt.disposable or receipt.vm_id != run.vm_id:
+            raise HTTPException(409, "予約した環境の作成結果が一致しません")
+        vm_id, key = run.vm_id, run.task_key
+    status = await create_task(
+        CreateTaskRequest(instruction=item.instruction, vm_id=vm_id, replace_running=False),
+        key,
+    )
+    assert status.session_id is not None
+    return status.session_id
+
+
+async def _retire_scheduled_environment(run: DisposableRun) -> bool:
+    receipt = await get_vm_creations().get("creation-" + key_digest(run.creation_key))
+    if receipt is None:
+        return True
+    if receipt.state in {"queued", "running"}:
+        return False
+    if not receipt.disposable or receipt.vm_id != run.vm_id:
+        raise RuntimeError("環境作成の記録が一致しません")
+    async with _vm_operation(run.vm_id):
+        if any(s.vm_id == run.vm_id and s.is_running for s in _sessions.values()):
+            return False
+        await run_vm_call(get_pool().remove_scheduled_vm, run.vm_id, run.instance_id, receipt.id)
+    return True
+
+
+@app.post("/schedules", response_model=Schedule, status_code=201)
+async def add_schedule(req: CreateSchedule):
+    return await app.state.scheduler.add(req)
+
+
+@app.get("/schedules", response_model=list[Schedule])
+async def list_schedules():
+    return await app.state.scheduler.list_all()
+
+
+@app.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str):
+    await app.state.scheduler.remove(schedule_id)
+    return {"status": "deleted"}
+
+
 @app.post("/tasks", response_model=TaskStatus)
 async def create_task(
     req: CreateTaskRequest,
@@ -613,6 +688,25 @@ async def _submission_claim(key: str, req: CreateTaskRequest):
                 await run_display_call(claim.close)
 
 
+async def _check_scheduled_instance(scheduler: Scheduler, owner: DisposableRun):
+    receipt_id = "creation-" + key_digest(owner.creation_key)
+    instance = await run_vm_call(get_pool().get_scheduled_instance, owner.vm_id, receipt_id)
+    if instance is None:
+        raise HTTPException(409, "予約した環境が見つかりません")
+    await scheduler.bind_instance(owner, instance.container_id)
+    if is_ready(instance.info.status, instance.info.health):
+        return
+    receipt = await get_vm_creations().get(receipt_id)
+    if (
+        receipt
+        and time.time() < receipt.updated_at + 600
+        and instance.info.status in {"created", "running", "creating"}
+        and instance.info.health in {None, "starting"}
+    ):
+        raise EnvironmentStartingError()
+    raise HTTPException(409, "予約した環境を起動できませんでした")
+
+
 async def _create_new_task(
     req: CreateTaskRequest, claim: SubmissionClaim | None = None
 ) -> TaskStatus:
@@ -620,13 +714,20 @@ async def _create_new_task(
 
     try:
         vm_id = req.vm_id or await run_vm_call(_default_vm_id)
+        scheduler = getattr(app.state, "scheduler", None)
+        owner = await scheduler.environment_owner(vm_id) if scheduler else None
+        if owner:
+            if claim is None or claim.digest != key_digest(owner.task_key):
+                raise HTTPException(409, "この環境は予約タスク専用です")
+            await _check_scheduled_instance(scheduler, owner)
         async with _vm_operation(vm_id):
+            if owner:
+                # Revalidate the physical target after acquiring the task handover lock.
+                await _check_scheduled_instance(scheduler, owner)
             # Revalidate after waiting; a stop or deletion may have finished meanwhile.
             vm = await run_vm_call(_resolve_vm, vm_id)
             return await _start_task_on_vm(req, vm, claim)
     except DockerUnavailableError as error:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 

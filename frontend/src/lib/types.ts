@@ -166,3 +166,18 @@ export interface TaskDetail extends TaskHistoryItem {
   goal: Record<string, unknown>;
   created_at: number;
 }
+
+export type ScheduleEnvironmentKind = "container" | "qemu" | "android";
+
+export interface TaskSchedule {
+  id: string;
+  vm_id: string | null;
+  vm_kind?: ScheduleEnvironmentKind | null;
+  preparing?: boolean;
+  instruction: string;
+  run_at: number;
+  interval: number;
+  next_run: number | null;
+  last_task_id: string | null;
+  last_error: string | null;
+}
