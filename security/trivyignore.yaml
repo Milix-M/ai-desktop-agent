@@ -1,12 +1,12 @@
-# Reviewed 2026-11-17. Mozilla's signed deb has no Ubuntu Snap epoch.
+# Reviewed 2026-11-27. Mozilla's signed deb has no Ubuntu Snap epoch.
 # Ubuntu compares it with 1:1snap1-0ubuntu1 and reports these old Firefox CVEs.
-# Scope is exact: package + version + CVE, with a one-month review deadline.
+# Scope is exact: package + version + CVE, with a time-limited review deadline.
 # Retain unfiltered results and suppressed findings in the CI artifacts.
 vulnerabilities:
   - &expat
     id: CVE-2021-45960
     purls: &firefox_package
-      - pkg:deb/ubuntu/firefox@160.0.1~build1
+      - pkg:deb/ubuntu/firefox@161.0~build1
     expired_at: &review_deadline 2026-12-17
     statement: >-
       Mozilla fixed the applicable Expat issues in Firefox 98/99; other listed issues do not affect its parser configuration. https://bugzilla.mozilla.org/show_bug.cgi?id=1754724
@@ -66,13 +66,13 @@ vulnerabilities:
     purls: *firefox_package
     expired_at: *review_deadline
     statement: >-
-      Firefox 160.0.1 locks crossbeam-utils 0.8.21; the fix is in 0.8.7.
+      Firefox 161.0 locks crossbeam-utils 0.8.21; the fix is in 0.8.7.
       https://github.com/crossbeam-rs/crossbeam/security/advisories/GHSA-qc84-gqf4-9926
-      https://github.com/mozilla-firefox/firefox/blob/58fed86b1b6864ad71b83c910a879d6f1a6b678b/Cargo.lock
+      https://github.com/mozilla-firefox/firefox/blob/9c70d5d48c866afc2e581d6b7ff6de98a1371d99/Cargo.lock
   - id: CVE-2022-24791
     purls: *firefox_package
     expired_at: *review_deadline
     statement: >-
-      The affected Wasmtime/Cranelift components are absent from Firefox 160.0.1's Cargo.lock.
+      The affected Wasmtime/Cranelift components are absent from Firefox 161.0's Cargo.lock.
       https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-gwc9-348x-qwv2
-      https://github.com/mozilla-firefox/firefox/blob/58fed86b1b6864ad71b83c910a879d6f1a6b678b/Cargo.lock
+      https://github.com/mozilla-firefox/firefox/blob/9c70d5d48c866afc2e581d6b7ff6de98a1371d99/Cargo.lock
