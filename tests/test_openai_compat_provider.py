@@ -137,7 +137,10 @@ class TestOpenAICompatProvider:
             parsed = provider._parse_action({"action_type": action_type.value, "params": params})
             assert parsed == Action(action_type, params)
 
-    @pytest.mark.parametrize("model", ["gpt-5", "gpt-5-mini", "gpt-5.4", "gpt-6.2-sol"])
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-5", "gpt-5-mini", "gpt-5.4", "gpt-5.4-2026-03-05", "gpt-6.2-sol", "gpt-6-luna"],
+    )
     async def test_sends_supported_completion_limit(self, model):
         provider = OpenAICompatProvider(model=model, api_key="test-key")
         try:
@@ -149,6 +152,40 @@ class TestOpenAICompatProvider:
             assert "temperature" not in args and "max_tokens" not in args
         finally:
             await provider.aclose()
+
+    async def test_targets_only_extend_the_current_decision_schema(self, provider):
+        provider._call = AsyncMock(
+            return_value={"action": {"action_type": "wait", "params": {"seconds": 0}}}
+        )
+        args = (Goal("保存"), Subtask(id="s", description="保存"), [], self._fake_screenshot())
+        targets = [{"action": "element_click", "ref": "3.1", "role": "button", "label": "Save"}]
+        await provider.decide_next_action(*args, targets=targets)
+        schema = provider._call.await_args.args[1]
+        variant = schema["schema"]["properties"]["action"]["anyOf"][-1]
+        assert variant["properties"]["params"]["properties"]["ref"]["enum"] == ["3.1"]
+        assert schema["strict"] is True
+        for options in ({}, {"targets": targets, "is_zoomed": True}):
+            await provider.decide_next_action(*args, **options)
+            assert "element_click" not in str(provider._call.await_args.args[1])
+
+    async def test_calc_batch_schema_and_response(self, provider):
+        targets = [{"action": "calc_write", "ref": "4.3", "role": "table", "label": "Sheet Sales"}]
+        cells = [{"address": "B2", "value": "120"}, {"address": "D2", "value": "=B2*2"}]
+        provider._call = AsyncMock(
+            return_value={
+                "action": {"action_type": "calc_write", "params": {"ref": "4.3", "cells": cells}}
+            }
+        )
+        decision = await provider.decide_next_action(
+            Goal("入力"),
+            Subtask(id="s", description="入力"),
+            [],
+            self._fake_screenshot(),
+            targets=targets,
+        )
+        assert decision.action.params["cells"] == cells
+        variant = provider._call.await_args.args[1]["schema"]["properties"]["action"]["anyOf"][-1]
+        assert variant["properties"]["params"]["properties"]["cells"]["maxItems"] == 32
 
     def test_provider_name(self, provider):
         assert provider.provider_name == "openai_compat"

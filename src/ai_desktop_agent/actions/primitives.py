@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from enum import Enum
 
 from ai_desktop_agent.validation import validate_text
@@ -16,6 +17,17 @@ class ActionType(Enum):
     """エージェントが実行可能な操作の種類。"""
 
     # マウス操作（直接座標指定）
+    WORKSPACE_READ = "workspace_read"
+    WORKSPACE_MOVE = "workspace_move"
+    SOURCE_READ = "source_read"
+    NOTE_SAVE = "note_save"
+    NOTE_READ = "note_read"
+    TABLE_TYPE = "table_type"
+    TABLE_QUERY = "table_query"
+    TABLE_FILL = "table_fill"
+    CALC_WRITE = "calc_write"
+    ELEMENT_CLICK = "element_click"
+    FOCUS_WINDOW = "focus_window"
     MOUSE_MOVE = "mouse_move"
     LEFT_CLICK = "left_click"
     RIGHT_CLICK = "right_click"
@@ -72,6 +84,46 @@ CLICK_ACTIONS: frozenset[ActionType] = frozenset(
     }
 )
 
+CUA_ACTIONS = frozenset(
+    {
+        ActionType.ELEMENT_CLICK,
+        ActionType.FOCUS_WINDOW,
+        ActionType.CALC_WRITE,
+        ActionType.WORKSPACE_READ,
+        ActionType.WORKSPACE_MOVE,
+        ActionType.SOURCE_READ,
+        ActionType.TABLE_TYPE,
+        ActionType.TABLE_QUERY,
+        ActionType.TABLE_FILL,
+    }
+)
+
+
+def validate_cells(cells):
+    if not isinstance(cells, list) or not 1 <= len(cells) <= 32:
+        raise ValueError("一度に入力できるのは1〜32セルです")
+    addresses = set()
+    for cell in cells:
+        if not isinstance(cell, dict) or cell.keys() != {"address", "value"}:
+            raise ValueError("セルにはaddressとvalueを指定してください")
+        address = cell["address"]
+        match = isinstance(address, str) and re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address)
+        if (
+            not match
+            or int(match[2]) > 1048576
+            or (len(match[1]) == 3 and match[1] > "XFD")
+            or address in addresses
+        ):
+            raise ValueError("セル番地が無効または重複しています")
+        addresses.add(address)
+        value = cell["value"]
+        validate_text(value, "value")
+        if len(value) > 256 or any(
+            ord(c) < 32 or ord(c) == 127 or c in "\u0085\u2028\u2029" for c in value
+        ):
+            raise ValueError("セルの内容は制御文字を含まない256文字以内の1行で指定してください")
+
+
 # 座標キー（絶対座標系）
 _X_KEYS: frozenset[str] = frozenset({"x", "start_x", "end_x"})
 _Y_KEYS: frozenset[str] = frozenset({"y", "start_y", "end_y"})
@@ -80,6 +132,17 @@ _Y_KEYS: frozenset[str] = frozenset({"y", "start_y", "end_y"})
 # クリック系は座標必須。空パラメータでの「現在位置クリック」は
 # 誤クリックの温床になるため禁止する（#26 のスキーマと整合）。
 _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
+    ActionType.ELEMENT_CLICK: {"ref"},
+    ActionType.WORKSPACE_READ: {"ref", "items"},
+    ActionType.WORKSPACE_MOVE: {"ref", "items"},
+    ActionType.SOURCE_READ: {"ref", "source", "search", "offset"},
+    ActionType.NOTE_SAVE: {"title", "text"},
+    ActionType.NOTE_READ: {"title"},
+    ActionType.TABLE_TYPE: {"ref", "sql", "separator"},
+    ActionType.TABLE_QUERY: {"ref", "sql"},
+    ActionType.TABLE_FILL: {"ref", "sql", "start", "formulas", "save"},
+    ActionType.CALC_WRITE: {"ref", "cells"},
+    ActionType.FOCUS_WINDOW: {"ref"},
     ActionType.MOUSE_MOVE: {"x", "y"},
     ActionType.LEFT_CLICK: {"x", "y"},
     ActionType.RIGHT_CLICK: {"x", "y"},
@@ -102,6 +165,7 @@ _REQUIRED_PARAMS: dict[ActionType, set[str]] = {
 
 # アクション種別ごとの任意パラメータ
 _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
+    ActionType.CALC_WRITE: {"save"},
     ActionType.LEFT_CLICK: set(),
     ActionType.RIGHT_CLICK: set(),
     ActionType.MIDDLE_CLICK: set(),
@@ -122,6 +186,17 @@ _OPTIONAL_PARAMS: dict[ActionType, set[str]] = {
 
 # 日本語のアクション名（説明文自動生成用）
 _ACTION_NAMES: dict[ActionType, str] = {
+    ActionType.ELEMENT_CLICK: "要素をクリック",
+    ActionType.WORKSPACE_READ: "指定フォルダーの文章を読む",
+    ActionType.WORKSPACE_MOVE: "指定フォルダー内でファイルを移動",
+    ActionType.SOURCE_READ: "取得した文章を読む",
+    ActionType.NOTE_SAVE: "作業メモを保存",
+    ActionType.NOTE_READ: "作業メモを読む",
+    ActionType.TABLE_TYPE: "照会結果をテキスト入力",
+    ActionType.TABLE_QUERY: "読み取った表を集計",
+    ActionType.TABLE_FILL: "集計結果をシートに記入",
+    ActionType.CALC_WRITE: "Calcのセルに入力",
+    ActionType.FOCUS_WINDOW: "ウィンドウ切替",
     ActionType.MOUSE_MOVE: "マウス移動",
     ActionType.LEFT_CLICK: "左クリック",
     ActionType.RIGHT_CLICK: "右クリック",
@@ -141,6 +216,10 @@ _ACTION_NAMES: dict[ActionType, str] = {
     ActionType.REGION_SELECT: "領域拡大要求",
     ActionType.VM_RESTART: "VM再起動",
 }
+
+
+class WorkspaceBatchError(ValueError):
+    """The proposed file batch was rejected before any operation was dispatched."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,6 +271,77 @@ class Action:
                     raise ValueError(f"{name}は有限の0以上の数で指定してください")
         if "direction" in params and params["direction"] not in ("up", "down"):
             raise ValueError("スクロール方向はupかdownで指定してください")
+        if self.action_type in (ActionType.WORKSPACE_READ, ActionType.WORKSPACE_MOVE):
+            keys = (
+                {"source"}
+                if self.action_type == ActionType.WORKSPACE_READ
+                else {"source", "target"}
+            )
+            items = params["items"]
+            if (
+                not isinstance(items, list)
+                or not 1 <= len(items) <= 24
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != keys
+                    or any(
+                        not isinstance(path, str)
+                        or not 1 <= len(path) <= 500
+                        or any(part in {"", ".", ".."} for part in path.split("/"))
+                        for path in item.values()
+                    )
+                    for item in items
+                )
+                or len({item["source"] for item in items}) != len(items)
+            ):
+                raise WorkspaceBatchError(
+                    "各組は1〜24件。sourceの重複を除き、一覧にある相対パスを指定してください。実行済みの移動は再送しないでください"
+                )
+        if self.action_type == ActionType.SOURCE_READ and (
+            type(params["source"]) is not int
+            or not 0 <= params["source"] <= 96
+            or type(params["offset"]) is not int
+            or not 0 <= params["offset"] <= 4000000
+            or not isinstance(params["search"], str)
+            or len(params["search"]) > 128
+        ):
+            raise ValueError("資料番号、検索語、offsetを確認してください")
+        if self.action_type in (ActionType.NOTE_SAVE, ActionType.NOTE_READ) and (
+            not isinstance(params["title"], str) or not 1 <= len(params["title"].strip()) <= 80
+        ):
+            raise ValueError("メモの名前は1〜80文字で指定してください")
+        if self.action_type == ActionType.NOTE_SAVE and (
+            not isinstance(params["text"], str) or not 1 <= len(params["text"].strip()) <= 3000
+        ):
+            raise ValueError("メモの本文は1〜3000文字で指定してください")
+        if "ref" in params and (
+            not isinstance(params["ref"], str) or not 0 < len(params["ref"]) <= 32
+        ):
+            raise ValueError("操作対象の参照が不正です")
+        if self.action_type in (
+            ActionType.TABLE_QUERY,
+            ActionType.TABLE_FILL,
+            ActionType.TABLE_TYPE,
+        ) and (not isinstance(params["sql"], str) or not 1 <= len(params["sql"]) <= 6000):
+            raise ValueError("SQLは6000文字までです")
+        if self.action_type == ActionType.TABLE_TYPE and (
+            not isinstance(params["separator"], str)
+            or len(params["separator"]) > 16
+            or any(ord(c) < 32 and c not in "\n\t" for c in params["separator"])
+        ):
+            raise ValueError("列の区切りが不正です")
+        if self.action_type == ActionType.TABLE_FILL and (
+            not isinstance(params["start"], str)
+            or not isinstance(params["formulas"], list)
+            or len(params["formulas"]) > 32
+            or any(not isinstance(f, str) or len(f) > 256 for f in params["formulas"])
+            or type(params["save"]) is not bool
+        ):
+            raise ValueError("表の入力指定が不正です")
+        if self.action_type == ActionType.CALC_WRITE:
+            validate_cells(params["cells"])
+            if type(params.get("save", False)) is not bool:
+                raise ValueError("saveは真偽値で指定してください")
         for name in ("text", "key", "reason"):
             if name in params:
                 validate_text(params[name], name)

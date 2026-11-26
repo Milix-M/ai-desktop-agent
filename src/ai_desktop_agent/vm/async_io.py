@@ -11,10 +11,10 @@ async def run_display_call[T](fn: Callable[..., T], *args, **kwargs) -> T:
     # Drain an in-flight operation before allowing another task to own this display.
     # Cancelling a to_thread await alone does not stop the underlying thread.
     worker = asyncio.create_task(asyncio.to_thread(partial(fn, *args, **kwargs)))
-    return await _wait_for_worker(worker)
+    return await wait_for_worker(worker)
 
 
-async def _wait_for_worker[T](worker: asyncio.Future[T]) -> T:
+async def wait_for_worker[T](worker: asyncio.Future[T]) -> T:
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -75,7 +75,7 @@ async def run_reserved_vm_creation[T](
     if slot.released:
         raise RuntimeError("creation slot was already released")
     worker = asyncio.get_running_loop().run_in_executor(_VM_CREATIONS, partial(fn, *args, **kwargs))
-    return await _wait_for_worker(worker)
+    return await wait_for_worker(worker)
 
 
 async def run_vm_creation[T](fn: Callable[..., T], *args, **kwargs) -> T:

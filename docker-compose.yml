@@ -10,6 +10,8 @@ services:
     build:
       context: ./desktop
       dockerfile: Dockerfile
+      args:
+        CUA_DRIVER_ENABLED: ${CUA_DRIVER_ENABLED:-false}
     environment:
       - VNC_GEOMETRY=1280x800
       - VNC_DEPTH=24

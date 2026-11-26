@@ -84,19 +84,28 @@ def create_server(api_url: str, access_key: str) -> MCPServer:
 
     @server.tool(annotations=types.ToolAnnotations(destructiveHint=True, idempotentHint=True))
     async def start_desktop_task(
-        instruction: Instruction, request_id: RequestId, vm_id: str | None = None
+        instruction: Instruction,
+        request_id: RequestId,
+        vm_id: str | None = None,
+        workspace: str | None = None,
     ) -> StartedTask:
         """Start work in a Desktop Agent VM. The task can click, type and modify data.
 
         Use a fresh request_id (such as a UUID) for each new task. Reuse the same ID
         and arguments if a submission fails or times out. A busy VM rejects new work.
+        For batch file access, set workspace to an existing Documents subfolder.
         Call get_desktop_task with the returned task_id to retrieve the result.
         """
         response = await request(
             "POST",
             "/tasks",
             headers={"Idempotency-Key": request_id},
-            json={"instruction": instruction, "vm_id": vm_id, "replace_running": False},
+            json={
+                "instruction": instruction,
+                "vm_id": vm_id,
+                "replace_running": False,
+                **({"workspace": workspace} if workspace is not None else {}),
+            },
         )
         return StartedTask(
             task_id=response["session_id"],

@@ -9,10 +9,11 @@ import hashlib
 import logging
 import time
 
-from ai_desktop_agent.actions.primitives import Action, ActionType
+from ai_desktop_agent.actions.primitives import CUA_ACTIONS, Action, ActionType
 from ai_desktop_agent.privacy import install_log_redaction, redact
 from ai_desktop_agent.vm.async_io import run_display_call
 from ai_desktop_agent.vm.base import DisplayBackend
+from ai_desktop_agent.vm.cua import CuaDesktop
 from ai_desktop_agent.vm.screenshot import Screenshot
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,11 @@ class ActionExecutor:
         self,
         backend: DisplayBackend,
     ) -> None:
+        self.cua: CuaDesktop | None = None
         self._backend = backend
         install_log_redaction()
         self.last_error = ""
+        self.calc_note = ""
 
     async def execute(self, action: Action) -> bool:
         """1つのアクションを実行する。
@@ -43,6 +46,7 @@ class ActionExecutor:
         """
         start = time.monotonic()
         self.last_error = ""
+        self.calc_note = ""
         try:
             await self._dispatch(action)
             duration = (time.monotonic() - start) * 1000
@@ -72,6 +76,32 @@ class ActionExecutor:
     async def _dispatch(self, action: Action) -> None:
         """ActionTypeに応じて適切なバックエンド操作を呼び出す。"""
         p = action.params or {}
+        if action.action_type in CUA_ACTIONS:
+            if self.cua is None:
+                raise RuntimeError("現在の環境では対象を参照できません")
+            if action.action_type in (ActionType.WORKSPACE_MOVE, ActionType.WORKSPACE_READ):
+                await self.cua.workspace_files(action.action_type.value, **p)
+                return
+            if action.action_type == ActionType.SOURCE_READ:
+                self.cua.read_source(**p)
+                return
+            if action.action_type == ActionType.TABLE_QUERY:
+                self.cua.query_table(**p)
+                return
+            if action.action_type == ActionType.TABLE_TYPE:
+                text = await self.cua.render_table(**p)
+                await run_display_call(self._backend.type_text, text)
+                return
+            if action.action_type == ActionType.TABLE_FILL:
+                self.calc_note = await self.cua.fill_query(**p)
+                return
+            if action.action_type == ActionType.CALC_WRITE:
+                self.calc_note = await self.cua.write_cells(
+                    p["ref"], p["cells"], save=p.get("save", False)
+                )
+                return
+            await self.cua.perform(action.action_type.value, p["ref"])
+            return
         match action.action_type:
             case ActionType.REQUEST_USER_INPUT:
                 raise RuntimeError("手動入力はタスクセッションで処理してください")

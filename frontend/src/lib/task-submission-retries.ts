@@ -34,7 +34,7 @@ export async function taskSubmissionRetry(attempt: PendingSubmission, forceNew =
   let fingerprint: string;
   const started = generation;
   try {
-    const payload = JSON.stringify([attempt.instruction, attempt.vmId, attempt.allowVmRestart]);
+    const payload = JSON.stringify([attempt.instruction, attempt.vmId, attempt.allowVmRestart, ...(attempt.workspace ? [attempt.workspace] : [])]);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
     fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
   } catch {

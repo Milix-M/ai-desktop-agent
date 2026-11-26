@@ -149,6 +149,23 @@ class TestAllActionTypesValid:
     VALID_PARAMS_MAP = {
         ActionType.MOUSE_MOVE: {"x": 0, "y": 0},
         ActionType.LEFT_CLICK: {"x": 0, "y": 0},
+        ActionType.ELEMENT_CLICK: {"ref": "1.1"},
+        ActionType.FOCUS_WINDOW: {"ref": "1.2"},
+        ActionType.TABLE_TYPE: {"ref": "1.2", "sql": "select 1", "separator": " | "},
+        ActionType.WORKSPACE_READ: {"ref": "1.2", "items": [{"source": "a"}]},
+        ActionType.WORKSPACE_MOVE: {"ref": "1.2", "items": [{"source": "a", "target": "b"}]},
+        ActionType.SOURCE_READ: {"ref": "1.2", "source": 1, "search": "", "offset": 0},
+        ActionType.NOTE_SAVE: {"title": "source", "text": "checked"},
+        ActionType.NOTE_READ: {"title": "source"},
+        ActionType.TABLE_QUERY: {"ref": "1.2", "sql": "select 1"},
+        ActionType.TABLE_FILL: {
+            "ref": "1.2",
+            "sql": "select 1",
+            "start": "A1",
+            "formulas": [],
+            "save": True,
+        },
+        ActionType.CALC_WRITE: {"ref": "1.2", "cells": [{"address": "B2", "value": "=1+1"}]},
         ActionType.RIGHT_CLICK: {"x": 0, "y": 0},
         ActionType.DOUBLE_CLICK: {"x": 0, "y": 0},
         ActionType.MIDDLE_CLICK: {"x": 0, "y": 0},
@@ -174,3 +191,24 @@ class TestAllActionTypesValid:
         action = Action(action_type=action_type, params=params)
         assert action.action_type == action_type
         assert action.description  # 空でない説明が自動生成される
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [],
+        [{"address": "XFE1", "value": "x"}],
+        [{"address": "A1048577", "value": "x"}],
+        [{"address": "a1", "value": "x"}],
+        [{"address": "A1", "value": "x\ty"}],
+        [{"address": "A1", "value": "x\ny"}],
+        [{"address": "A1", "value": "x" * 257}],
+        [{"address": "A1", "value": "x"}, {"address": "A1", "value": "y"}],
+        [{"address": "A1", "value": 2}],
+        [{"address": "A1", "value": "x", "extra": 1}],
+        [{"address": f"B{i}", "value": "a"} for i in range(1, 34)],
+    ],
+)
+def test_calc_batch_validates_all_cells_before_input(cells):
+    with pytest.raises(ValueError):
+        Action(ActionType.CALC_WRITE, {"ref": "3.1", "cells": cells})

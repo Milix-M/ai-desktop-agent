@@ -1,0 +1,22 @@
+#!/bin/sh
+# Install the upstream Linux binary in the desktop user's persistent home.
+set -eu
+version=0.54.0
+case "$(uname -m)" in
+    aarch64) arch=arm64; digest=5f9699f4933944dd735083bbc86d59a98c6574dbb220a85640aa2484590a11bf ;;
+    x86_64) arch=x86_64; digest=53b38ee3a5aeed39bdcd3acee0bea98a0eed3315e9df2d8af73345680c49868e ;;
+    *) echo 'Cua Driver requires Linux arm64 or x86_64.' >&2; exit 1 ;;
+esac
+parent="$HOME/.local/share/ai-desktop-agent"
+mkdir -p "$parent"
+stage=$(mktemp -d "$parent/.cua-driver.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+asset="cua-driver-rs-$version-linux-$arch-binary.tar.gz"
+curl --fail --silent --show-error --location --retry 2 --max-time 120 \
+    "https://github.com/trycua/cua/releases/download/cua-driver-rs-v$version/$asset" -o "$stage/archive"
+(cd "$stage" && echo "$digest  archive" | sha256sum --check)
+tar -xOzf "$stage/archive" cua-driver > "$stage/cua-driver"
+chmod 755 "$stage/cua-driver"
+install -m 644 /usr/share/doc/ai-desktop-agent/Cua-Driver-MIT.txt "$parent/Cua-Driver-MIT.txt"
+mv -f "$stage/cua-driver" "$parent/cua-driver-$version"
+echo "Installed Cua Driver $version in $parent"

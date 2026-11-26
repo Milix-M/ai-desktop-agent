@@ -6,28 +6,34 @@ import { forgetTaskSubmission, taskSubmissionRetry } from "@/lib/task-submission
 import type { PendingSubmission } from "@/lib/types";
 
 interface Props {
-  onSubmit: (instruction: string, allowVmRestart: boolean, requestId: string) => Promise<void>;
+  onSubmit: (instruction: string, allowVmRestart: boolean, requestId: string, workspace?: string) => Promise<void>;
   onSubmitStart?: (instruction: string) => void;
   disabled: boolean;
   initialValue?: string;
+  allowWorkspace?: boolean;
   onDraftChange?: (value: string) => void;
   vmId?: string | null;
   submission?: { current: PendingSubmission | null };
 }
 
-export default function InstructionInput({ onSubmit, onSubmitStart, disabled, initialValue = "", onDraftChange, vmId = null, submission }: Props) {
+export default function InstructionInput({ onSubmit, onSubmitStart, disabled, initialValue = "", onDraftChange, vmId = null, submission, allowWorkspace = false }: Props) {
   const localSubmission = useRef<PendingSubmission | null>(null);
   const attemptRef = submission ?? localSubmission;
   const [value, setValue] = useState(initialValue);
   const [allowVmRestart, setAllowVmRestart] = useState(() =>
     attemptRef.current?.instruction === initialValue.trim() ? attemptRef.current.allowVmRestart : false);
+  const [folderChoice, setFolderChoice] = useState({ vmId: attemptRef.current?.vmId ?? vmId, path: attemptRef.current?.workspace ?? "" });
+  const folder = folderChoice.vmId === vmId ? folderChoice.path : "";
+  const setFolder = (path: string) => setFolderChoice({ vmId, path });
+  const workspace = allowWorkspace ? folder.trim() || undefined : undefined;
   const [submitting, setSubmitting] = useState(false);
   const pendingRef = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const unavailable = disabled || submitting;
   const sameAttempt = attemptRef.current?.instruction === value.trim() &&
-    attemptRef.current?.vmId === vmId && attemptRef.current?.allowVmRestart === allowVmRestart;
+    attemptRef.current?.vmId === vmId && attemptRef.current?.allowVmRestart === allowVmRestart &&
+    attemptRef.current?.workspace === workspace;
   const retryAsNew = sameAttempt && attemptRef.current?.gone;
 
   async function handleSubmit() {
@@ -36,7 +42,7 @@ export default function InstructionInput({ onSubmit, onSubmitStart, disabled, in
     if (!sameAttempt || retryAsNew) {
       const bytes = crypto.getRandomValues(new Uint8Array(16));
       attemptRef.current = {
-        instruction: trimmed, vmId, allowVmRestart,
+        instruction: trimmed, vmId, allowVmRestart, workspace,
         requestId: Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
       };
     }
@@ -54,11 +60,13 @@ export default function InstructionInput({ onSubmit, onSubmitStart, disabled, in
         // A different mounted input has taken ownership while hashing this submission.
         return;
       }
-      await onSubmit(trimmed, allowVmRestart, attempt.requestId);
+      if (workspace) await onSubmit(trimmed, allowVmRestart, attempt.requestId, workspace);
+      else await onSubmit(trimmed, allowVmRestart, attempt.requestId);
       forgetTaskSubmission(attempt.requestId);
       if (mounted.current && attemptRef.current?.requestId === attempt.requestId) {
         attemptRef.current = null;
         setValue("");
+        setFolder("");
         onDraftChange?.("");
       }
     } catch (error) {
@@ -103,6 +111,13 @@ export default function InstructionInput({ onSubmit, onSubmitStart, disabled, in
       >
         {submitting ? "処理中..." : retryAsNew ? "新しいタスクとして実行" : sameAttempt ? "再送" : "実行"}
       </button>
+      {allowWorkspace && <details>
+        <summary>ファイルの一括操作</summary>
+        <label>Documents 内の対象フォルダー
+          <input value={folder} onChange={(event) => setFolder(event.target.value)}
+            maxLength={500} disabled={unavailable} placeholder="例: Projects/April" />
+        </label>
+      </details>}
       <label className="allow-restart">
         <input
           type="checkbox"

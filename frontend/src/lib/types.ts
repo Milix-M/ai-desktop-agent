@@ -8,6 +8,7 @@ export interface PendingSubmission {
   instruction: string;
   vmId: string | null;
   allowVmRestart: boolean;
+  workspace?: string;
   gone?: boolean;
 }
 
@@ -42,6 +43,7 @@ export interface VmInfo {
   ws_port: number;
   vnc_host: string;
   managed: boolean;
+  workspace_tools?: boolean;
   kind?: string; // qemu | container | android（旧APIでは欠落）
   adb_port?: number; // 旧android（Redroid）互換。現行は未使用
 }
