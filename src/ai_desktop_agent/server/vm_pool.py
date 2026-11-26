@@ -56,6 +56,7 @@ from ai_desktop_agent.server.vm_locks import (  # noqa: E402
 from ai_desktop_agent.server.workspaces import HOME, WorkspaceVolumes, identifier  # noqa: E402
 from ai_desktop_agent.validation import validate_text  # noqa: E402
 
+LABEL_SCHEDULE_RECEIPT = "ai-desktop-agent.schedule-creation"
 LABEL_WS_FOR = "ai-desktop-agent.ws-for"
 LABEL_DISK_COPY = "ai-desktop-agent.disk-copy-for"
 LABEL_KIND = "ai-desktop-agent.kind"
@@ -365,7 +366,12 @@ class VmPool(DockerClientOwner):
     @docker_operation
     @serialize_creation
     def create_vm(
-        self, name: str | None = None, kind: str = KIND_QEMU, *, vm_id: str | None = None
+        self,
+        name: str | None = None,
+        kind: str = KIND_QEMU,
+        *,
+        vm_id: str | None = None,
+        schedule_receipt: str | None = None,
     ) -> VmInfo:
         """新しい専用環境を作成する。公開ポートと中継は作らない。
 
@@ -428,6 +434,9 @@ class VmPool(DockerClientOwner):
                 vm_id
             ),
         }
+        if schedule_receipt is not None:
+            common_labels[LABEL_SCHEDULE_RECEIPT] = schedule_receipt
+            allocation["schedule_receipt"] = schedule_receipt
         if kind == KIND_CONTAINER:
             allocation["home_volume"] = WorkspaceVolumes(
                 docker, self._project_name(docker)
@@ -702,6 +711,35 @@ class VmPool(DockerClientOwner):
         if include_relay:
             return list(all_targets)
         return [c for c in all_targets if LABEL_WS_FOR not in self._labels(c)]
+
+    @docker_operation
+    @serialize_environment
+    def get_scheduled_instance(self, vm_id: str, receipt: str) -> VmInstance | None:
+        target = self._primary_container(vm_id, self._docker())
+        if target is None or self._labels(target).get(LABEL_SCHEDULE_RECEIPT) != receipt:
+            return None
+        info = self._from_container(target, vm_id, managed=True)
+        if info is None or not isinstance(target.id, str) or not target.id:
+            raise DockerUnavailableError("予約した環境の識別子を確認できません")
+        return VmInstance(info, target.id)
+
+    @docker_operation
+    @serialize_environment
+    def remove_scheduled_vm(self, vm_id: str, instance_id: str | None, receipt: str):
+        # A failed creation may leave only volumes or disk state. Its receipt must match
+        # even when there is no longer a container to inspect.
+        state = self._load_state(vm_id)
+        if not state or state.get("schedule_receipt") != receipt:
+            return
+        targets = self._dynamic_containers(self._docker(), vm_id)
+        if any(
+            self._labels(c).get(LABEL_SCHEDULE_RECEIPT) != receipt
+            or (instance_id and c.id != instance_id)
+            for c in targets
+        ):
+            return
+        if not self.remove_vm(vm_id):
+            raise DockerUnavailableError("予約した環境の削除を確認できません")
 
     @docker_operation
     @serialize_environment

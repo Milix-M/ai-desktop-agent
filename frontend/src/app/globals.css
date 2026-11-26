@@ -830,3 +830,23 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.schedule-panel form, .schedule-panel label, .schedule-item {
+  display: grid;
+  gap: 6px;
+}
+.schedule-panel form { gap: 10px; }
+.schedule-panel input, .schedule-panel select {
+  min-width: 0;
+  padding: 6px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.schedule-item {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}

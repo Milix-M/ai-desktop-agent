@@ -1,4 +1,4 @@
-import type { TaskAction, TaskDetail, TaskHistoryItem, VmInfo, VmStatus } from "./types";
+import type { TaskAction, TaskDetail, TaskSchedule, TaskHistoryItem, VmInfo, VmStatus } from "./types";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -86,4 +86,22 @@ export function parseLogin(value: unknown): { authenticated: boolean } {
 export function parseAcknowledgement(value: unknown, status: string): { status: string } {
   if (!record(value) || value.status !== status) throw new Error("操作の応答が不正です。状態を確認してください");
   return value as { status: string };
+}
+
+function taskSchedule(value: unknown): value is TaskSchedule {
+  return record(value) && identifier(value.id) &&
+    ((identifier(value.vm_id) && value.vm_kind == null) ||
+      (value.vm_id === null && (value.vm_kind === "container" || value.vm_kind === "qemu" || value.vm_kind === "android"))) &&
+    text(value.instruction) && optional(value.preparing, bool) &&
+    counter(value.run_at) && (value.interval === 0 || value.interval === 86400 || value.interval === 604800) &&
+    (value.next_run === null || counter(value.next_run)) && nullableId(value.last_task_id) && nullableText(value.last_error);
+}
+
+export function parseSchedules(value: unknown) {
+  return parseList(value, taskSchedule, "予約一覧の応答が不正です");
+}
+
+export function parseSchedule(value: unknown, expectedId: string) {
+  if (!taskSchedule(value) || value.id !== expectedId) throw new Error("予約の受付結果を確認できません");
+  return value;
 }
