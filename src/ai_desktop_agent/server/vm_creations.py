@@ -54,6 +54,7 @@ class CreationRecord(BaseModel):
 
     version: Literal[1] = 1
     id: str = Field(pattern=r"^creation-[0-9a-f]{64}$")
+    disposable: bool = False
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     vm_id: str
     name: str | None = Field(max_length=128)
@@ -105,7 +106,7 @@ class CreationRecord(BaseModel):
         return self
 
     def public(self) -> dict:
-        return self.model_dump(mode="json", exclude={"fingerprint", "version"})
+        return self.model_dump(mode="json", exclude={"fingerprint", "version", "disposable"})
 
     def updated(self, **changes) -> CreationRecord:
         return self.model_copy(update={**changes, "updated_at": max(time.time(), self.updated_at)})
@@ -264,11 +265,22 @@ class VmCreationService:
                         raise StorageError("保存された作成待ちの件数が上限を超えています")
                     queued.append(record)
                     continue
-                existing = await run_vm_call(self.pool.get_vm, record.vm_id)
+                if record.disposable:
+                    instance = await run_vm_call(
+                        self.pool.get_scheduled_instance, record.vm_id, record.id
+                    )
+                    existing = instance.info if instance else None
+                else:
+                    existing = await run_vm_call(self.pool.get_vm, record.vm_id)
                 if existing is not None:
                     recovered = record.updated(state="succeeded", result=existing)
                 else:
-                    await run_vm_call(self.pool.remove_vm, record.vm_id)
+                    if record.disposable:
+                        await run_vm_call(
+                            self.pool.remove_scheduled_vm, record.vm_id, None, record.id
+                        )
+                    else:
+                        await run_vm_call(self.pool.remove_vm, record.vm_id)
                     recovered = self._failed(
                         record,
                         "バックエンドの再起動で作成が中断しました。環境の状態を確認してください",
@@ -294,9 +306,11 @@ class VmCreationService:
         self._slots[record.id] = slot
         self._queue.put_nowait(record)
 
-    async def submit(self, key: str, name: str | None, kind: str) -> CreationRecord:
+    async def submit(
+        self, key: str, name: str | None, kind: str, *, disposable: bool = False
+    ) -> CreationRecord:
         # The service owns acceptance through publication even if the HTTP caller disconnects.
-        task = asyncio.create_task(self._submit(key, name, kind))
+        task = asyncio.create_task(self._submit(key, name, kind, disposable=disposable))
         self._submissions.add(task)
 
         def done(finished):
@@ -306,7 +320,9 @@ class VmCreationService:
         task.add_done_callback(done)
         return await asyncio.shield(task)
 
-    async def _submit(self, key: str, name: str | None, kind: str) -> CreationRecord:
+    async def _submit(
+        self, key: str, name: str | None, kind: str, *, disposable: bool = False
+    ) -> CreationRecord:
         if name is not None:
             validate_text(name, "環境名")
         if (
@@ -324,7 +340,7 @@ class VmCreationService:
             fingerprint = _fingerprint(name, kind)
             existing = await run_display_call(self.store.read, job_id)
             if existing is not None:
-                if existing.fingerprint != fingerprint:
+                if existing.fingerprint != fingerprint or existing.disposable != disposable:
                     raise CreationConflictError("同じ受付キーで作成内容を変更できません")
                 # A failed directory fsync may have published a queued receipt before the
                 # caller received an error. It is safe to schedule it under this owner.
@@ -336,6 +352,7 @@ class VmCreationService:
             now = time.time()
             record = CreationRecord(
                 id=job_id,
+                disposable=disposable,
                 fingerprint=fingerprint,
                 vm_id=f"{ID_PREFIX[kind]}-{digest[:24]}",
                 name=name,
@@ -392,6 +409,7 @@ class VmCreationService:
                 name=record.name,
                 kind=record.kind,
                 vm_id=record.vm_id,
+                **({"schedule_receipt": record.id} if record.disposable else {}),
             )
             finished = running.updated(state="succeeded", result=result)
         except KvmUnavailableError as error:

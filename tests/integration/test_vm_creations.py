@@ -250,3 +250,35 @@ async def test_duplicate_backend_cannot_rewrite_live_history_or_attach_to_deskto
         assert restored["state"] == "interrupted"
         assert restored["success"] is False
         assert restored["instruction"] == before["instruction"]
+
+
+async def test_disposable_schedule_removes_desktop_and_home_but_keeps_result(project):
+    import time
+
+    async with project.api() as api:
+        response = await api.post(
+            "/schedules",
+            json={
+                "instruction": "画面を確認",
+                "vm_kind": "container",
+                "run_at": int(time.time()) + 2,
+            },
+        )
+        assert response.status_code == 201, response.text
+        async with asyncio.timeout(180):
+            while True:
+                [schedule] = (await api.get("/schedules")).json()
+                assert not schedule["last_error"], schedule
+                if schedule["last_task_id"]:
+                    task = (await api.get("/tasks/" + schedule["last_task_id"])).json()
+                    if task["state"] in {"completed", "failed"} and not project.targets(
+                        task["vm_id"]
+                    ):
+                        break
+                await asyncio.sleep(0.5)
+            while project.client.volumes.list(
+                filters={"label": f"{LABEL_PROJECT}={project.project}"}
+            ):
+                await asyncio.sleep(0.2)
+        assert task["state"] == "completed", task
+        assert schedule["next_run"] is None
